@@ -9,7 +9,8 @@ Group: Run.
 | Parameter | Type | Required | Default |
 |---|---|---|---|
 | `solver` | string | yes |  |
-| `generator_script` | string | yes |  |
+| `generator_script` | string | no | `''` |
+| `generator_path` | string | no | `''` |
 | `job_name` | string | no | `''` |
 | `np` | integer | no | `1` |
 | `critic_approved` | boolean | no | `False` |
@@ -43,6 +44,9 @@ The text below is the tool's own description, exactly as the AI model receives i
     Args:
         solver: Backend name (fourc, dealii, kratos)
         generator_script: Python script that creates the input file
+        generator_path: instead of generator_script, the name of a file in
+            the run folder holding it. Use it to run a generator the critic
+            reviewed: what runs is then exactly the reviewed text.
         job_name: Optional job directory name
         np: MPI processes (default 1)
         critic_approved: recorded, not trusted. The result is verified only

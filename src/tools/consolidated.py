@@ -286,12 +286,106 @@ def _critic_state(solver: str, setup_text: str, *, token: str = "",
     return False, "no critic review is on record for this setup"
 
 
+# A FILE NAME IS NOT A SETUP. Measured 2026-09-30 in the web interface: 14 of the 15 reviews
+# filed on one run passed the script's FILE NAME as `setup` ("cylinder_final.py"). Each was
+# accepted and bound to the digest of those few characters, which no run can match, so every
+# run came back "the input changed after it was reviewed": a review bound to nothing, and a
+# diagnosis that was not true. A name of a file in the run folder now stands for the file's
+# text, and a name with no such file is refused before anything is recorded.
+_A_FILE_NAME = re.compile(r"^[\w.~/+-]+\.[A-Za-z0-9]{1,10}$")
+_SETUP_FILE_LIMIT = 20_000_000
+
+
+def _text_of_named_file(raw: str) -> tuple[str | None, str | None]:
+    """(text, error) when `raw` names a file instead of holding text; (None, None) when it
+    is text, to be used as it is."""
+    s = (raw or "").strip()
+    if not s or "\n" in s or len(s) > 400:
+        return None, None
+    from tools.result_audit import resolve_under_cell
+    path = resolve_under_cell(s)
+    try:
+        is_file = path.is_file()
+    except OSError:
+        is_file = False
+    if not is_file:
+        if _A_FILE_NAME.match(s):
+            return None, (f"`{s}` names a file, and no such file is in this run's folder. Pass "
+                          "the name of a file that exists, or the exact text that will run.")
+        return None, None
+    try:
+        if path.stat().st_size > _SETUP_FILE_LIMIT:
+            return None, f"`{s}` is larger than {_SETUP_FILE_LIMIT:,} bytes; pass a smaller file"
+        return path.read_text(encoding="utf-8"), None
+    except UnicodeDecodeError:
+        return None, f"`{s}` is not a text file, so it cannot be a script or a deck"
+    except OSError as exc:
+        return None, f"`{s}` could not be read: {exc}"
+
+
+def _run_text(text_arg: str, path_arg: str, text_name: str, path_name: str):
+    """(text, error) for a run tool given its input as text or as a file in the run folder.
+
+    Running the file is how a run matches the review of that file: the review is bound to the
+    file's text, and a copy retyped into the call is a different setup wherever it differs."""
+    if path_arg and text_arg:
+        return None, f"pass {text_name} or {path_name}, not both"
+    if not path_arg:
+        if not text_arg:
+            return None, (f"pass {text_name} (the text to run) or {path_name} (the name of a file "
+                          f"in the run folder that holds it)")
+        return text_arg, None
+    text, err = _text_of_named_file(path_arg)
+    if err:
+        return None, err
+    if text is None:
+        return None, f"{path_name} names no file in the run folder: `{path_arg.strip()[:120]}`"
+    return text, None
+
+
+def _text_difference(records, setup_text: str) -> str:
+    """Where a script differs from the closest review on record: its first changed line.
+
+    Measured 2026-09-29/30 in the web interface: a model retyped a reviewed script into the
+    run call and turned its time-derivative term `(a0 / dt) * ufl.inner(u, v)` into
+    `(a0 / dt) * ufl.inner(ufl.grad(u), ufl.grad(v))`. The run was told only that "the input
+    changed after it was reviewed", and it reported a drag coefficient of 53,288 at every
+    step. The line that changed is the caller's own text, so naming it gives nothing away."""
+    import difflib
+    now = (setup_text or "").splitlines()
+    best = None
+    for rec in records:
+        was = (getattr(rec, "setup_text", "") or "").splitlines()
+        if not was:
+            continue
+        ops = [o for o in difflib.SequenceMatcher(a=was, b=now, autojunk=False).get_opcodes()
+               if o[0] != "equal"]
+        changed = sum(max(i2 - i1, j2 - j1) for _t, i1, i2, j1, j2 in ops)
+        if ops and (best is None or changed < best[0]):
+            best = (changed, was, ops[0])
+    if best is None:
+        return ""
+    changed, was, (_t, i1, _i2, j1, _j2) = best
+
+    def shown(lines, k):
+        if k >= len(lines):
+            return "(nothing: the text ends before this line)"
+        t = lines[k].strip() or "(an empty line)"
+        return t if len(t) <= 140 else t[:140] + " …"
+    return (f" — the closest review on record is of a text that differs from this run's first at "
+            f"its line {j1 + 1}: reviewed `{shown(was, i1)}`, this run `{shown(now, j1)}` "
+            f"({changed} line(s) differ). Run the reviewed file itself (input_path / "
+            f"generator_path) rather than a copy of it.")
+
+
 def _setup_difference(records, setup_text: str) -> str:
     """Which keys differ between the closest review on record and this call."""
     try:
         now = json.loads(setup_text)
     except (TypeError, ValueError):
-        return ""
+        return _text_difference(records, setup_text)
+    if not isinstance(now, dict):
+        return _text_difference(records, setup_text)
     best, best_diff = None, None
     for rec in records:
         try:
@@ -1514,8 +1608,10 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
             "is not zero everywhere. They do not check that the physics is right. Spawn a "
             "critic to challenge the parameters, units, discretisation, problem "
             "statement and boundary conditions and to cross-check against "
-            "literature/benchmarks, then call submit_critic_review with what it "
-            "found and re-run. Asserting critic_approved=True does not work: "
+            "literature/benchmarks, and give it the file to review: the critic files its "
+            "own verdict with submit_critic_review, naming that file. Then run the file "
+            "unchanged (input_path / generator_path). A review you write yourself is not a "
+            "review. Asserting critic_approved=True does not work: "
             "openPASO looks the review up rather than taking your word for it.")
     else:
         result["trustworthy_result"] = True
@@ -4782,10 +4878,14 @@ def register_consolidated_tools(mcp: FastMCP):
         critic_approved=True without a matching review here leaves the result
         NOT VERIFIED, whatever else the run does.
 
-        The workflow is: spawn a sub-agent as an independent critic; have it
-        challenge the parameters, units, discretisation, problem statement and
-        boundary conditions, and cross-check against literature and benchmarks;
-        then submit what it actually found here; then run.
+        The workflow is: the agent doing the work spawns a sub-agent as an
+        independent critic and gives it the file to review; the critic
+        challenges the parameters, units, discretisation, problem statement and
+        boundary conditions, cross-checks against literature and benchmarks,
+        and CALLS THIS TOOL ITSELF with its verdict; the working agent then runs
+        exactly the reviewed file. A review filed by the agent whose work it
+        reviews is not a review, and an interface that can see who filed it
+        refuses one.
 
         The review is bound to the setup by digest, so a setup edited after
         review no longer matches and must be reviewed again. That is deliberate:
@@ -4805,8 +4905,11 @@ def register_consolidated_tools(mcp: FastMCP):
                 is required; an empty approval is indistinguishable from no
                 review and is refused.
             setup: for run_simulation / run_with_generator /
-                verify_mesh_independence — the EXACT deck text you will run
-                (input_content, generator_script, or input_template).
+                verify_mesh_independence — the EXACT deck text that will run
+                (input_content, generator_script, or input_template), or the
+                NAME of the file in the run folder that holds it: the review is
+                then bound to that file's text as it is now, and a run of that
+                file (input_path / generator_path) matches it.
             coupling_args: for the coupling tools instead of `setup` — a JSON
                 object of the arguments you will pass. Keys per tool:
                 coupled_solve: problem, solver_a, solver_b, nx, ny, max_iter,
@@ -4829,6 +4932,7 @@ def register_consolidated_tools(mcp: FastMCP):
             run_with_generator makes the review single-use and binds it to that
             job; omitting it still works, since the deck is matched by digest.
         """
+        _named_file = ""
         if bool(setup) == bool(coupling_args):
             # Say which mistake was made and what to send instead. The old
             # message stated the rule without saying which side was wrong, so
@@ -4918,7 +5022,13 @@ def register_consolidated_tools(mcp: FastMCP):
             # participant-script fingerprints are part of both digests.
             setup_text = _coupling_setup_text(**parsed)
         else:
-            setup_text = setup
+            _named_text, _named_err = _text_of_named_file(setup)
+            if _named_err:
+                return json.dumps({"accepted": False, "error": _named_err,
+                                   "findings_were_not_lost": True}, indent=2)
+            setup_text = setup if _named_text is None else _named_text
+            if _named_text is not None:
+                _named_file = setup.strip()
         # A REVIEW THAT REJECTS THE SETUP IS NOT A REVIEW OF RECORD FOR IT. Measured
         # on one set of coupled runs: two orchestrators filed their critics' verdicts
         # "REJECTED" and "NOT APPROVED", both were accepted, and both runs used the
@@ -4957,7 +5067,7 @@ def register_consolidated_tools(mcp: FastMCP):
                               for _f, _h in (_files or {}).items() if _h == "absent")
         except (ValueError, TypeError, AttributeError):
             _missing = []
-        return json.dumps({
+        reply = {
             "accepted": True,
             "critic_token": rec.token,
             "solver": solver,
@@ -4971,10 +5081,20 @@ def register_consolidated_tools(mcp: FastMCP):
                         f"run with the real paths is a different setup. A shell "
                         f"expression such as $(pwd) is not expanded here; name the "
                         f"absolute path." if _missing else "")),
-        }, indent=2)
+        }
+        if _named_file:
+            reply["bound_to"] = {"file": _named_file, "characters": len(setup_text),
+                                 "lines": len(setup_text.splitlines())}
+            reply["note"] = (f"This review is on record for the text of {_named_file} as it is "
+                             f"now ({len(setup_text):,} characters). Run that file unchanged -- "
+                             f"run_simulation(solver=..., input_path='{_named_file}') or "
+                             f"run_with_generator(solver=..., generator_path='{_named_file}') -- "
+                             f"and the run matches it. Editing the file voids the review.")
+        return json.dumps(reply, indent=2)
 
     @mcp.tool()
-    async def run_with_generator(solver: str, generator_script: str,
+    async def run_with_generator(solver: str, generator_script: str = "",
+                                  generator_path: str = "",
                                   job_name: str = "", np: int = 1,
                                   critic_approved: bool = False,
                                   critic_token: str = "",
@@ -5000,6 +5120,9 @@ def register_consolidated_tools(mcp: FastMCP):
         Args:
             solver: Backend name (fourc, dealii, kratos)
             generator_script: Python script that creates the input file
+            generator_path: instead of generator_script, the name of a file in
+                the run folder holding it. Use it to run a generator the critic
+                reviewed: what runs is then exactly the reviewed text.
             job_name: Optional job directory name
             np: MPI processes (default 1)
             critic_approved: recorded, not trusted. The result is verified only
@@ -5022,6 +5145,11 @@ def register_consolidated_tools(mcp: FastMCP):
         import subprocess
         import sys
 
+        generator_script, _in_err = _run_text(generator_script, generator_path,
+                                              "generator_script", "generator_path")
+        if _in_err:
+            return json.dumps({"status": "failed", "phase": "input", "error": _in_err,
+                               "trustworthy_result": False}, indent=2)
         _journal = _get_journal()
         _snap = _make_input_snapshot(generator_script, solver, {"type": "generator"})
         _journal.record("tool_call", "run_with_generator", solver=solver,
@@ -5278,7 +5406,8 @@ def register_consolidated_tools(mcp: FastMCP):
         return head + f"{len(findings)} finding(s), fix every one before running:\n" + "\n".join(f"- {f}" for f in findings)
 
     @mcp.tool()
-    async def run_simulation(solver: str, input_content: str,
+    async def run_simulation(solver: str, input_content: str = "",
+                             input_path: str = "",
                              job_name: str = "", np: int = 1,
                              critic_approved: bool = False,
                              critic_token: str = "",
@@ -5296,6 +5425,9 @@ def register_consolidated_tools(mcp: FastMCP):
         Args:
             solver: Backend name (best for: fenics, ngsolve, skfem, dune)
             input_content: The input content (Python script / YAML / C++ / XML)
+            input_path: instead of input_content, the name of a file in the run
+                folder whose text is the input. Use it to run a file the critic
+                reviewed: what runs is then exactly the reviewed text.
             job_name: Optional job name
             np: MPI processes
             critic_approved: recorded, not trusted. The result is verified only
@@ -5315,6 +5447,11 @@ def register_consolidated_tools(mcp: FastMCP):
                 diffusion on simplex meshes; anything else is reported as not
                 checked, never as passed.
         """
+        input_content, _in_err = _run_text(input_content, input_path,
+                                           "input_content", "input_path")
+        if _in_err:
+            return json.dumps({"status": "failed", "phase": "input", "error": _in_err,
+                               "trustworthy_result": False}, indent=2)
         _journal = _get_journal()
         _snap = _make_input_snapshot(input_content, solver)
         _journal.record("tool_call", "run_simulation", solver=solver,

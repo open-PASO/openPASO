@@ -166,7 +166,11 @@ function argLine(tool: string, a?: Record<string, unknown>): string {
     case 'discover': case 'knowledge': case 'examples': case 'web_search': case 'WebSearch': out = s('query'); break
     case 'prepare_simulation': out = [s('solver'), s('physics')].filter(Boolean).join(' · '); break
     default: {
-      const k = Object.keys(a).filter((x) => typeof a[x] !== 'object')
+      // critic_approved and critic_token are what the model claimed, and openPASO does not take
+      // them as evidence: shown in the step line they read as "the critic approved" beside a
+      // verdict that says no review matches
+      const k = Object.keys(a).filter((x) => typeof a[x] !== 'object'
+                                              && x !== 'critic_approved' && x !== 'critic_token')
       out = k.map((x) => `${x}=${String(a[x])}`).join('  ')
     }
   }
@@ -224,7 +228,7 @@ type Tally = { tools: number; shell: number; verified: boolean; unverified: bool
 type Entry =
   | { kind: 'turn' }
   | { kind: 'you'; text: string; files: string[] }
-  | { kind: 'thought'; text: string; final: boolean; outcome?: string }
+  | { kind: 'thought'; text: string; final: boolean; outcome?: string; typed?: string[] }
   | Call
   | { kind: 'aside'; id: string; role: string; task: string; returned: boolean }
   | { kind: 'verdict'; role: string; text: string; reached: boolean }
@@ -239,6 +243,24 @@ function reviewWord(text: string): 'approved' | 'rejected' | null {
   const t = text || ''
   const m = t.match(/VERDICT\W{0,4}(APPROVED|REJECTED)/i) || t.match(/^\W{0,4}(APPROVED|REJECTED)\b/im)
   return m ? (m[1].toUpperCase() === 'APPROVED' ? 'approved' : 'rejected') : null
+}
+
+/** Steps a reply wrote out as text ("[step] tool {...}" then "→ result"). None of them ran.
+    The server's rule (webui/outcome.py typed_steps), mirrored for records it did not stamp. */
+export function typedSteps(text: string): string[] {
+  return Array.from((text || '').matchAll(/^\[(?:[\w/-]+ )?step\] ([\w.-]+)/gm), m => m[1])
+}
+
+/** Was a filed review put on record? Refused filings (by openPASO, or by this interface, which
+    lets only the critic file one) recorded nothing. */
+function reviewReply(raw: string): { accepted: boolean; error: string } {
+  const t = readable(raw || '')
+  try {
+    const j = JSON.parse(t)
+    return { accepted: j?.accepted === true, error: String(j?.error || '') }
+  } catch {
+    return { accepted: /"accepted":\s*true/.test(t), error: '' }
+  }
 }
 
 /** Did a sub-agent actually reach a conclusion, or only stop? */
@@ -315,11 +337,13 @@ function build(events: Ev[], live: boolean): Entry[] {
           criticSpoke = true
           criticSaid = reviewWord(readable(e.result || ''))
         }
-        if (c.tool === 'submit_critic_review' && c.agent === 'main') {
+        if (c.tool === 'submit_critic_review' && c.agent === 'main' && reviewReply(e.result || '').accepted) {
           // Measured 2026-09-29: the critic came back REJECTED, and the model then filed
           // "VERDICT: APPROVED" five times, rewriting its script in between, with no critic
           // run after the first. A filed review is the critic's only when a critic came back
-          // since the last one was filed, and only if it does not say the opposite.
+          // since the last one was filed, and only if it does not say the opposite. (Since
+          // 2026-09-30 this interface refuses the main agent's filing; this is for records
+          // written before, and for Claude Code runs, whose calls it does not carry.)
           const filed = reviewWord(String(c.args?.findings ?? ''))
           if (!criticSpoke) c.selfReview = 'no critic'
           else if (filed === 'approved' && criticSaid === 'rejected') c.selfReview = 'overrules the critic'
@@ -347,6 +371,9 @@ function build(events: Ev[], live: boolean): Entry[] {
           if (v.verdict === 'verified') { c.state = 'done'; tally.verified = true }
           else if (v.verdict === 'unverified') { c.state = 'unverified'; tally.unverified = true }
           else { c.state = 'failed'; tally.solverFailed = tally.solverFailed ?? v.reason }
+        } else if (c.tool === 'submit_critic_review' && !reviewReply(c.result).accepted) {
+          c.state = 'failed'
+          c.detail = cut(tidy('not recorded: ' + (reviewReply(c.result).error || 'the review was refused')), 160)
         } else {
           const bad = troubleOf(c.result)
           c.state = bad === 'you skipped this step' ? 'skipped' : bad ? 'failed' : 'done'
@@ -436,7 +463,11 @@ function build(events: Ev[], live: boolean): Entry[] {
           for (let i = out.length - 1; i >= 0; i--) {
             const x = out[i]
             if (x.kind === 'call' || x.kind === 'turn' || x.kind === 'you' || x.kind === 'verdict') break
-            if (x.kind === 'thought') { x.final = true; x.outcome = outcome; break }
+            if (x.kind === 'thought') {
+              x.final = true; x.outcome = outcome
+              x.typed = e.typed_steps && e.typed_steps.length ? e.typed_steps : typedSteps(x.text)
+              break
+            }
           }
         }
         out.push({ kind: 'end', outcome, tally: { ...tally },
@@ -713,6 +744,14 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
                         {e.outcome === 'unverified'
                           ? 'a solver ran, but openPASO did not verify its result'
                           : "no solver result in this turn — any numbers below are the model's own"}
+                      </span>
+                    )}
+                    {e.typed && e.typed.length > 0 && (
+                      // a step typed into the reply looks like one that ran, result and all
+                      <span className="text-[13px] text-coral basis-full">
+                        {e.typed.length === 1
+                          ? `This turn wrote a ${e.typed[0]} step out as text. It never ran; the result shown with it came from no tool.`
+                          : `This turn wrote ${e.typed.length} steps out as text (${Array.from(new Set(e.typed)).join(', ')}). None of them ran; the results shown with them came from no tool.`}
                       </span>
                     )}
                   </div>

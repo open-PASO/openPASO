@@ -159,6 +159,94 @@ def set_search_scope(name: str) -> None:
         pass
 
 
+# ONLY THE CRITIC FILES A REVIEW (Alexander's decision, 2026-09-30). Measured on the home-page
+# cylinder run: the critic rejected the setup three times, and the model then wrote "VERDICT:
+# APPROVED" itself and filed it fifteen times; the page warned under each filing while the run
+# steps carried critic_approved=true. openPASO cannot see who files a review. This interface
+# can, so the main agent's call is answered here and never reaches openPASO, and the critic is
+# told to file its own verdict.
+CRITIC_PROMPT = (
+    "You are a ruthlessly critical reviewer. Challenge every parameter choice, check units, look "
+    "for sign errors, verify BCs and validate against literature via web_search if available. A "
+    "finding blocks only if it names a concrete, checkable defect: a wrong number, unit, sign or "
+    "boundary condition, a missing term, a mesh or tolerance that cannot support the stated "
+    "accuracy. Preferences are advisory. You judge the work yourself: never file a verdict you "
+    "were handed or told to reach. When you APPROVE, file your review yourself with "
+    "submit_critic_review(solver=<the backend the run will use>, setup=<the file you reviewed, "
+    "by its name in the run folder>, findings=<'VERDICT: APPROVED', then what you checked, and "
+    "each advisory point still open on its own line beginning 'UNRESOLVED:'>). When you REJECT, "
+    "file nothing. Then respond with one of: APPROVED: <reason> | REJECTED: <issue and fix>.")
+
+MAIN_MAY_NOT_FILE = json.dumps({
+    "accepted": False,
+    "error": ("In this interface only the critic files a review. A review of your own work filed "
+              "by you is not a review, so this call was not passed to openPASO."),
+    "what_to_do": ("spawn_subagent(role='critic', task=<what to check>, context=<the solver, and "
+                   "the file to review by its name in the run folder>). The critic reviews that "
+                   "file and files its verdict itself. Then run the file unchanged: "
+                   "run_simulation(solver=..., input_path=<the file>) or "
+                   "run_with_generator(solver=..., generator_path=<the file>)."),
+}, indent=2)
+
+
+def _critic_only(tool):
+    """The main agent's submit_critic_review: its name and arguments, answered here."""
+    from langchain_core.tools import BaseTool
+
+    class CriticOnly(BaseTool):
+        name: str = tool.name
+        description: str = ("Only the critic you spawn files a review; a call from you is refused. "
+                            "Give the critic the file to review and it files its verdict itself.")
+        args_schema: Any = getattr(tool, "args_schema", None)
+
+        async def _arun(self, *args, **kwargs):
+            return MAIN_MAY_NOT_FILE
+
+        def _run(self, *args, **kwargs):
+            return MAIN_MAY_NOT_FILE
+
+    return CriticOnly()
+
+
+def _text_of(content) -> str:
+    if isinstance(content, list):
+        return "".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
+    return str(content or "")
+
+
+def main_tools(mcp_tools):
+    """openPASO's tools as the main agent gets them: every one, but its review filing is answered
+    by this interface (the critic, a sub-agent, keeps the real one)."""
+    return [_critic_only(t) if t.name == "submit_critic_review" else t for t in mcp_tools]
+
+
+def critic_filing_note(messages) -> str:
+    """What openPASO holds from a critic's run, read from its own submit_critic_review replies.
+
+    The main agent learns from this whether a review is on record, not from the critic's say-so."""
+    from langchain_core.messages import ToolMessage
+    replies = [m for m in messages or []
+               if isinstance(m, ToolMessage) and getattr(m, "name", "") == "submit_critic_review"]
+    if not replies:
+        return "[The critic filed no review: openPASO holds none from it.]"
+    text = _text_of(replies[-1].content)
+    try:
+        got = json.loads(text)
+    except ValueError:
+        return f"[The critic's filing came back unreadable: {text[:200]}]"
+    if not isinstance(got, dict) or not got.get("accepted"):
+        err = got.get("error", "") if isinstance(got, dict) else text
+        return f"[The critic filed a review and openPASO refused it: {str(err)[:400]}]"
+    bound = got.get("bound_to") or {}
+    if bound.get("file"):
+        return (f"[openPASO holds this critic's review of {bound['file']} as it is now "
+                f"({bound.get('characters', '?')} characters). Run that file unchanged: "
+                f"input_path='{bound['file']}' (run_simulation) or generator_path='{bound['file']}' "
+                f"(run_with_generator). Editing it voids the review.]")
+    return ("[openPASO holds this critic's review of the exact text it was given. Run exactly "
+            "that text; any change is a different setup.]")
+
+
 def _wrap_tool(tool, *, emitter, get_mode, gate, agent_label="agent", take_steers=None,
                steps: StepControl | None = None):
     """Return a copy of ``tool`` whose invoke emits events and (when in
@@ -398,11 +486,7 @@ def build_agent_for_session(*, model: str, mcp_on: bool,
         )
 
     _SUB_PROMPTS = {
-        "critic": ("You are a ruthlessly critical reviewer. Challenge "
-                   "every parameter choice, check units, look for sign "
-                   "errors, verify BCs and validate against literature "
-                   "via web_search if available. Respond with one of: "
-                   "APPROVED: <reason> | REJECTED: <issue and fix>."),
+        "critic": CRITIC_PROMPT,
         "verifier": ("You are an independent verifier. Re-derive the "
                      "requested quantity from first principles or by "
                      "an alternative method, then compare numerically."),
@@ -460,6 +544,8 @@ def build_agent_for_session(*, model: str, mcp_on: bool,
                        "it produced nothing. Treat the step as not done. Do not write its "
                        "answer for it — run it again, or say that it produced nothing. "
                        "openPASO's verification gate holds no review for this setup.]")
+            if role == "critic":
+                res = f"{res}\n\n{critic_filing_note(out.get('messages'))}"
         except Exception as e:
             res = f"[sub-agent error: {type(e).__name__}: {e}]"
         from .outcome import shorten
@@ -483,7 +569,7 @@ def build_agent_for_session(*, model: str, mcp_on: bool,
     # ── Gate every tool through the wrapper for mode gating
     gated = [_wrap_tool(t, emitter=emitter, get_mode=get_mode, gate=gate,
                         agent_label="main", take_steers=take_steers, steps=steps)
-             for t in mcp_tools + host]
+             for t in main_tools(mcp_tools) + host]
 
     from langgraph.prebuilt import create_react_agent
     # Use the EXACT same system prompts as the langgraph_eval driver, including
@@ -530,7 +616,7 @@ async def open_agent_for_session(**kwargs):
 # ───────────────────────────────────────────────────────────────────
 async def stream_turn(*, agent, user_text: str, emitter, emit_done: bool = False,
                       thread_id: str | None = None,
-                      history: list[tuple[str, str]] | None = None):
+                      history: list | None = None):
     """Run one user turn. Streams chunks/events via ``emitter`` and
     returns the final message text. Emits a 'thinking' status as soon
     as we start so the user sees activity even before the first model

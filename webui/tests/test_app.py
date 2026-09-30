@@ -749,7 +749,8 @@ def test_a_seeded_conversation_does_not_open_with_an_empty_message():
             cut = current[:i]
             break
     h = _history(cut)
-    assert ("user", "") not in h and all(text.strip() for role, text in h if role == "user")
+    users = [m[1] for m in h if isinstance(m, tuple) and m[0] == "user"]
+    assert users and all(text.strip() for text in users)
     assert h[0] == ("user", "solve the plate")
 
 
@@ -1170,10 +1171,12 @@ def test_after_a_stop_the_model_is_given_the_steps_it_really_took():
     ]
     h = _history(events)
     assert h[0] == ("user", "Solve the cantilever.")
-    text = h[1][1]
-    assert h[1][0] == "assistant"
-    assert "python cantilever.py 40" in text and "-1.8e-3" in text
-    assert "skipped this step" in text and "stopped the run" in text
+    # each step comes back as a call and its result (see test_a_rebuilt_history_hands_back_steps_as_steps)
+    handed = json.dumps([m if isinstance(m, tuple) else
+                         {"content": m.content, "calls": getattr(m, "tool_calls", None)} for m in h],
+                        default=str)
+    assert "python cantilever.py 40" in handed and "-1.8e-3" in handed
+    assert "skipped this step" in handed and "stopped the run" in handed
 
 
 def test_one_hung_step_can_be_ended_and_the_run_carries_on():

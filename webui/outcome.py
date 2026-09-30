@@ -196,6 +196,33 @@ def _what_broke(error: str) -> str:
     return f"{raised[-1][0]}: {raised[-1][1]}".strip() if raised else error
 
 
+# A step a reply wrote out as text instead of taking it. Measured 2026-09-30: a
+# run's history, rebuilt after a restart, handed the model its earlier steps as
+# "[step] tool {args}" followed by "→ result"; its next reply wrote three steps in
+# that form, results included, and called no tool.
+_TYPED_STEP = re.compile(r"^\[(?:[\w/-]+ )?step\] (?P<tool>[\w.-]+)[^\n]*"
+                         r"(?:\n→[^\n]*(?:\n(?!\n)[^\n]*)*)?", re.M)
+
+
+def typed_steps(text: str) -> list[str]:
+    """The tools a reply shows as steps it wrote out as text. None of them ran."""
+    return [m.group("tool") for m in _TYPED_STEP.finditer(text or "")]
+
+
+def turn_typed_steps(events) -> list[str]:
+    """The steps a turn's messages wrote out as text, in the order written."""
+    return [name for e in events if e.get("type") == "agent_msg"
+            for name in typed_steps(e.get("text") or "")]
+
+
+def without_typed_steps(text: str) -> str:
+    """The reply with each step it wrote out as text replaced by a note that the
+    step never ran: handed back as it was, it reads as a result."""
+    return _TYPED_STEP.sub(lambda m: f"(Here the reply wrote a `{m.group('tool')}` step out as "
+                                     "text. It never ran; the result written with it came from "
+                                     "no tool.)", text or "")
+
+
 def verdict_reason(raw: str) -> str:
     """Why, in the report's own words.
 

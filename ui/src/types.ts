@@ -23,6 +23,8 @@ export type Ev = {
   error?: string
   traceback?: string
   outcome?: string
+  /** steps the turn's messages wrote out as text; none of them ran */
+  typed_steps?: string[]
   sa_id?: string
   id?: string
   state?: string
