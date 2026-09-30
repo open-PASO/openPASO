@@ -37,19 +37,25 @@ export default function StepOutputs({ runId, sub, verdict }: { runId: string; su
   const [field, setField] = useState<FieldSeries | null>(null)
   useEffect(() => {
     let dead = false
-    api.files(runId, sub).then(async (d) => {
+    ;(async () => {
       const found: { rel: string; name: string }[] = []
       let series: FieldSeries | null = null
-      for (const f of d.entries) {
-        if (f.is_dir) continue
-        if (PICTURE.test(f.name)) found.push({ rel: f.rel_path, name: f.name })
-        else if (!series && f.name.endsWith('.json') && (f.size ?? 0) >= 200) {
-          const v = await api.viz(f.rel_path).catch(() => null)
-          if (v?.kind === 'field_series') series = v as unknown as FieldSeries
+      // the step's folder and the folders below it, two levels down: a solver such as 4C
+      // writes its results into output-files/ inside the step's folder (Copilot, 2026-10-01)
+      const walk = async (dir: string, depth: number) => {
+        const d = await api.files(runId, dir)
+        for (const f of d.entries) {
+          if (f.is_dir) { if (depth < 2) await walk(`${dir}/${f.name}`, depth + 1); continue }
+          if (PICTURE.test(f.name)) found.push({ rel: f.rel_path, name: `${dir.slice(sub.length + 1)}${dir === sub ? '' : '/'}${f.name}` })
+          else if (!series && f.name.endsWith('.json') && (f.size ?? 0) >= 200) {
+            const v = await api.viz(f.rel_path).catch(() => null)
+            if (v?.kind === 'field_series') series = v as unknown as FieldSeries
+          }
         }
       }
+      await walk(sub, 0)
       if (!dead) { setPics(found); setField(series) }
-    }).catch(() => { /* a folder that is gone shows nothing */ })
+    })().catch(() => { /* a folder that is gone shows nothing */ })
     return () => { dead = true }
   }, [runId, sub])
   if (!pics.length && !field) return null
@@ -63,7 +69,7 @@ export default function StepOutputs({ runId, sub, verdict }: { runId: string; su
         <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
           {pics.map((p) => (
             <figure key={p.rel} className="bg-soft border line rounded-[8px] p-3">
-              <img src={fileUrl(p.rel)} alt="" loading="lazy" className="w-full rounded-[6px] bg-white" />
+              <img src={fileUrl(p.rel)} alt={`${p.name}, written by this run`} loading="lazy" className="w-full rounded-[6px] bg-white" />
               <figcaption className="num mt-2 text-[13px] text-muted break-all">{sub}/{p.name}</figcaption>
             </figure>
           ))}

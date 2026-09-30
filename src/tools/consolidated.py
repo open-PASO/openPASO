@@ -232,6 +232,17 @@ def _open_concerns(rec) -> str:
     return f"; the critic left {len(lines)} point(s) open: {shown}"
 
 
+def _earlier_rejections(rec, records) -> str:
+    """How many times a critic turned down earlier versions of the file this approval names."""
+    name = getattr(rec, "source_name", "")
+    if not name:
+        return ""
+    n = sum(1 for r in records if getattr(r, "rejected", False) and getattr(r, "source_name", "") == name
+            and r.digest != rec.digest and r.created <= rec.created)
+    return (f"; approved after {n} rejection{'s' if n != 1 else ''} of earlier versions of {name}"
+            if n else "")
+
+
 def _critic_state(solver: str, setup_text: str, *, token: str = "",
                   job_id: str = "") -> tuple[bool, str]:
     """Has an independent critic reviewed THIS setup, on this server's record?
@@ -258,19 +269,30 @@ def _critic_state(solver: str, setup_text: str, *, token: str = "",
     is a self-report, and replacing the self-report is the entire point.
     """
     digest = review_digest(solver, setup_text)
+    live = [r for r in _CRITIC_REGISTRY.records() if r.solver == solver and not r.expired()]
+    turned_down = [r for r in live if getattr(r, "rejected", False) and r.digest == digest]
+    if turned_down:
+        # THE SAME TEXT CANNOT BE BOTH REJECTED AND APPROVED. A later critic's approval of
+        # text an earlier critic turned down is not a second opinion that wins; it is the
+        # first opinion asked again. The text has to change (a fix, or the rebuttal written
+        # into it) and be reviewed as changed.
+        first = (turned_down[-1].findings.strip().splitlines() or [""])[0][:200]
+        return False, (f"a critic REJECTED this exact setup ({first}); it stays NOT VERIFIED "
+                       f"until the text changes and a critic approves the changed text")
+    approvals = [r for r in live if not getattr(r, "rejected", False)]
     if token:
         try:
             rec = _CRITIC_REGISTRY.consume(token, digest=digest, solver=solver,
                                            job_id=job_id)
             return True, ("reviewed (critic token redeemed; single use)"
-                          + _open_concerns(rec))
+                          + _open_concerns(rec) + _earlier_rejections(rec, live))
         except CriticGateError as exc:
             return False, f"critic review token refused: {exc}"
-    for rec in _CRITIC_REGISTRY.records():
-        if rec.solver == solver and rec.digest == digest and not rec.expired():
-            return True, "reviewed (submitted review matches this setup)" + _open_concerns(rec)
-    near = [r for r in _CRITIC_REGISTRY.records()
-            if r.solver == solver and not r.expired()]
+    for rec in approvals:
+        if rec.digest == digest:
+            return True, ("reviewed (submitted review matches this setup)" + _open_concerns(rec)
+                          + _earlier_rejections(rec, live))
+    near = approvals
     if near:
         # SAY WHICH PART CHANGED. "The input changed after it was reviewed" is
         # true and unusable: the caller has a participant list, seven scalar
@@ -313,6 +335,14 @@ def _text_of_named_file(raw: str) -> tuple[str | None, str | None]:
             return None, (f"`{s}` names a file, and no such file is in this run's folder. Pass "
                           "the name of a file that exists, or the exact text that will run.")
         return None, None
+    # INSIDE THE RUN FOLDER ONLY, links followed. The server may be able to read files the
+    # model cannot (a sandboxed cell): a run of such a file prints its lines in the traceback.
+    import os as _os
+    root = Path(_os.environ.get("OPENPASO_CELL_WORKDIR") or Path.cwd()).resolve()
+    real = path.resolve()
+    if real != root and root not in real.parents:
+        return None, (f"`{s}` is outside this run's folder (or links out of it). A review and a "
+                      "run name a file inside the run folder; pass the exact text instead.")
     try:
         if path.stat().st_size > _SETUP_FILE_LIMIT:
             return None, f"`{s}` is larger than {_SETUP_FILE_LIMIT:,} bytes; pass a smaller file"
@@ -1626,7 +1656,8 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
             "review of its own script and submits it reaches this line too — measured "
             "on a live run whose critic sub-agent returned nothing at all. So read this "
             "as 'a review exists and matches what ran', not as 'someone independent "
-            "approved it'. "
+            "approved it'. The review covers the setup's own text; files it reads when it "
+            "runs (a mesh, a module it imports) are not part of it. "
             "A VERIFIED arrangement is SETTLED: write its deliverable files "
             "now, from these numbers, then move to the next arrangement "
             "(finer level, next case). Re-running a verified arrangement "
@@ -5039,18 +5070,33 @@ def register_consolidated_tools(mcp: FastMCP):
             r"(NOT[\s_-]+APPROVED|REJECTED|REJECT|DO[\s_-]+NOT[\s_-]+(?:RUN|PROCEED)|APPROVED)",
             str(findings), re.I))
         if _verdicts and not _verdicts[-1].group(1).upper().startswith("APPROVED"):
+            # ...and it is KEPT: a rejection that left no trace let the working agent ask one
+            # critic after another until one approved the same text (named by both peer
+            # sessions, 2026-10-01). It issues no token and blocks that exact text.
+            try:
+                _CRITIC_REGISTRY.submit_review(
+                    solver=solver, findings=findings,
+                    digest=review_digest(solver, setup_text), ttl_s=ttl_s,
+                    setup_text=setup_text, rejected=True, source_name=_named_file)
+            except CriticGateError as exc:
+                return json.dumps({"accepted": False, "error": str(exc),
+                                   "findings_were_not_lost": True}, indent=2)
             return json.dumps({
                 "accepted": False,
+                "recorded": "rejection",
                 "error": (f"THE REVIEW YOU FILED SAYS \"{_verdicts[-1].group(0).strip()}\": a setup its "
                           f"own critic turned down is not a reviewed setup, and no token is issued "
                           f"for it. Fix what the critic named, have it review the fixed setup, "
                           f"and file that review."),
+                "note": ("The rejection is on record for this exact text: a run of it stays NOT "
+                         "VERIFIED until the text changes and a critic approves the changed "
+                         "text. Asking another critic about the same text does not undo it."),
                 "findings_were_not_lost": True}, indent=2)
         try:
             rec = _CRITIC_REGISTRY.submit_review(
                 solver=solver, findings=findings,
                 digest=review_digest(solver, setup_text),
-                ttl_s=ttl_s, setup_text=setup_text)
+                ttl_s=ttl_s, setup_text=setup_text, source_name=_named_file)
         except CriticGateError as exc:
             return json.dumps({"accepted": False, "error": str(exc)}, indent=2)
         _get_journal().record("critic_review", "submit_critic_review",
@@ -5089,7 +5135,9 @@ def register_consolidated_tools(mcp: FastMCP):
                              f"now ({len(setup_text):,} characters). Run that file unchanged -- "
                              f"run_simulation(solver=..., input_path='{_named_file}') or "
                              f"run_with_generator(solver=..., generator_path='{_named_file}') -- "
-                             f"and the run matches it. Editing the file voids the review.")
+                             f"and the run matches it. Editing the file voids the review. Only "
+                             f"this file's text is covered: files it reads when it runs (a mesh, a "
+                             f"module it imports) are not.")
         return json.dumps(reply, indent=2)
 
     @mcp.tool()

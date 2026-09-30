@@ -79,6 +79,14 @@ class ReviewRecord:
     setup_text: str = ""
     consumed_by: str | None = None
     consumed_at: float | None = None
+    # A REJECTION IS KEPT, NOT DROPPED. Refusing a rejected review left no trace of it, so a
+    # working agent could ask one critic after another until one approved the same text, and
+    # the record showed only the approval (both peer sessions named this, 2026-10-01). A
+    # rejection issues no token; it blocks that exact text until the text changes.
+    rejected: bool = False
+    # the file the review named, when it named one: rejections of earlier versions of the
+    # same file are counted beside a later approval
+    source_name: str = ""
 
     def expired(self, now: float | None = None) -> bool:
         return (now or time.time()) > self.created + self.ttl_s
@@ -95,7 +103,8 @@ class CriticRegistry:
     # ── issuing ──────────────────────────────────────────────────────────
     def submit_review(self, *, solver: str, findings: str,
                       digest: str, ttl_s: float = DEFAULT_TTL_S,
-                      setup_text: str = "") -> ReviewRecord:
+                      setup_text: str = "", rejected: bool = False,
+                      source_name: str = "") -> ReviewRecord:
         text = (findings or "").strip()
         if len(text) < MIN_FINDINGS_CHARS:
             raise CriticGateError(
@@ -104,7 +113,8 @@ class CriticRegistry:
                 f"An empty approval is indistinguishable from no review.")
         rec = ReviewRecord(token=secrets.token_urlsafe(24), digest=digest,
                            solver=solver, findings=text, created=time.time(),
-                           ttl_s=ttl_s, setup_text=setup_text or "")
+                           ttl_s=ttl_s, setup_text=setup_text or "",
+                           rejected=bool(rejected), source_name=source_name or "")
         self._reviews[rec.token] = rec
         self._append_audit("review_submitted", rec)
         return rec
@@ -127,6 +137,8 @@ class CriticRegistry:
             raise CriticGateError(
                 "critic review token is not known to this server; it cannot be "
                 "self-issued.")
+        if rec.rejected:
+            raise CriticGateError("that review REJECTED the setup; it issues no approval.")
         if rec.expired():
             raise CriticGateError("critic review has expired; review the setup again.")
         if rec.consumed_by is not None:
@@ -154,6 +166,10 @@ class CriticRegistry:
             self._audit.parent.mkdir(parents=True, exist_ok=True)
             with open(self._audit, "a", encoding="utf-8") as fh:
                 payload = asdict(rec)
+                # the setup's own text stays out of the log (a script, a deck: whatever the
+                # caller ran); its length says enough to tell two reviews apart (Copilot on the
+                # org PR: the field was called server-side only and was written out whole)
+                payload["setup_chars"] = len(payload.pop("setup_text", "") or "")
                 payload["event"] = event
                 payload["at"] = time.time()
                 fh.write(json.dumps(payload, sort_keys=True) + "\n")

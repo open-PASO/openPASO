@@ -414,6 +414,12 @@ def result_content_findings(result_files, max_files: int = 12):
                 n, frames = _saved_times(p)
             except BaseException:
                 continue
+            # A TIME SERIES COUNTS TOO, as zero or as live, from its last save. It was left out of
+            # both tallies (Copilot, 2026-10-01): a run whose only output was an all-zero XDMF
+            # series passed, and a zero .vtu beside a live series read as "every field is 0".
+            if frames:
+                for name, arr in frames[-1][1].items():
+                    (zero if arr.size and not np.any(arr) else nonzero).append(f"{p.name}:{name}")
             if n >= 3 and len(frames) >= 2:
                 (t0, first), (t1, last) = frames[0], frames[-1]
                 for name, arr in last.items():
@@ -421,7 +427,7 @@ def result_content_findings(result_files, max_files: int = 12):
                         continue
                     size = float(np.max(np.abs(arr))) if arr.size else 0.0
                     if size == 0.0:
-                        continue          # an all-zero field is judged below, from the .vtu
+                        continue          # counted as zero above
                     change = float(np.max(np.abs(arr - first[name]))) / size
                     if change <= 1e-12:
                         notes.append(

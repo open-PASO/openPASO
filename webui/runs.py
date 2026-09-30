@@ -218,7 +218,8 @@ class Run:
                     mcp_on="openpaso" in self.state.get("mcp_servers", []),
                     workdir=self.workdir, emitter=self.emit, get_mode=self.mode,
                     gate=self.gate, checkpointer=self.saver,
-                    take_steers=self._take_steers, steps=self.steps) as agent:
+                    take_steers=self._take_steers, steps=self.steps,
+                    get_request=self._person_request) as agent:
                 if not ready.done():
                     ready.set_result(agent)
                 await stop.wait()
@@ -230,6 +231,20 @@ class Run:
         finally:
             if self.agent is not None and self._keeper is asyncio.current_task():
                 self.agent = None
+
+    def _person_request(self) -> str:
+        """What the person asked in this run, in their own words: a critic judges the work
+        against this, not against the working agent's account of it. The first message and the
+        latest ones are kept when a long run does not fit."""
+        texts = [e["text"].strip() for e in self.state["events"]
+                 if e.get("type") == "user_msg" and (e.get("text") or "").strip()]
+        if not texts:
+            return ""
+        joined = "\n\n".join(texts)
+        if len(joined) <= 6000:
+            return joined
+        rest = "\n\n".join(texts[1:])
+        return texts[0][:3000] + "\n\n[… earlier follow-ups left out …]\n\n" + rest[-2800:]
 
     async def close_agent(self):
         keeper, self._keeper = self._keeper, None

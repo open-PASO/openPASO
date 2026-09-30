@@ -73,6 +73,17 @@ def _mcp_config(servers: list[str], workdir: Path | None = None) -> dict:
     return {"mcpServers": out}
 
 
+def _hook_settings(servers: dict) -> dict:
+    """Claude Code settings for one run: the hook that refuses the main conversation's review
+    filing (webui/critic_hook.py), for every openPASO server the run is given."""
+    import sys
+    hook = str(Path(__file__).resolve().parent / "critic_hook.py")
+    return {"hooks": {"PreToolUse": [
+        {"matcher": f"mcp__{sid}__submit_critic_review",
+         "hooks": [{"type": "command", "command": f"{sys.executable} {hook}"}]}
+        for sid in servers]}}
+
+
 # The work an agent has to do here is write an input deck and run a solver, so
 # it needs the file and shell tools as well as openPASO's own. This list says
 # WHICH KINDS of thing a run may do; it is not a boundary on WHERE. These are
@@ -107,6 +118,8 @@ async def stream_turn(
     tmp = Path(tempfile.mkdtemp(prefix="openpaso-cc-"))
     cfg_path = tmp / "mcp.json"
     cfg_path.write_text(json.dumps(cfg))
+    settings_path = tmp / "settings.json"
+    settings_path.write_text(json.dumps(_hook_settings(cfg["mcpServers"])))
 
     allowed = list(WORK_TOOLS) + [f"mcp__{sid}" for sid in cfg["mcpServers"]]
     cmd = [
@@ -116,6 +129,8 @@ async def stream_turn(
         "--permission-mode", "acceptEdits",
         "--allowedTools", *allowed,
         "--mcp-config", str(cfg_path),
+        # only a sub-agent files a review (the hook refuses the main conversation's filing)
+        "--settings", str(settings_path),
     ]
     if model:
         cmd += ["--model", model]

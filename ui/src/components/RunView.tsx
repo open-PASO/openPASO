@@ -297,7 +297,7 @@ export default function RunView({ id, config, groups }: {
               <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
                 {leftover.pictures.map((p) => (
                   <figure key={p.rel} className="bg-soft border line rounded-[8px] p-3">
-                    <img src={fileUrl(p.rel)} alt="" loading="lazy" className="w-full rounded-[6px] bg-white" />
+                    <img src={fileUrl(p.rel)} alt={p.name} loading="lazy" className="w-full rounded-[6px] bg-white" />
                     <figcaption className="num mt-2 text-[13px] text-muted break-all">{p.name}</figcaption>
                   </figure>
                 ))}

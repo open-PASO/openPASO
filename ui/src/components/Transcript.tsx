@@ -253,13 +253,13 @@ export function typedSteps(text: string): string[] {
 
 /** Was a filed review put on record? Refused filings (by openPASO, or by this interface, which
     lets only the critic file one) recorded nothing. */
-function reviewReply(raw: string): { accepted: boolean; error: string } {
+function reviewReply(raw: string): { accepted: boolean; error: string; rejection: boolean } {
   const t = readable(raw || '')
   try {
     const j = JSON.parse(t)
-    return { accepted: j?.accepted === true, error: String(j?.error || '') }
+    return { accepted: j?.accepted === true, error: String(j?.error || ''), rejection: j?.recorded === 'rejection' }
   } catch {
-    return { accepted: /"accepted":\s*true/.test(t), error: '' }
+    return { accepted: /"accepted":\s*true/.test(t), error: '', rejection: /"recorded":\s*"rejection"/.test(t) }
   }
 }
 
@@ -371,6 +371,10 @@ function build(events: Ev[], live: boolean): Entry[] {
           if (v.verdict === 'verified') { c.state = 'done'; tally.verified = true }
           else if (v.verdict === 'unverified') { c.state = 'unverified'; tally.unverified = true }
           else { c.state = 'failed'; tally.solverFailed = tally.solverFailed ?? v.reason }
+        } else if (c.tool === 'submit_critic_review' && reviewReply(c.result).rejection) {
+          // a critic's rejection is on record: it blocks that exact text until it changes
+          c.state = 'unverified'
+          c.detail = 'the critic rejected this setup, and the rejection is on record'
         } else if (c.tool === 'submit_critic_review' && !reviewReply(c.result).accepted) {
           c.state = 'failed'
           c.detail = cut(tidy('not recorded: ' + (reviewReply(c.result).error || 'the review was refused')), 160)
