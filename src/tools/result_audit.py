@@ -1179,11 +1179,7 @@ def contract_findings(work: Path, only_levels: set | None = None) -> list[dict]:
                             "finding": (
                     f"AT YOUR COARSEST LEVEL YOUR OWN NDOF IS {nd} AGAINST "
                     f"{rows} ROWS in {sol0[0].name} — a ratio of "
-                    f"{nd / rows:.0f}. Across every run measured here, no "
-                    f"result set verified correct against an independent "
-                    f"reference exceeds 0.5, and every run above 2 either "
-                    f"ran out of time or never reached the "
-                    f"finer levels. Two causes produce this, and they need "
+                    f"{nd / rows:.0f}. Two causes produce this, and they need "
                     f"opposite fixes: (a) the mesh is far larger than the "
                     f"coarsest level the task prescribes, so level 1 is "
                     f"already an expensive solve and the finer levels cannot "
@@ -2394,9 +2390,7 @@ def interface_sign_findings(work: Path) -> list[dict]:
                 "every mesh level -- so every per-level interface file "
                 "must have the SAME rows in the same order. A growing count "
                 "means you wrote your own mesh nodes instead of evaluating "
-                "(interpolating) your solution AT the prescribed points. A "
-                "run that did this had genuinely converged its coupling to "
-                "9.8e-07 and counted for nothing on the sampling alone. "
+                "(interpolating) your solution AT the prescribed points. "
                 "Re-read the task's INTERFACE PROBE POINTS line and evaluate "
                 "your existing solution there; no re-solve is needed.")})
             break
@@ -2472,9 +2466,7 @@ def interface_sign_findings(work: Path) -> list[dict]:
             "above the final value in that level's residual history, so the quantity "
             "your coupling loop measured is not the quantity you exported -- "
             "a different point set, a stale iterate, or one side's internal "
-            "state. A run with exactly this signature reported 2.3e-08 "
-            "converged while its files disagreed by 3.65e-03 at every level. "
-            "Recompute the mismatch FROM THE TWO FILES you are about to "
+            "state. Recompute the mismatch FROM THE TWO FILES you are about to "
             "deliver -- max|uA-uB| over the interface rows, divided by "
             "max|uA| -- and iterate on THAT; if it does not match your "
             "loop's residual, your loop is reading different data than it "
@@ -3636,15 +3628,51 @@ def identical_solution_levels_findings(work: Path) -> list[dict]:
                 f"is exactly zero). A refinement study measures how the answer "
                 f"CHANGES as the mesh is refined, so identical levels carry no "
                 f"order at all -- log2(|L1-L2|/|L2-L3|) is 0/0 -- and the study "
-                f"counts as NOT RUN however correct each level is. You SAVED ONE "
-                f"MESH TO ALL THE LEVELS. Run three DISTINCT meshes (the "
-                f"prescribed coarsest, then halve, then halve again) and save "
-                f"each level's OWN result: if you drove this through couple(), "
-                f"each participant writes field_level<k>.csv per level -- use "
-                f"those, one file per level, not a single file copied across. "
-                f"Print the node/DOF count inside the solve at each level and "
-                f"confirm it actually changes.")})
+                f"counts as NOT RUN however correct each level is. "
+                + (lambda r: (
+                    f"THE SOLVE DID REFINE -- {r[1]} -- so these level files were "
+                    f"written from ONE output: write each level's file from that "
+                    f"level's own dump. " if r[0] is True else
+                    f"THIS SIDE'S OWN DUMPS ARE IDENTICAL TOO -- {r[1]} -- so these "
+                    f"files come from one mesh or from one output: print the node/DOF "
+                    f"count inside the solve at each level and confirm it changes, and "
+                    f"write each level's file from that level's own run. " if r[0] is False else
+                    f"Two ways lead here, measured: the level files written from one "
+                    f"output, or a solve that ran one mesh at every level; this "
+                    f"side keeps no per-level dumps to tell which. "))(
+                    _own_dumps_refined(work, side))
+                + f"Run three DISTINCT meshes (the prescribed coarsest, then halve, "
+                f"then halve again) and save each level's OWN result.")})
     return out
+
+
+def _own_dumps_refined(work: Path, side: str):
+    """(True|False|None, detail) -- whether the side's OWN per-level dumps differ
+    between levels: True when their node counts or values differ (the solve refined,
+    so identical DELIVERED files were written from one output), False when the dumps
+    are identical too (the solve itself ran one mesh), None when there are none."""
+    import csv as _c
+    dirs = [d for d in _side_dirs(work)
+            if side and (d.name.endswith(side) or d.name.endswith("_" + side.lower()))]
+    for d in dirs:
+        sets = {}
+        for q in sorted(d.glob("field_level*.csv")):
+            m = re.fullmatch(r"field_level(\d+)\.csv", q.name)
+            if not m:
+                continue
+            try:
+                with q.open() as fh:
+                    rows = [r for r in _c.reader(fh)][1:]
+            except OSError:
+                continue
+            sets[int(m.group(1))] = rows
+        if len(sets) >= 2:
+            counts = {k: len(v) for k, v in sorted(sets.items())}
+            same = all(v == sets[min(sets)] for v in sets.values())
+            return (not same,
+                    f"{d.name}/field_level<k>.csv hold " + ", ".join(f"{n} nodes at level {k}"
+                                                                   for k, n in counts.items()))
+    return None, ""
 
 
 def _solution_value_vector(path: Path):
@@ -5004,14 +5032,32 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
     # carry the outer value is the problem's, and the run states it as full_outer_dirichlet
     # in a side's config.json; one side saying true covers the pair (it is one outer
     # boundary), any side saying false, or none saying, leaves this silent.
+    # A SIDE THAT SAYS IT ONLY IN ITS SCRIPT SAYS IT TOO: the served contracts' knob is
+    # FULL_OUTER_DIRICHLET in the file. Measured: a hand-written side set it True in code
+    # and freed both interface corners, and this stayed silent for want of a config key;
+    # over the record the same reading names free corners in runs whose fields were
+    # otherwise right (38-41 % of the side's peak at level 1, halving per level) -- a
+    # boundary condition the problem states, broken at two nodes, not a rounding matter.
     said = []
     for d in folders:
         try:
             cfg = json.loads((d / "config.json").read_text() or "{}")
         except (OSError, ValueError):
-            continue
+            cfg = {}
         if isinstance(cfg, dict) and isinstance(cfg.get("full_outer_dirichlet"), bool):
             said.append(cfg["full_outer_dirichlet"])
+            continue
+        for q in sorted(d.glob("participant*.py")):
+            if ".replaced-" in q.name:
+                continue
+            try:
+                m = re.search(r"^FULL_OUTER_DIRICHLET\s*=\s*(True|False)\b",
+                              q.read_text(errors="ignore"), re.M)
+            except OSError:
+                m = None
+            if m:
+                said.append(m.group(1) == "True")
+                break
     if not said or not all(said):
         return out
     for d in folders:
@@ -5397,9 +5443,11 @@ def equation_findings(work: Path, since=None) -> list[dict]:
                 "finding": (
                     f"SIDE {side}'S FIELD WAS NOT CHECKED AGAINST ITS OWN EQUATION: "
                     f"its ./config.json does not state {', '.join(op['missing'])}. "
-                    f"The served contract reads the subdomain box (x0, x1, y0, y1), "
-                    f"the coefficient k, the reaction (0 when there is none) and "
-                    f"source_expr from that file; with them this audit checks the "
+                    f"State there the subdomain box (x0, x1, y0, y1), the coefficient "
+                    f"k, the reaction (0 when there is none) and source_expr -- the "
+                    f"numbers your code SOLVES with (the NGSolve, Kratos-Neumann and "
+                    f"elastic contracts read them from that file; any other side keeps "
+                    f"its own constants, which must match); with them this audit checks the "
                     f"delivered field against the equation you implemented, which is "
                     f"the one check that separates a field converging to the right "
                     f"function from one converging to a wrong one. An ELASTIC side "

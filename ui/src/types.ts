@@ -3,6 +3,8 @@ export type Ev = {
   cost_usd_total?: number
   /** the server's own verdict on a solver result, decided once */
   verdict?: string
+  /** the solver's own account of its verdict */
+  why?: string
   /** marks an ending the server decided, rather than one an old record claimed */
   by?: string
   text?: string

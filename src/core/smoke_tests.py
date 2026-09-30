@@ -45,6 +45,7 @@ def _run_script(python: str, script: str, timeout: int = 15) -> tuple[bool, str,
         r = subprocess.run(
             [python, "-c", script],
             capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         # Take only first non-empty line (avoids Kratos/4C banners on cleanup)
         first_line = ""
@@ -221,7 +222,7 @@ def smoke_fourc() -> SmokeResult:
         return SmokeResult("fourc", False, error="Binary not found",
                            duration_ms=0)
     try:
-        r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         dt = (time.time() - t0) * 1000
         version = ""
         for line in (r.stdout + r.stderr).splitlines():

@@ -31,7 +31,7 @@ FORMAT_VERSION = 1
 def _git_commit(repo: Path) -> str | None:
     try:
         out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
         return out.stdout.strip() or None
     except Exception:
         return None

@@ -539,6 +539,7 @@ class FebioBackend(SolverBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

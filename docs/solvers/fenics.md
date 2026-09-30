@@ -39,7 +39,7 @@ python check_install.py
 | `maxwell` | Maxwell's equations (curl-curl). Requires H(curl) (Nedelec / N1curl, basix.ElementFamily.N1E) elements for tangential continuity. Complex-valued forms need a complex-PETSc build. | 2-D, 3-D | `2d` |
 | `mixed_poisson` | Mixed Poisson / Darcy flow (Raviart-Thomas + DG pressure) | 2-D | `2d` |
 | `multiphase` | Two-phase flow via Allen-Cahn phase-field (interface tracking, transient) | 2-D | `2d` |
-| `navier_stokes` | Incompressible Navier-Stokes (cavity, channel with obstacle) | 2-D, 3-D | `2d`, `3d`, `channel_cylinder` |
+| `navier_stokes` | Incompressible Navier-Stokes (cavity, channel with obstacle; the unsteady wake is a contract: mesh, forces and pictures served, the solve is yours) | 2-D, 3-D | `2d`, `3d`, `channel_cylinder`, `channel_cylinder_transient` |
 | `nearly_incompressible_elasticity` | Nearly-incompressible elasticity (Poisson ratio approaching 0.5). Standard primal P1/P2 locks; needs mixed (u, p) Taylor-Hood / MINI or a displacement-pressure split with stable element pair (otherwise volumetric locking). | 2-D, 3-D | `2d` |
 | `nonlinear_pde` | General nonlinear PDE with Newton solver and UFL automatic differentiation | 2-D | `2d` |
 | `poisson` | Poisson equation / diffusion | 2-D, 3-D | `2d`, `3d`, `l_domain`, `rectangle` |

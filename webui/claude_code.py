@@ -215,10 +215,19 @@ async def _consume(proc, emit, state, errors: list[str] | None = None) -> str:
                 if isinstance(body, list):
                     body = " ".join(b.get("text", "") for b in body
                                     if isinstance(b, dict))
-                from .outcome import shorten
-                await _send(emit, {"type": "tool_result", "call_id": cid,
-                                   "tool": calls.get(cid, ""),
-                                   "result": shorten(body)})
+                from .outcome import SOLVER_TOOLS, classify_solver_result, shorten, verdict_reason
+                tool = calls.get(cid, "")
+                event = {"type": "tool_result", "call_id": cid, "tool": tool,
+                         "result": shorten(body)}
+                if tool in SOLVER_TOOLS:
+                    # judged from the WHOLE reply, as the LangGraph path does: the record
+                    # keeps a shortened copy, and a Claude Code run's reply arrives wrapped
+                    # as {"result": "<escaped JSON>"}. Judged from the copy, a run that
+                    # finished was read as one that "computed nothing" (measured
+                    # 2026-09-29: its status was completed_unverified).
+                    event["verdict"] = classify_solver_result(str(body or ""))
+                    event["why"] = verdict_reason(str(body or ""))
+                await _send(emit, event)
         elif kind == "result":
             final = msg.get("result") or final
             # Claude Code can report a failure in this message and still exit

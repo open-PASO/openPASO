@@ -115,6 +115,10 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "AttributeError: 'SplineGeometry' object has no attribute 'AddVertex'",
      "a rectangle is geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(bottom, right, top, left)); "
      "single points are AddPoint(x, y) / AppendPoint(x, y), with SEPARATE coordinates"),
+    ("ngsolve", r"from\s+ngsolve\s+import\s*\([^)]*\b(?:CG|GMRes|MinRes)\b|from\s+ngsolve\s+import[^\n(]*\b(?:CG|GMRes|MinRes)\b",
+     "ImportError: cannot import name 'CG' from 'ngsolve'",
+     "the Krylov solvers live in ngsolve.solvers (CG, GMRes, MinRes): "
+     "`from ngsolve.solvers import CG` (measured on this install)"),
     ("ngsolve", r"\.AddRect\s*\(",
      "AttributeError: 'SplineGeometry' object has no attribute 'AddRect'",
      "the call is AddRectangle, spelled in full"),
@@ -280,6 +284,30 @@ def _module_findings(body: str, source: str) -> list:
     return out
 
 
+# THE SCRAMBLED SQUARE, NAMED. A written script arrives with `(a)**2 + (b)**2` as
+# `(a)**2 + **(b)2`: the second exponent moved in front of its bracket. It is a scramble in
+# the text the model wrote, not a Python or solver rule, and it survives re-writing: measured
+# 2026-09-28 in the web interface, one run wrote the file three times and the scramble came
+# back each time, until the line was changed in place; 34 of the 144 participant scripts that
+# do not parse in the recorded coupled runs carry it.
+_SCRAMBLED_SQUARE = re.compile(r"[+\-/=]\s*\*\*\s*\(([^()\n]{1,80})\)(\d+)")
+
+
+def scrambled_exponent_hint(text: str) -> str | None:
+    """A plain sentence naming a `+ **(b)2` scramble in a SyntaxError text, or None."""
+    if not isinstance(text, str) or "SyntaxError" not in text:
+        return None
+    m = _SCRAMBLED_SQUARE.search(text)
+    if not m:
+        return None
+    inner, exp = m.group(1).strip(), m.group(2)
+    alt = f" (or np.square({inner}))" if exp == "2" else ""
+    return (f"`**({inner}){exp}` is the power `({inner})**{exp}` written with its exponent moved "
+            f"in front of the bracket: a scramble in the written text, not a Python or solver rule. "
+            f"Write `({inner})**{exp}`{alt}. The same scramble tends to come back when the whole "
+            f"file is written again, so change that one line in place.")
+
+
 def undefined_names(text: str) -> list:
     """Names the script USES at module level and never defines anywhere.
 
@@ -301,7 +329,9 @@ def undefined_names(text: str) -> list:
         lines = text.splitlines()
         where = (f": `{lines[e.lineno - 1].strip()[:120]}`"
                  if e.lineno and 0 < e.lineno <= len(lines) else "")
-        return [f"this file does not parse: {e.__class__.__name__} at line {e.lineno} -- {e.msg}{where}"]
+        hint = scrambled_exponent_hint(f"SyntaxError {where}")
+        return [f"this file does not parse: {e.__class__.__name__} at line {e.lineno} -- {e.msg}{where}"
+                + (f" {hint}" if hint else "")]
     bound = set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -338,6 +368,23 @@ def undefined_names(text: str) -> list:
 
 # The error text a run prints -> the call that works. Same measurements as _TRAPS, keyed the other
 # way round: a run that already failed should not cost a second run to diagnose.
+_SPLINE_GEOMETRY = (
+    "NGSolve: SplineGeometry is netgen's 2-D geometry and lives in netgen.geom2d -- `from "
+    "netgen.geom2d import SplineGeometry`; `from ngsolve import *` does not bring it. A channel "
+    "with a round hole: geo.AddRectangle((x0, y0), (x1, y1), bcs=(<bottom>, <right>, <top>, "
+    "<left>)), then geo.AddCircle((cx, cy), r=<r>, leftdomain=0, rightdomain=1, bc=<name>) "
+    "(leftdomain=0 makes the disc a hole). A mesh made by generate_mesh is read with "
+    "Mesh(ReadGmsh(path)) from netgen.read_gmsh instead")
+_DOLFINX_GMSH = (
+    "FEniCSx 0.10: the Gmsh reader is the module dolfinx.io.gmsh -- `from dolfinx.io import gmsh "
+    "as gmshio`, then gmshio.read_from_msh(path, MPI.COMM_WORLD, rank=0, gdim=2), which returns "
+    "an object with .mesh, .facet_tags and .physical_groups; `gmshio` was its name up to 0.9")
+_NETGEN_2D = (
+    "netgen: netgen.csg is the 3-D geometry and has no Rectangle. In 2-D use netgen.geom2d -- "
+    "SplineGeometry (AddRectangle, AddCircle) or CSG2d with its own Rectangle(pmin=..., "
+    "pmax=..., bc=...) and Circle(center=..., radius=..., bc=...), subtracted with -")
+
+
 _ERROR_FIXES: tuple = (
     # THE LARGEST SINGLE UNGATED FAILURE IN THE RECORDED SET: 271 occurrences
     # across 120 cells. Three spellings of one mistake -- a Python function or
@@ -635,6 +682,33 @@ _ERROR_FIXES: tuple = (
      "Kratos: a zero on the diagonal of the assembled system -- on record, a triangle whose "
      "nodes run clockwise (negative area); take each element's signed area and swap two "
      "nodes where it is negative"),
+    # Measured 2026-09-29 in the web interface: one NGSolve run failed nine times in a row, on
+    # SplineGeometry (three times), Rectangle after `from netgen.csg import *`, a .msh path that
+    # was not in the job folder, mesh.ndof and a list given as `dirichlet`, and then gave up. The
+    # ReadGmsh and dolfinx.io.gmsh entries were measured beside them. Every one is re-derived on
+    # this install by tests/test_a_failed_run_is_told_the_measured_fix.py.
+    ("name 'SplineGeometry' is not defined", _SPLINE_GEOMETRY),
+    ("cannot import name 'SplineGeometry'", _SPLINE_GEOMETRY),
+    ("name 'Rectangle' is not defined", _NETGEN_2D),
+    ("'ngsolve.comp.Mesh' object has no attribute 'ndof'",
+     "NGSolve: a mesh counts its vertices with mesh.nv and its elements with mesh.ne; ndof "
+     "belongs to a finite-element SPACE (fes.ndof)"),
+    ("NgException: Error opening file",
+     "NGSolve/netgen: the file is not where the script looked. run_simulation starts the "
+     "script in a job folder of its own, so a relative path is read from there: use the "
+     "absolute path (generate_mesh's reply gives it). A Gmsh .msh is read with "
+     "Mesh(ReadGmsh(path)) from netgen.read_gmsh -- Mesh(path) reads netgen's .vol format "
+     "only, and on a .msh it returns an EMPTY mesh (mesh.ne == 0) without an error"),
+    ("nelem = int(f.readline())",
+     "netgen's ReadGmsh reads MSH 2.2 ASCII only; a 4.x file stops it here with 'invalid "
+     "literal for int()'. Write 2.2 (gmsh.option.setNumber('Mesh.MshFileVersion', 2.2) "
+     "before gmsh.write); openPASO's generate_mesh writes 2.2"),
+    ("No module named 'dolfinx.io.gmshio'", _DOLFINX_GMSH),
+    ("cannot import name 'gmshio' from 'dolfinx.io'", _DOLFINX_GMSH),
+    ("Unable to cast Python instance of type <class 'str'> to C++ type",
+     "NGSolve: one call that raises this, measured: `dirichlet` given as a Python LIST of "
+     "names. It takes ONE string, the boundary names joined by | -- "
+     "H1(mesh, order=2, dirichlet='left|top|cylinder')"),
 )
 
 
@@ -679,8 +753,27 @@ def participant_findings(text: str) -> list:
     # defined") in three cells of one round -- the served text below the hole
     # uses exactly the names the hole is asked to leave behind. Once the hole
     # is filled (its markers go with the fill) the names are judged again.
-    out, seen = (_module_findings(body, text)
-                 + ([] if _SERVED_MARK in text else undefined_names(text))), set()
+    # THE MARKERS WENT, THE LIST STAYED: the served text lost "DOES NOT SERVE THIS"
+    # and the pristine contracts drew 8-9 NameError findings again (measured on the
+    # served FEniCSx, NGSolve and scikit-fem contracts). The list the contract ends
+    # with -- WHAT YOUR SOLVE MUST LEAVE BEHIND -- names the hole's names: those still
+    # undefined are ONE note naming what the hole has left to define, and any other
+    # name is judged as ever.
+    out, seen = _module_findings(body, text), set()
+    if _SERVED_MARK not in text:
+        _und = undefined_names(text)
+        _hole = set()
+        _m = re.search(r"WHAT YOUR SOLVE MUST LEAVE BEHIND[^\n]*\n((?:#[^\n]*\n)+)", text)
+        if _m:
+            _hole = set(re.findall(r"^#\s{3,}([A-Za-z_]\w*)\s*$", _m.group(1), re.M))
+        _left = [f for f in _und if re.match(r"`([A-Za-z_]\w*)` is used", f)
+                 and re.match(r"`([A-Za-z_]\w*)`", f).group(1) in _hole]
+        out += [f for f in _und if f not in _left]
+        _names = sorted({re.match(r"`([A-Za-z_]\w*)`", f).group(1) for f in _left})
+        if _names:
+            out.append("your solve has not yet defined " + ", ".join(f"`{n}`" for n in _names)
+                       + " from the list this file ends with (WHAT YOUR SOLVE MUST LEAVE "
+                         "BEHIND); the run stops at the first line that uses one.")
     for backend, pattern, error, fix in _TRAPS:
         if backend not in codes or (backend, pattern) in seen:
             continue
@@ -833,6 +926,27 @@ _EXPORTS_WRITE = __import__("re").compile(
     r"""json\.dump\([^)]*['"]exports\.json['"]""", __import__("re").S)
 
 
+_SERVED_CHECK_LABELS = (("EXPORT SELF-CHECK", "the export self-check"),
+                        ("OUTER BOUNDARY", "the held-edge check"),
+                        ("INTERFACE DOFS", "the interface list against the mesh"),
+                        ("INTERFACE VERTICES", "the interface list against the mesh"),
+                        ("SOLVE SELF-CHECK", "the solve self-check"))
+
+
+def _served_checks_lacking(content: str) -> list:
+    """The served checks a file lacks, read from the file: a re-typed contract that kept
+    its held-edge stop under a renamed comment was told it carried none of them."""
+    missing = []
+    for lab, what in _SERVED_CHECK_LABELS:
+        if lab not in content and what not in missing:
+            if lab == "INTERFACE DOFS" and "INTERFACE VERTICES" in content:
+                continue
+            if lab == "INTERFACE VERTICES" and "INTERFACE DOFS" in content:
+                continue
+            missing.append(what)
+    return missing
+
+
 def missing_export_selfcheck(content: str) -> str:
     """'' unless this looks like a participant that dropped the served check.
 
@@ -858,7 +972,18 @@ def missing_export_selfcheck(content: str) -> str:
         "partner); and a flux that is the partner's array negated rather than "
         "recovered from this side's own system. Each of those converges "
         "beautifully to a wrong answer. Copy the block back from the served "
-        "contract -- it reads only what you have already computed.")
+        "contract -- it reads only what you have already computed."
+        # AND THE OTHER SERVED CHECKS IT LACKS. Measured: a side re-written by hand
+        # beside a partner that was hand-written too dropped the solve self-check that
+        # had caught its defect three times, and only this note spoke, naming one block.
+        + _also_lacks([w for w in _served_checks_lacking(content) if w != "the export self-check"]))
+
+
+def _also_lacks(items: list) -> str:
+    if not items:
+        return ""
+    said = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+    return f" It also lacks {said}."
 
 
 # ── the imported values that never reached the answer ──────────────────────
@@ -890,7 +1015,12 @@ _SOLVE_ASSIGN = re.compile(r"(\w+)\.vec(?:\.data|\s*\[\s*:\s*\])\s*(\+?=)(?!=)\s
 # A solve computed and thrown away: the statement starts with the inverse call.
 _DISCARDED_SOLVE = re.compile(
     r"^[ \t]*(?:[\w\.]+\.)?Inverse\s*\((?:[^()\n]|\([^()\n]*\))*\)\s*\*\s*[\w\.\[\]\(\)]+[ \t]*$", re.M)
-_SOLVE_CALL = re.compile(r"\bInverse\s*\(|\bCGSolver\b|\bsolvers\.\w|\bBVP\s*\(")
+_SOLVE_CALL = re.compile(r"\bInverse\s*\(|\bCGSolver\b|\bsolvers\.\w|\bBVP\s*\(|\b(?:CG|GMRes|MinRes)\s*\(")
+# An inverse applied through Mult: M.Mult(x, y) writes M x INTO y.
+_INVERSE_MULT = re.compile(
+    r"(?:\bInverse\s*\((?:[^()\n]|\([^()\n]*\))*\)|\b(?P<inv>\w+))\s*\.Mult\s*\(\s*"
+    r"(?P<x>-?\s*[\w\.]+)\s*,\s*(?P<y>-?\s*[\w\.]+)\s*[,)]")
+_INVERSE_NAME = re.compile(r"^\s*(\w+)\s*=\s*[\w\.]*Inverse\s*\((?:[^()\n]|\([^()\n]*\))*\)\s*$", re.M)
 _BOUND_NAME = re.compile(r"^\s*(\w+)\s*=\s*([^\n]*)", re.M)
 _IFACE_NAME = re.compile(r"interface|iface", re.I)
 # a mask bit cleared -- not an attribute's subscript: `gfu.vec[int(d)] = 0.0` zeroes a value
@@ -1087,7 +1217,11 @@ def unset_mask_bits(content: str) -> str:
         if re.fullmatch(r"\w+", arg) and re.search(r"FreeDofs|GetDofs|BitArray\s*\(", _src):
             continue
         after = body[m.end():]
-        first_write = re.search(rf"\b{re.escape(name)}\s*\[[^\]]+\]\s*=(?!=)", after)
+        # A SINGLE-BIT .Set(i) / .Clear(i) IS A SINGLE-BIT WRITE TOO: a mask built by
+        # `m = BitArray(n)` and `m.Set(i)` for its free dofs was not seen, through four
+        # versions and 7.6 minutes of one side (measured).
+        first_write = re.search(rf"\b{re.escape(name)}\s*\[[^\]]+\]\s*=(?!=)"
+                                rf"|\b{re.escape(name)}\.(?:Set|Clear)\s*\(\s*[^)\s]", after)
         # A WRITE OF EVERY BIT INITIALISES IT as well as .Clear() or .Set() does: a
         # full slice `m[:] = FreeDofs()` (every bit copied, measured on 20 of 20
         # constructions) and a loop over all of its bits were called "single-bit
@@ -1159,6 +1293,25 @@ def imported_values_not_held(content: str) -> str:
             i = j
         return rhs
 
+    # A SOLVE WHOSE RESULT GOES INTO ANOTHER VECTOR. Measured on a coupled run: every
+    # version of its side solved with `a.mat.Inverse(free_dofs).Mult(gfu.vec, f.vec)`,
+    # which applies the inverse to the solution vector and writes the result over the
+    # load; the solution was never solved, and the run handed in nothing.
+    _gfs = set(re.findall(r"^\s*(\w+)\s*=\s*(?:ngsolve\.)?GridFunction\s*\(", body, re.M))
+    _lfs = set(re.findall(r"^\s*(\w+)\s*=\s*(?:ngsolve\.)?LinearForm\s*\(", body, re.M))
+    _invs = set(_INVERSE_NAME.findall(body))
+    for mm in _INVERSE_MULT.finditer(body):
+        if mm.group("inv") and mm.group("inv") not in _invs:
+            continue
+        x = re.sub(r"[\s-]", "", mm.group("x"))
+        y = re.sub(r"\s", "", mm.group("y"))
+        if x.endswith(".vec") and x[:-4] in _gfs and y != x:
+            into = (f"a temporary ({y}) that nothing keeps" if y.startswith("-") else y)
+            return (f"`{' '.join(mm.group(0).split())[:90]}`: M.Mult(x, y) writes M x INTO y, so "
+                    f"this applies the inverse to {x} and puts the result in {into} -- {x[:-4]} "
+                    f"is never solved" + (", and the load is written over" if y.endswith(".vec")
+                                          and y[:-4] in _lfs else "")
+                    + ". A solve's result has to land in the solution vector.")
     dropped = _DISCARDED_SOLVE.search(body)
     if dropped:
         return (f"`{' '.join(dropped.group(0).split())[:90]}` computes a solve and throws its "
@@ -1331,9 +1484,10 @@ def imported_values_not_held(content: str) -> str:
             if not (dm and _holds_interface(dm.group(1))):
                 return (
                     f"interface values are written into `{sol}.vec[...]`, but "
-                    "nothing holds those entries fixed: the space's `dirichlet=` "
-                    "argument does not name the interface boundary and no free-dof "
-                    "mask excludes them. The solve is free to move them, so the "
+                    "nothing holds those entries fixed that this check can read: the "
+                    "space's `dirichlet=` argument names no boundary called "
+                    "\"interface\" (the name the served lines integrate over) and no "
+                    "free-dof mask excludes them. The solve is free to move them, so the "
                     "condition you imported is a starting guess rather than a "
                     "boundary condition. Either name the boundary in the space or "
                     "clear those entries out of the BitArray the solve inverts on.")
@@ -1573,19 +1727,7 @@ def hand_written_beside_a_served_side(content: str, near=None) -> str:
             else f"write_participant_contract(solver=<this side's code>, path='{rel}')")
     # WHICH SERVED CHECKS THE FILE LACKS, read from the file: a re-typed contract that kept
     # its held-edge stop under a renamed comment was told it carried none of them.
-    _labels = (("EXPORT SELF-CHECK", "the export self-check"),
-               ("OUTER BOUNDARY", "the held-edge check"),
-               ("INTERFACE DOFS", "the interface list against the mesh"),
-               ("INTERFACE VERTICES", "the interface list against the mesh"),
-               ("SOLVE SELF-CHECK", "the solve self-check"))
-    _missing = []
-    for _lab, _what in _labels:
-        if _lab not in content and _what not in _missing:
-            if _lab == "INTERFACE DOFS" and "INTERFACE VERTICES" in content:
-                continue
-            if _lab == "INTERFACE VERTICES" and "INTERFACE DOFS" in content:
-                continue
-            _missing.append(_what)
+    _missing = _served_checks_lacking(content)
     _lack = (f" It lacks the served {', '.join(_missing)}, so a defect those would stop runs on "
              f"silently." if _missing else "")
     return (

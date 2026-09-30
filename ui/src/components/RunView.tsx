@@ -8,7 +8,12 @@ import FilesDrawer from './FilesDrawer'
 import Glyph, { STATE } from './Glyph'
 import { runsChanged } from './Shell'
 import Stage from './Stage'
+import { stepFolder } from './StepOutputs'
 import Transcript from './Transcript'
+
+// the tools whose reply can be a solver result (webui/outcome.py SOLVER_TOOLS)
+const SOLVER_TOOLS = new Set(['run_simulation', 'run_with_generator', 'coupled_solve', 'couple',
+                              'couple_levels', 'couple_precice', 'verify_mesh_independence'])
 
 function pref(key: string, fallback: string) {
   try { return localStorage.getItem(key) ?? fallback } catch { return fallback }
@@ -19,8 +24,9 @@ function pref(key: string, fallback: string) {
     displayed somebody else's vortex street as its answer. */
 function useField(runId: string, settle: number) {
   const [field, setField] = useState<FieldSeries | null>(null)
+  const [fieldAt, setFieldAt] = useState('')
   const [pictures, setPictures] = useState<{ rel: string; name: string; mtime: number }[]>([])
-  useEffect(() => { setField(null); setPictures([]) }, [runId])
+  useEffect(() => { setField(null); setFieldAt(''); setPictures([]) }, [runId])
   useEffect(() => {
     let dead = false
     // One scan, a little after the steps stop arriving. It used to start a
@@ -36,6 +42,7 @@ function useField(runId: string, settle: number) {
     // the whole folder is walked, even after a field is found: stopping there
     // left out every picture that came after it
     let found: FieldSeries | null = null
+    let foundAt = ''
     const walk = async (sub: string, depth: number): Promise<void> => {
       if (depth > 3) return
       const d = await api.files(runId, sub).catch(() => null)
@@ -51,19 +58,19 @@ function useField(runId: string, settle: number) {
         if (seen.get(f.rel_path) === f.mtime) continue
         seen.set(f.rel_path, f.mtime)
         const v = await api.viz(f.rel_path).catch(() => null)
-        if (v?.kind === 'field_series') found = v as unknown as FieldSeries
+        if (v?.kind === 'field_series') { found = v as unknown as FieldSeries; foundAt = sub }
       }
     }
     timer = window.setTimeout(() => {
       walk('', 0).then(() => {
         if (dead) return
-        if (found) setField(found)
-        setPictures(pics.sort((a, b) => b.mtime - a.mtime).slice(0, 6))
+        if (found) { setField(found); setFieldAt(foundAt) }
+        setPictures(pics.sort((a, b) => b.mtime - a.mtime).slice(0, 12))
       })
     }, settle ? 2500 : 0)
     return () => { dead = true; clearTimeout(timer) }
   }, [runId, settle])
-  return { field, pictures }
+  return { field, fieldAt, pictures }
 }
 
 export default function RunView({ id, config, groups }: {
@@ -81,7 +88,22 @@ export default function RunView({ id, config, groups }: {
   const running = !!session?.running
   const outcome = running ? 'running' : (session?.outcome ?? 'running')
   const settle = events.filter((e) => e.type === 'tool_result' || e.type === 'done').length
-  const { field, pictures } = useField(id, settle)
+  const { field, fieldAt, pictures } = useField(id, settle)
+  // the folders solver steps wrote into: their files are shown under those steps
+  const stepFolders = useMemo(() => {
+    const out = new Set<string>()
+    for (const e of events) {
+      if (e.type !== 'tool_result' || !SOLVER_TOOLS.has(e.tool || '')) continue
+      const f = stepFolder(String(e.result || ''), id)
+      if (f) out.add(f)
+    }
+    return out
+  }, [events, id])
+  const inStep = (sub: string) => [...stepFolders].some((f) => sub === f || sub.startsWith(f + '/'))
+  const leftover = {
+    field: field && !inStep(fieldAt) ? field : null,
+    pictures: pictures.filter((p) => !inStep(p.name.includes('/') ? p.name.slice(0, p.name.lastIndexOf('/')) : '')),
+  }
   const [confirmDelete, setConfirmDelete] = useState(false)
   const model = findModel(groups, session?.model ?? null)
 
@@ -93,7 +115,7 @@ export default function RunView({ id, config, groups }: {
   useEffect(() => {
     const el = scroller.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
-  }, [events.length, field])
+  }, [events.length])
 
   const turnStart = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) if (events[i].type === 'turn_start' || events[i].type === 'user_msg') return events[i].t
@@ -245,27 +267,6 @@ export default function RunView({ id, config, groups }: {
       <div ref={scroller} className="flex-1 overflow-y-auto scroll"
            onScroll={(e) => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="max-w-[1040px] mx-auto px-10 py-6">
-          {field && (
-            <section className="mb-8" aria-label="Result">
-              <div className="text-[13px] font-medium text-muted mb-2">Field this run wrote</div>
-              <Stage series={field} />
-            </section>
-          )}
-
-          {pictures.length > 0 && (
-            <section className="mb-8" aria-label="Pictures this run made">
-              <div className="text-[13px] font-medium text-muted mb-2">Pictures this run made</div>
-              <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-                {pictures.map((p) => (
-                  <figure key={p.rel} className="bg-soft border line rounded-[8px] p-3">
-                    <img src={fileUrl(p.rel)} alt={p.name} loading="lazy" className="w-full rounded-[6px] bg-white" />
-                    <figcaption className="num mt-2 text-[13px] text-muted break-all">{p.name}</figcaption>
-                  </figure>
-                ))}
-              </div>
-            </section>
-          )}
-
           <div className="flex items-center gap-3 mb-3">
             <span className="text-[13px] font-medium text-muted">What happened</span>
             <div role="radiogroup" aria-label="How much to show" className="ml-auto flex rounded-[8px] border line p-0.5">
@@ -282,9 +283,27 @@ export default function RunView({ id, config, groups }: {
             </div>
           </div>
 
-          <Transcript events={events} live={running} showReasoning={reasoning} now={now} modelKind={model ? model.kind : session?.model === 'mock' ? 'test' : undefined}
+          <Transcript events={events} live={running} showReasoning={reasoning} now={now} runId={id} modelKind={model ? model.kind : session?.model === 'mock' ? 'test' : undefined}
                       onEndStep={model?.kind === 'claude-code' ? undefined : (cid) => send({ type: 'end_step', call_id: cid })}
                       onDecide={(cid, ok) => send(ok ? { type: 'approve', call_id: cid } : { type: 'reject', call_id: cid, reason: 'skipped by the user' })} />
+
+          {/* A solver step shows what it wrote under itself. What no solver step wrote (a
+              picture a shell command drew, say) is shown here, after the run, so nothing the
+              run made is out of sight and nothing is shown as the result of a step it is not. */}
+          {(leftover.field || leftover.pictures.length > 0) && (
+            <section className="mt-8" aria-label="Other files the run made">
+              <div className="text-[13px] font-medium text-muted mb-2">Pictures in the run's folder that no solver step wrote</div>
+              {leftover.field && <div className="mb-3"><Stage series={leftover.field} /></div>}
+              <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
+                {leftover.pictures.map((p) => (
+                  <figure key={p.rel} className="bg-soft border line rounded-[8px] p-3">
+                    <img src={fileUrl(p.rel)} alt="" loading="lazy" className="w-full rounded-[6px] bg-white" />
+                    <figcaption className="num mt-2 text-[13px] text-muted break-all">{p.name}</figcaption>
+                  </figure>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       </div>
 

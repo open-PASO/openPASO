@@ -350,7 +350,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         ep.unlink()
     try:
         r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p), capture_output=True,
-                           text=True, timeout=p.timeout)
+                           text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, f"participant {p.name} timed out"
     if not ep.exists():
@@ -768,7 +768,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 ep.unlink()
             try:
                 r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p), capture_output=True,
-                                   text=True, timeout=p.timeout)
+                                   text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
@@ -964,9 +964,9 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 # the step can hold still for one iteration and fall 4x on the next
                 # (measured on a linear pair: one-step ratios 1, 0.25, 1, 0.25, ...,
                 # where the last-step estimate is 5x short). With steps s1..s4 and
-                # q = max(s4/s2, s3/s1) < 1, the fixed point lies within
-                # q (s3 + s4) / (1 - q) -- exact for a steady two-step contraction,
-                # and s4 r / (1 - r) again when every step shrinks by the same r.
+                # q = s4/s2 < 1, the fixed point lies within q (s3 + s4) / (1 - q) --
+                # exact for a steady two-step contraction, and s4 r / (1 - r) again
+                # when every step shrinks by the same r.
                 _key = f"{n}.{bname}"
                 _hs = step_hist.setdefault(_key, [])
                 if block_residuals[_key] == block_residuals[_key]:
@@ -974,8 +974,12 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     del _hs[:-4]
                 else:
                     _hs.clear()
-                if len(_hs) == 4 and _hs[0] > 0 and _hs[1] > 0:
-                    _q = max(_hs[3] / _hs[1], _hs[2] / _hs[0])
+                # THE LATEST TWO-STEP RATIO ALONE: max(s4/s2, s3/s1) let an earlier slow
+                # pair override the final accelerated jump and named a block 5.4e-7 from its
+                # fixed point (measured). s4/s2 alone is still exact for a steady two-step
+                # contraction, in both phases of it.
+                if len(_hs) == 4 and _hs[1] > 0:
+                    _q = _hs[3] / _hs[1]
                     block_distance[_key] = (_q * (_hs[2] + _hs[3]) / (1.0 - _q)
                                             if _q < 0.95 else float("inf"))
             prev_blocks[n] = nb
@@ -1015,7 +1019,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
         if (floor is None and not noise_replicates and it >= _STALL_MIN_ITERS
                 and it < max_iter):
             plateau = _plateaued(history)
-            if plateau is not None:
+            if plateau is not None and not _reaches_tol(history, tol_eff, max_iter - it):
                 stalled_at = (it, plateau)
                 break
 
@@ -1182,7 +1186,7 @@ def probe_interface_sensitivity(participants: list[Participant],
                 if ep.exists():
                     ep.unlink()
                 r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p),
-                                   capture_output=True, text=True, timeout=p.timeout)
+                                   capture_output=True, text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
                 if r.returncode != 0 or not ep.exists():
                     return None
                 return InterfaceData.from_json(ep)
@@ -1436,6 +1440,27 @@ def _plateaued(history: list[float], window: int = _STALL_WINDOW,
     early = float(np.median(vals[-2 * window:-window]))
     late = float(np.median(vals[-window:]))
     return (early, late) if early > 0 and late >= ratio * early else None
+
+
+def _reaches_tol(history: list[float], tol: float, remaining: int,
+                 window: int = _STALL_WINDOW) -> bool:
+    """Does the rate measured over the last 2*window residuals reach `tol` within
+    `remaining` iterations? A slow contraction is not a plateau: at 0.99 per
+    iteration the median ratio over ten is 0.904, above the plateau bar, and the
+    run was stopped at iteration 30 whatever max_iter said. A residual that is
+    flat or rising never gets there, and still stops."""
+    vals = [v for v in history if np.isfinite(v) and v > 0]
+    if len(vals) < 2 * window or remaining <= 0:
+        return False
+    early = float(np.median(vals[-2 * window:-window]))
+    late = float(np.median(vals[-window:]))
+    if not (0.0 < late < early):
+        return False
+    rate = (late / early) ** (1.0 / window)
+    last = vals[-1]
+    if last <= tol:
+        return True
+    return float(np.log(tol / last) / np.log(rate)) <= remaining
 
 
 def _stalled(history: list[float], window: int = 12, floor_window: int = 6) -> bool:

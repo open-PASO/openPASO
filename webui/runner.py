@@ -239,10 +239,24 @@ def _wrap_tool(tool, *, emitter, get_mode, gate, agent_label="agent", take_steer
                 note = "\n\n".join(x["text"] for x in steers)
                 result = (f"{result}\n\n[MESSAGE FROM THE USER, sent while this step was "
                           f"running. Read it and adjust what you do next:]\n{note}")
-            from .outcome import shorten
-            await emitter({"type": "tool_result",
-                           "call_id": call_id, "tool": tool.name,
-                           "result": shorten(result)})
+            from .outcome import SOLVER_TOOLS, classify_solver_result, shorten
+            # The verdict is read from the WHOLE result and carried, because
+            # what is recorded is a shortened copy and a shortened copy is not
+            # valid JSON. Re-deriving from it fell to a regex that needs a
+            # "status" key — which a coupling reply does not have — so a
+            # coupling the gate had certified was read as "computed nothing",
+            # and a failed one whose first participant looked good was read as
+            # verified. The evidence must be judged before it is cut.
+            event = {"type": "tool_result", "call_id": call_id,
+                     "tool": tool.name, "result": shorten(result)}
+            if tool.name in SOLVER_TOOLS:
+                from .outcome import verdict_reason
+                event["verdict"] = classify_solver_result(str(result))
+                # and why, in the solver's own words, read from the whole reply
+                # before it is cut: the closing line says this rather than a
+                # sentence of ours that fits every case and explains none
+                event["why"] = verdict_reason(str(result))
+            await emitter(event)
             return result
 
         def _run(self, *args, **kwargs):

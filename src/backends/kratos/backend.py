@@ -626,6 +626,7 @@ class KratosBackend(SolverBackend):
                 cwd=str(work_dir),
                 env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

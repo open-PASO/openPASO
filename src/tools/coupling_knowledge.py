@@ -2478,8 +2478,8 @@ def _payload(title: str, sides: str, script_name: str, launch: str,
             f"{_RECAP}\n"
             f"## PARTICIPANT CONTRACT — PUT THIS IN ITS OWN FILE NOW with "
             f"write_participant_contract(solver=<code>, path=<side dir>/participant_<x>.py, "
-            f"variant=<the physics word>): it writes this same text, byte for "
-            f"byte, so nothing is re-typed. Then edit the marked block IN PLACE "
+            f"variant=<the physics word>): it writes this same code, its "
+            f"comments kept, so nothing is re-typed. Then edit the marked block IN PLACE "
             f"and write the solve where the banner sits. It is the handshake, the "
             f"interface sign convention, the consistent flux recovery, the "
             f"exports schema and the export self-check, thinned of its "
@@ -2894,7 +2894,9 @@ CFG.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
 NX, NY = CFG["nx"], CFG["ny"]
 X0, X1, Y0, Y1 = CFG["x0"], CFG["x1"], CFG["y0"], CFG["y1"]
 KV = CFG["k"]; IF = CFG.get("iface", "left")
-SIDE = CFG.get("side", "neumann")   # "neumann" | "dirichlet": the role the task gives this subdomain
+SIDE = CFG.get("side")   # "neumann" | "dirichlet": the role the task gives this subdomain
+if SIDE not in ("neumann", "dirichlet"):     # a default here chose the role for the task
+    sys.exit('config.json needs "side": "dirichlet" or "neumann" -- the role your task gives this subdomain')
 
 # SOURCE f(x,y) AS A 4C EXPRESSION STRING (not a Python function): '^' for
 # powers (never '**'), lowercase 'pi' ('PI' aborts: "Missing variables PI"),
@@ -3290,7 +3292,7 @@ with open(f"interface_level{_LVL}.csv", "w") as _f:
 # runs lost their evidence to logs whose only NDOF sat inside a prose
 # line). The descriptive line follows it.
 print(f"NDOF = {len(nodes)}")
-print(f"4C Neumann participant: NDOF = {len(nodes)}  "
+print(f"4C {SIDE} participant: NDOF = {len(nodes)}  "
       f"max|u| = {max(abs(t) for t in vals) if vals else 0:.6e}")
 
 # ── WHAT YOUR SOLVE MUST LEAVE BEHIND ──────────────────────────────────────
@@ -3619,13 +3621,41 @@ def _participant_key_suffix(solver: str, request: str = "") -> tuple:
   return key, suffix
 
 
+def _door_scaffold(key: str) -> str:
+  """The config-driven participant the door shows for 4C or DUNE-fem (base role),
+  as code; '' if the door shows none."""
+  door = {"fourc": _fourc, "dune": _dune}.get(key)
+  if door is None:
+    return ""
+  payload = door()
+  i = payload.find("## PARTICIPANT CONTRACT")
+  j = payload.find("```python", i if i >= 0 else 0)
+  k = payload.find("```", j + 9) if j >= 0 else -1
+  if j < 0 or k < 0:
+    return ""
+  block = payload[j + len("```python"):k].lstrip("\n")
+  return block if ("config.json" in block and "exports.json" in block) else ""
+
+
 def participant_contract_text(solver: str, request: str = "") -> tuple:
   """(text, error): the WHOLE served contract for one participant, solve
   elided, exactly the concatenation of the parts the knowledge door serves --
-  it is produced by the same `_serve_participant` call, which fails closed."""
+  it is produced by the same `_serve_participant` call, which fails closed.
+
+  4C AND DUNE-fem SHOW A CONFIG-DRIVEN SCAFFOLD, AND THIS IS IT. Their doors
+  lead with a scaffold that reads the level's mesh from config and writes the
+  per-level dumps, and said the writer puts "this same text, byte for byte" on
+  disk -- while the writer put the older file contract there, which hard-codes
+  the mesh and dumps nothing (measured: all five cells of a coupled round got
+  it, and a ladder ran three levels on one mesh)."""
   path, _label, err = resolve_participant(solver, request)
   if path is None:
     return "", err
+  key, suffix = _participant_key_suffix(solver, request)
+  if not suffix:
+    scaffold = _door_scaffold(key)
+    if scaffold:
+      return scaffold, ""
   return _serve_participant(path), ""
 
 
@@ -3643,7 +3673,7 @@ def coupling_participant(solver: str, request: str = "") -> str:
     return err
   key, suffix = _participant_key_suffix(solver, request)
   requested = (request or "").strip().lower().replace("_", "-")
-  source = _serve_participant(path)
+  source, _ = participant_contract_text(solver, request)   # the writer's text, part by part
   chunks = _participant_chunks(source)
   match = re.search(r"(?:^|:)part(\d+)(?:$|:)", requested)
   part = int(match.group(1)) if match else 1

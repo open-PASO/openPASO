@@ -91,6 +91,7 @@ def _probe_conda_env(env_name_hints: list[str], import_name: str,
         result = subprocess.run(
             [conda_bin, "env", "list", "--json"],
             capture_output=True, text=True, timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         envs = json.loads(result.stdout).get("envs", [])
     except Exception:
@@ -112,6 +113,7 @@ def _probe_conda_env(env_name_hints: list[str], import_name: str,
                 [str(python), "-c",
                  f"import {import_name}; print(getattr({import_name}, '__version__', 'ok'))"],
                 capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL,
             )
             if r.returncode == 0:
                 version = r.stdout.strip()
@@ -195,6 +197,7 @@ def _get_git_info(repo_path: str) -> Optional[dict]:
             r = subprocess.run(
                 ["git", "-C", repo_path] + cmd,
                 capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL,
             )
             return r.stdout.strip() if r.returncode == 0 else None
 

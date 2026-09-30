@@ -39,6 +39,7 @@ _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-
 # data are protected, and everything else is scrubbed as prose.
 _ENCODED = re.compile(r'"(?:frames|mask|data|image)"\s*:\s*"[A-Za-z0-9+/=\s]{40,}"'
                       r"|data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+")
+_LOOKS_ENCODED = re.compile(r"[A-Za-z0-9+/=\s]{40,}")
 
 
 def _scrub_prose(t: str) -> str:
@@ -70,13 +71,24 @@ def scrub_text(s: str) -> str:
     return "".join(out)
 
 
-def scrub(obj):
+# The keys whose values are encoded data. scrub_text() recognises them written
+# out ("frames": "..."), which is how a whole document reaches it — but walking
+# a parsed object hands over the bare value with its key already stripped, so
+# the guard could not fire there at all and a field's frames were scrubbed as
+# prose. This is the same defect a third time in this file, so the walk names
+# the keys itself rather than relying on the text form.
+_ENCODED_KEYS = {"frames", "mask", "data", "image"}
+
+
+def scrub(obj, _key: str | None = None):
     if isinstance(obj, str):
+        if _key in _ENCODED_KEYS and _LOOKS_ENCODED.match(obj[:64]):
+            return obj                      # the numbers a solver produced
         return scrub_text(obj)
     if isinstance(obj, list):
-        return [scrub(x) for x in obj]
+        return [scrub(x, _key) for x in obj]
     if isinstance(obj, dict):
         # keys as well: a run's own JSON can be keyed by a path it wrote
-        return {(scrub_text(k) if isinstance(k, str) else k): scrub(v)
+        return {(scrub_text(k) if isinstance(k, str) else k): scrub(v, k if isinstance(k, str) else None)
                 for k, v in obj.items()}
     return obj

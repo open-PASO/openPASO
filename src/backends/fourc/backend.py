@@ -1626,6 +1626,7 @@ class FourcBackend(SolverBackend):
         job = JobHandle(job_id=job_id, backend_name="fourc", work_dir=work_dir, status="running")
 
         start = time.time()
+        job.started_at = start
         try:
             env = os.environ.copy()
             # Ensure 4C dependencies are on the library path
@@ -1642,6 +1643,7 @@ class FourcBackend(SolverBackend):
                 cwd=str(work_dir),
                 env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a
@@ -1710,7 +1712,7 @@ class FourcBackend(SolverBackend):
                 # here so its result can be opened at all; a run that has VTK is left alone.
                 # (The comment this replaces claimed every template requests runtime output;
                 # twelve served decks did not, measured 2026-09-24.)
-                await self._convert_native_output_to_vtu(work_dir, binary)
+                await self._convert_native_output_to_vtu(work_dir, binary, since=start)
             (work_dir / "stdout.log").write_text(stdout.decode(errors="replace"))
             (work_dir / "stderr.log").write_text(stderr.decode(errors="replace"))
         except asyncio.TimeoutError:
@@ -1724,7 +1726,8 @@ class FourcBackend(SolverBackend):
 
         return job
 
-    async def _convert_native_output_to_vtu(self, work_dir: Path, binary=None) -> None:
+    async def _convert_native_output_to_vtu(self, work_dir: Path, binary=None,
+                                            since: float | None = None) -> None:
         """Make a run that wrote only 4C-native output readable, by converting it to VTU.
 
         4C's runtime VTK writer exists for STRUCTURE, FLUID and BEAMS only. A Thermo, Ale,
@@ -1741,10 +1744,32 @@ class FourcBackend(SolverBackend):
         (bounded); keeps its console in post_processor.log beside the results. A failed
         conversion (the 1-D airways result type is one, measured) leaves the solve as it was:
         the result simply stays unreadable and the log says why.
+
+        `since` is when this run started. A reused work directory can hold an earlier
+        run's VTU: counted, it made this run skip its conversion and hand back the
+        earlier run's fields as its own result (Copilot review of the org PR, verified
+        in the code). Only files written since the run started count.
         """
-        if any(work_dir.rglob("*.vtu")) or any(work_dir.rglob("*.pvd")):
-            return                                   # runtime output exists: nothing to convert
-        controls = sorted(work_dir.glob("*.control"))
+        def _this_run(paths):
+            return [q for q in paths if since is None or q.stat().st_mtime >= since - 1.0]
+        # PER FIELD, NOT PER FOLDER. Measured 2026-09-28 on 4C 2026.3.0 (the interface
+        # session): a poro-fluid run writes a runtime VTK series "fluid-poro" by itself, while
+        # its structure, fluid and porofluid fields exist only as native results; the folder
+        # held a .vtu, so nothing was converted and three fields stayed unreadable. A field is
+        # covered when a VTU series of its own name exists (series = the file name without its
+        # trailing -NNNNN step and rank numbers); convert when any native field is not.
+        import re as _re
+        native = {m.group(1) for q in _this_run(work_dir.glob("*.result.*"))
+                  for m in [_re.search(r"\.result\.([A-Za-z0-9_]+)\.s\d+", q.name)] if m}
+        series = set()
+        for q in _this_run(list(work_dir.rglob("*.vtu")) + list(work_dir.rglob("*.pvtu"))
+                           + list(work_dir.rglob("*.pvd"))):
+            stem = _re.sub(r"(-\d+)+$", "", q.stem)
+            series.add(stem)
+            series.add(stem.split("-", 1)[1] if "-" in stem else stem)   # "<prefix>-<field>"
+        if series and native <= series:
+            return                                   # every native field has runtime output
+        controls = sorted(_this_run(work_dir.glob("*.control")))
         if not controls:
             return
         candidates: list[Path] = []
@@ -1776,14 +1801,23 @@ class FourcBackend(SolverBackend):
             args = [str(tool), f"--file={prefix}"]
             if tool.name == "post_processor":
                 args += ["--filter=vtu", "--postprocessor_deprecation_warning_off"]
+            elif tool.read_bytes()[:2] == b"#!":
+                # this build's post_vtu is a script that adds --filter=vtu and passes the
+                # rest on to post_processor, which otherwise stops at "Press Enter to
+                # continue" (measured); an old compiled post_vtu does not know the flag
+                args += ["--postprocessor_deprecation_warning_off"]
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                    cwd=str(work_dir), env=env)
+                    cwd=str(work_dir), env=env, stdin=asyncio.subprocess.DEVNULL)
                 try:
                     out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
                 except asyncio.TimeoutError:
                     proc.kill()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=30)   # reaped, not left behind
+                    except asyncio.TimeoutError:
+                        pass
                     with log.open("a") as fh:
                         fh.write(f"$ {' '.join(args)}\nTIMED OUT after 300 s\n")
                     logger.warning(f"post_processor timed out on {ctrl.name}")
@@ -1801,6 +1835,9 @@ class FourcBackend(SolverBackend):
         results = []
         for ext in ["*.vtu", "*.pvd", "*.pvtu"]:
             results.extend(job.work_dir.rglob(ext))
+        if job.started_at is not None:
+            # an earlier run's files in a reused work directory are not this run's result
+            results = [q for q in results if q.stat().st_mtime >= job.started_at - 1.0]
         return sorted_by_step(results)
 
 

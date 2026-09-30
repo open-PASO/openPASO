@@ -8,7 +8,7 @@ Group: Find out.
 
 | Parameter | Type | Required | Default |
 |---|---|---|---|
-| `keyword` | string | yes |  |
+| `keyword` | string | no | `''` |
 | `solver` | string | no | `'fourc'` |
 | `action` | string | no | `'search'` |
 | `max_results` | integer | no | `3` |
@@ -34,4 +34,8 @@ The text below is the tool's own description, exactly as the AI model receives i
             - "template" — get a generated template for this physics
             - "tutorials" — list available tutorials
         max_results: Maximum results (default 3)
+        variant: For action="template": which of the physics' template
+            variants to generate (e.g. '2d', '3d'). action="tutorials"
+            lists them. With a variant and no keyword, the physics that
+            has that variant is used.
     ```

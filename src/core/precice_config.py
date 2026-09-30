@@ -514,7 +514,7 @@ def run_precice_coupling(
             # group can be killed; pr.kill() alone orphans the ranks.
             procs[p["name"]] = (subprocess.Popen(
                 p["command"], cwd=work_dir, env=env, stdout=lf,
-                stderr=subprocess.STDOUT, text=True, start_new_session=True), lf)
+                stderr=subprocess.STDOUT, text=True, start_new_session=True, stdin=subprocess.DEVNULL), lf)
         # ONE shared deadline, and stop the moment a participant dies badly.
         # Waiting per participant with the FULL timeout meant a partner that
         # crashed in milliseconds still cost the whole timeout (N x timeout in the
@@ -681,9 +681,9 @@ def verify_precice_coupling(work_dir: Path = None, timeout: int = 60) -> tuple[b
     py = sys.executable
     try:
         pa = subprocess.Popen([py, "participant.py", "A", "B"], cwd=wd, env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         pb = subprocess.Popen([py, "participant.py", "B", "A"], cwd=wd, env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         out_b, _ = pb.communicate(timeout=timeout)
         pa.wait(timeout=timeout)
     except subprocess.TimeoutExpired:

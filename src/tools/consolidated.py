@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from core.backend import detect_template_language, error_excerpt
 from core.registry import get_backend, available_backends, all_backends
-from core.fabrication_gate import inspect_result_artefacts
+from core.fabrication_gate import inspect_result_artefacts, result_content_findings
 from core.critic_gate import (CriticRegistry, CriticGateError,
                               setup_digest)
 from core.quality_checks import check_result_files_finite, check_summary_finite
@@ -299,7 +299,9 @@ def _setup_difference(records, setup_text: str) -> str:
         except (TypeError, ValueError):
             continue
         diff = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
-        if diff and (best_diff is None or len(diff) < len(best_diff)):
+        # A TIE GOES TO THE LATER REVIEW: the records come oldest first, and the
+        # oldest of two equally close reviews was named (measured).
+        if diff and (best_diff is None or len(diff) <= len(best_diff)):
             best, best_diff = was, diff
     if not best_diff:
         return ""
@@ -313,9 +315,31 @@ def _setup_difference(records, setup_text: str) -> str:
                 for name, files in (now.get(key) or {}).items()
                 for fn, h in files.items()
                 if (best.get(key) or {}).get(name, {}).get(fn) != h)
-            parts.append("the CONTENTS of " + ", ".join(changed[:3])
-                         + " changed after the review" if changed
-                         else "the participant files changed after the review")
+            # A FILE THE REVIEW NEVER SAW DID NOT CHANGE. Measured: a review named its
+            # work_dir "$(pwd)/side_A", which is not expanded here, so it found no
+            # script at all, and this said the scripts' CONTENTS changed after it.
+            unseen = sorted(
+                f"{name}/{fn}"
+                for name, files in (now.get(key) or {}).items()
+                for fn, h in files.items()
+                if (best.get(key) or {}).get(name, {}).get(fn) == "absent" and h != "absent")
+            # A FILE THE REVIEWED SETUP NEVER NAMED is not a file that changed.
+            absent_from_review = sorted(
+                f"{name}/{fn}"
+                for name, files in (now.get(key) or {}).items()
+                for fn, h in files.items()
+                if fn not in ((best.get(key) or {}).get(name) or {}))
+            if unseen:
+                parts.append("the review found no file at " + ", ".join(unseen[:3])
+                             + " (the work_dir it named held none), so it is not a review "
+                               "of these scripts")
+            elif absent_from_review and len(absent_from_review) == len(changed):
+                parts.append(", ".join(absent_from_review[:3]) + " was not in the reviewed setup")
+            elif changed:
+                parts.append("the CONTENTS of " + ", ".join(changed[:3])
+                             + " changed after the review")
+            else:
+                parts.append("the participant files changed after the review")
             continue
         was_v, now_v = best.get(key), now.get(key)
         parts.append(f"{key}: reviewed {was_v!r}, now {now_v!r}"
@@ -483,14 +507,19 @@ _VARIANT_QUALIFIERS = [
     ("steady", ("steady", "stationary", "static"),
      ("transient", "unsteady", "dynamic")),
     ("nonlinear", ("nonlinear", "non_linear"), ()),
+    ("cylinder", ("cylinder",), ()),
 ]
 _QUALIFIER_WORDS = {
     "3d": ("3d", "three-dimensional", "three dimensional"),
     "2d": ("2d", "two-dimensional", "plane stress", "plane strain"),
+    # a wake that sheds vortices has no steady state: asking for the shedding, the
+    # Strouhal number or a vortex street is asking for an unsteady run
     "transient": ("transient", "unsteady", "time-dependent", "time dependent",
-                  "time-varying", "evolving"),
+                  "time-varying", "evolving", "vortex shedding", "shedding", "strouhal",
+                  "vortex street", "wake"),
     "steady": ("steady", "stationary", "static", "steady-state"),
     "nonlinear": ("nonlinear", "non-linear", "large deformation", "finite strain"),
+    "cylinder": ("cylinder", "obstacle", "bluff body"),
 }
 
 
@@ -514,30 +543,46 @@ def _select_template_variant(query: str, variants: list[str]) -> tuple[str, str]
     if not variants:
         return "", ""
     q = (query or "").lower()
+    # WHOLE WORDS: "steady" is inside "unsteady", and a request for an unsteady run
+    # was also read as a request for a steady one -- and told that no variant is
+    # steady, so "adapt it rather than running it as-is".
     asked = [name for name, words in _QUALIFIER_WORDS.items()
-             if any(w in q for w in words)]
+             if any(re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", q) for w in words)]
 
-    chosen, unmet = variants[0], []
-    for name in asked:
-        satisfies, contradicts = next(
-            (s, c) for n, s, c in _VARIANT_QUALIFIERS if n == name)
-        hit = next((v for v in variants
-                    if any(t in v.lower() for t in satisfies)
-                    and not any(t in v.lower() for t in contradicts)), None)
-        if hit:
-            chosen = hit
-        else:
-            unmet.append(name)
+    # THE VARIANT THAT SATISFIES THE MOST OF WHAT WAS ASKED. Each qualifier used to
+    # overwrite the choice of the one before, so "an unsteady wake behind a cylinder"
+    # ended on whichever cylinder variant came first -- the steady one -- although a
+    # variant satisfying both was in the list. Ties keep catalog order.
+    def _fits(v: str, name: str) -> bool:
+        satisfies, contradicts = next((s, c) for n, s, c in _VARIANT_QUALIFIERS if n == name)
+        if any(t in v.lower() for t in contradicts):
+            return False
+        if name == "steady" and "steady" not in v.lower():
+            # a variant whose name says nothing about time is a steady one (channel_cylinder
+            # is steady, and the transient twin says so in its name)
+            return True
+        return any(t in v.lower() for t in satisfies)
+    chosen = max(variants, key=lambda v: sum(_fits(v, name) for name in asked))
+    # what the CHOSEN variant does not provide, and whether another one does: a
+    # request for "unsteady 3d flow" was told `3d` was selected "for: 3d, transient"
+    missed = [name for name in asked if not _fits(chosen, name)]
+    elsewhere = {name: [v for v in variants if v != chosen and _fits(v, name)] for name in missed}
 
     bits = []
-    if unmet:
+    nowhere = [u for u in missed if not elsewhere[u]]
+    if nowhere:
         bits.append(
-            "⚠ You asked for " + " and ".join(f"**{u}**" for u in unmet)
+            "⚠ You asked for " + " and ".join(f"**{u}**" for u in nowhere)
             + f", and no template variant provides it. Serving `{chosen}`, "
             f"which does NOT satisfy that — adapt it rather than running it "
             f"as-is.")
-    elif asked:
-        bits.append(f"Selected `{chosen}` for: {', '.join(asked)}.")
+    for u in missed:
+        if elsewhere[u]:
+            bits.append(f"⚠ You asked for **{u}**, and `{chosen}` does NOT satisfy it: "
+                        f"`{elsewhere[u][0]}` does -- request it by name.")
+    satisfied = [name for name in asked if name not in missed]
+    if satisfied:
+        bits.append(f"Selected `{chosen}` for: {', '.join(satisfied)}.")
     if len(variants) > 1:
         others = [v for v in variants if v != chosen]
         bits.append(f"Other variants available: {', '.join(others)} — request "
@@ -864,8 +909,12 @@ def _coupling_setup_text(**kwargs) -> str:
     # couple() itself recommends, run with couple_levels' own default of 150, were
     # two setups, and a right ladder read "no critic review of this coupling setup
     # is on record (max_iter: reviewed 100, now 150)".
+    # AND HOW THE ITERATION IS RELAXED DOES NOT CHANGE WHAT IS SOLVED EITHER. theta,
+    # the accelerator and the relaxation decide how fast the fixed point is reached,
+    # not which one: a review at theta 0.001 and a right ladder run at 0.5 were two
+    # setups, and the ladder read NOT VERIFIED (measured).
     _COVERED = ("participants", "monolithic", "probe", "tol",
-                "theta", "accelerator", "relaxation", "problem", "solver_a",
+                "problem", "solver_a",
                 "solver_b", "nx", "ny", "params", "data", "exchanges",
                 "scheme", "dimensions", "max_time", "time_window",
                 "convergence_tol", "mapping")
@@ -939,7 +988,7 @@ def _run_monolithic_check(monolithic: str, exports: dict,
         out.unlink()
     try:
         p = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True,
-                           timeout=int(spec.get("timeout", 3600)))
+                           timeout=int(spec.get("timeout", 3600)), stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError, ValueError) as e:
         return ({"status": "reference solve failed", "detail": str(e)[:200]}, [],
                 [f"monolithic consistency: NOT CHECKED — the un-split reference "
@@ -1449,11 +1498,20 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                 + ". Per openPASO attestation this claim must NOT be reported as "
                 "a result; revise the setup and re-run.")
     elif not critic_ok:
+        # THE CAUSE FIRST, AND WHAT "PASSED" COVERS. Measured 2026-09-29 in the web interface:
+        # this read "the automated checks passed, but openPASO's MANDATORY independent critic
+        # has not reviewed this setup" on runs whose review WAS on record -- filed for another
+        # version of the script -- so the history showed an approved review and the verdict
+        # denied one, and a reader took "the automated checks passed" for a physics check on a
+        # run whose drag coefficient was 53,288 at every step.
         result["trustworthy_result"] = False
         result["verification"] = (
-            "NOT VERIFIED — the automated checks passed, but openPASO's MANDATORY "
-            "independent critic has not reviewed this setup, and openPASO treats no "
-            "result as trustworthy until it has (" + critic_note + "). Spawn a "
+            "NOT VERIFIED — no critic review on record matches this setup ("
+            + critic_note + "). openPASO's MANDATORY independent critic review is the gate "
+            "still open, and openPASO treats no result as trustworthy until it is closed. The "
+            "automated checks passed, and they are narrow: the run finished and wrote its "
+            "output, every number in it is finite, the mesh is not degenerate and the result "
+            "is not zero everywhere. They do not check that the physics is right. Spawn a "
             "critic to challenge the parameters, units, discretisation, problem "
             "statement and boundary conditions and to cross-check against "
             "literature/benchmarks, then call submit_critic_review with what it "
@@ -1464,7 +1522,8 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
         result["verification"] = (
             "VERIFIED — a critic review of this exact setup is on record ("
             + critic_note + ") and the run passed openPASO's verification-gate "
-            "numerical checks. This is verification, not validation: confirm "
+            "numerical checks (it finished; its output is finite, on a mesh that is not "
+            "degenerate, and not zero everywhere). This is verification, not validation: confirm "
             "physical validity against reality yourself. WHAT THE REVIEW PART DOES "
             "NOT PROVE: openPASO holds the review that was submitted and binds it to "
             "this exact setup, but it cannot see who wrote it. A model that composes a "
@@ -1482,8 +1541,72 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
             "first level was verified. "
             + _residual_coverage_note(result)
             + " " + _critic_coverage_note())
+    # WHAT THE RESULT ITSELF SHOWS rides in the verdict, whatever the verdict is: a note in a
+    # key of its own is a note nobody reads (the verdict is the line a reader and a model act on).
+    _notes = result.get("result_notes") or []
+    if _notes:
+        result["verification"] += (" MEASURED IN THE RESULT, and worth a look before relying on "
+                                   "it: " + "; ".join(_notes) + ".")
     result["critic_review"] = critic_note
     return result
+
+
+def _solver_module_owners() -> dict:
+    """Top-level module -> the solver it belongs to."""
+    from tools.participant_lint import _MODULE_TO_BACKEND
+    return {**_MODULE_TO_BACKEND, "basix": "fenics"}
+
+
+def _solver_modules_in(script: str) -> dict:
+    """The top-level modules a script imports that belong to one of openPASO's solvers,
+    each with that solver's name."""
+    import ast
+    import re as _re
+    try:
+        tops = set()
+        for node in ast.walk(ast.parse(script or "")):
+            if isinstance(node, ast.Import):
+                tops |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                tops.add(node.module.split(".")[0])
+    except SyntaxError:
+        tops = set(_re.findall(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", script or "", _re.M))
+    owners = _solver_module_owners()
+    return {m: owners[m] for m in tops if m in owners}
+
+
+def _what_the_error_is(error: str, solver: str) -> str:
+    """What a failed run already told us, with the call that works: the scrambled square, a
+    script run under the wrong solver, and the measured table in participant_lint. Empty when
+    openPASO has nothing measured to say about this failure.
+
+    Measured 2026-09-29 in the web interface: an NGSolve run failed nine times in a row, and
+    no reply named a fix -- the table of measured errors was handed only to coupled
+    participants' shell runs, never to run_simulation, the call a single-solver run makes
+    (and it did not yet hold those errors; they are in it now)."""
+    import re as _re
+    from tools.participant_lint import findings_from_output, scrambled_exponent_hint
+    named = []
+    hint = scrambled_exponent_hint(error or "")
+    if hint:
+        named.append(hint)
+    # the whole dotted name: a missing SUBmodule (dolfinx.io.gmshio) is an API change, not
+    # a missing solver, and the table below names it
+    missing = _re.search(r"No module named '([A-Za-z_][\w.]*)'", error or "")
+    owner = _solver_module_owners().get(missing.group(1)) if missing else None
+    if owner and owner != solver:
+        named.append(f"the script imports {missing.group(1)}, which is {owner}'s: run it with "
+                     f"solver='{owner}'. Each solver runs in its own interpreter, and {solver}'s "
+                     f"does not have {missing.group(1)}")
+    elif owner:
+        named.append(f"{solver}'s own interpreter cannot import {missing.group(1)} on this "
+                     f"install: discover(query='list') shows the interpreter openPASO found "
+                     f"for {solver}")
+    # the table's "its own interpreter" entries tell a PARTICIPANT to change its command;
+    # a run_simulation script has no command of its own, so the lines above say it instead
+    named += [f for f in findings_from_output(error or "")
+              if "this code has its own interpreter" not in f]
+    return "\n".join(named)
 
 
 def _short_reason(msg: str, limit: int = 240) -> str:
@@ -2245,10 +2368,18 @@ def _fuzzy_match_physics(backend, query: str) -> str:
     # query containing those letters, which is the same
     # collision class we just guarded the other direction
     # against.
-    for p in backend.supported_physics():
-        if (len(p.name) >= _MIN_LOOSE_MATCH_LEN
-                and p.name.lower() in query_lower):
-            return p.name
+    #
+    # THE MOST SPECIFIC NAME WINS, and the words are read with their
+    # separators normalised too. Measured 2026-09-28 in the web interface:
+    # "transient incompressible Navier-Stokes" matched `stokes` -- a substring
+    # of "navier-stokes", where the hyphen kept `navier_stokes` from matching --
+    # and the run was served the Stokes deciding facts for a Navier-Stokes
+    # problem. Catalog order decided which name a query holding two got.
+    hits = [p.name for p in backend.supported_physics()
+            if len(p.name) >= _MIN_LOOSE_MATCH_LEN
+            and (p.name.lower() in query_lower or p.name.lower() in normalised)]
+    if hits:
+        return max(hits, key=len)
 
     # 5. Loose substring of physics description (last resort,
     # same length guard).
@@ -2713,7 +2844,7 @@ _DECIDING_FACTS = {
     "febio": '1. READING RESULTS BACK IS ONE DECK LINE, and a solve that is never read back is no result. Put inside <Output><logfile>:\n       <node_data data="x;y;z;ux;uy;uz" delim="," file="nodal_out.csv"/>\n   FEBio then writes one block PER TIME STEP, each headed *Step/*Time/*Data lines (measured: 51 blocks for 50 steps, header \'*Data  = x;y;z;ux;uy;uz\'); parse the LAST block for the final state and interpolate those nodal values at your probe points (scipy LinearNDInterpolator on the coordinate columns works). Runs that reached NORMAL TERMINATION and still delivered nothing all skipped this line.\n2. THE VISCOELASTIC WRAPPER FAMILY MUST MATCH THE NESTED ELASTIC\'S FAMILY (measured on FEBio 4.12): type="uncoupled viscoelastic" REFUSES a coupled child like isotropic elastic -- the error says \'Component ... needs to have property "elastic" defined\' even though <elastic> is present, because its FAMILY does not fit the slot. The coupled wrapper type="viscoelastic" accepts <elastic type="isotropic elastic"> (E, v) and runs to NORMAL TERMINATION. Uncoupled wrappers take uncoupled children (Mooney-Rivlin with k, etc.).\n3. \'negative jacobians detected\' during a solve is usually NOT the mesh: a hex8 grid whose first element has positive centroid jacobian can still invert under too-large load steps or a too-stiff/soft material pairing. Before rebuilding the mesh, halve the step (<time_steps> up, <step_size> down) and re-check the material family pairing of fact 2.\n4. FEBio prints its banner and \'N O R M A L   T E R M I N A T I O N\' letter-spaced -- grep for \'N O R M A L\', not \'NORMAL\'.',
     # Every line measured by execution on this install (NGSolve 6.2.2604)
     # on 2026-09-04. repr-generated literal.
-    "ngsolve": "1. NEVER EVALUATE A COMPOUND-SPACE GridFunction DIRECTLY. On a product space (H1*H1, mixed), gfu(mesh(x,y)) either raises 'CompoundFESpace does not have an evaluator for VOL!' or -- measured, worse -- silently returns 0.0 while the field is nonzero. Evaluate the component: gfu.components[i](mesh(x,y)) (measured 0.2524 at the same point where the direct call returned 0.0).\n2. FORMS DO NOT SUPPORT -= (TypeError: unsupported operand). Subtract by adding the negated term at definition: a += (-1) * u * v * dx. Same for LinearForm.\n3. grad()/Grad() WORKS ON PROXIES AND GridFunctions, NOT ON ASSEMBLED CoefficientFunctions -- 'Operator grad not overloaded for CF ngfem::VectorialCoefficientFunction' (measured). Take grad(gfu.components[i]) and assemble what you need from those, or differentiate the symbolic expression BEFORE wrapping it in CoefficientFunction.\n4. Verbosity for a captured log: ngsolve.ngsglobals.msg_level = 3, or solvers.CG(..., printrates=True); NGSolve is otherwise quiet on success.\n5. THE 2-D GEOMETRY IS BUILT WITH netgen's SplineGeometry, AND IT HAS NEITHER AddVertex NOR AddRect (AttributeError, measured -- two runs died on it). A rectangle is one call: geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(<bottom>, <right>, <top>, <left>)) -- FOUR BOUNDARY NAMES OF YOUR CHOOSING, IN THAT EDGE ORDER. ds('<name>') and H1(..., dirichlet='<name>') select by exactly those names, and a ds() over a name the mesh does not carry integrates over NOTHING with no error; mesh with Mesh(geo.GenerateMesh(maxh=h)) and read the names back with mesh.GetBoundaries(). For a shape that is not a rectangle use AddPoint/AppendPoint plus Append/AddSegment -- and note both point calls take SEPARATE coordinates, AddPoint(x, y): handing them a tuple raises TypeError: AppendPoint(): incompatible function arguments (measured). Vertex coordinates come back as np.array([v.point for v in mesh.vertices]).\n6. THE DOF OF A VERTEX COMES FROM THE SPACE, NOT FROM THE VERTEX. A MeshNode carries .nr (its number) and .point (its coordinates) and NOTHING ELSE you want here -- it has no .ndof and no .index (both AttributeErrors, measured), and the space has no fes.Dofs() either. So the two calls you need are v.point for a vertex's coordinates and fes.GetDofNrs(NodeId(VERTEX, v.nr))[0] for its dof; WHICH vertices are yours to choose. (For H1(order=1) that dof map is the identity on this install, measured over 87 vertices, but read it with GetDofNrs rather than assuming it for a higher order.) Mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges -- mesh.Faces() and mesh.Vertices() are both AttributeErrors -- and a vertex's coordinates are v.point, not v.x. Boundary names come back from mesh.GetBoundaries(); mesh.Boundaries('interface') is a Region and a Region is NOT ITERABLE (TypeError, measured): iterate mesh.Boundaries('interface').Elements(), or take its .Mask() BitArray.\n7. A LinearForm MUST NOT CONTAIN THE TRIAL FUNCTION. Putting u * v * dx into one stops netgen with NgException: In MakeLinearFormIntegrator: must not have TrialFunction (measured) -- every term carrying u belongs in the BilinearForm, and the LinearForm carries only v.\n8. THE VECTORS ARE BaseVector, NOT ARRAYS AND NOT FORMS. A LinearForm's vector is f.vec and a BaseVector has no .vec of its own (AttributeError, measured -- a worker wrote f_vol.vec.vec). You cannot index one with a BitArray either (TypeError: __getitem__(): incompatible function arguments): take numbers out with v.FV().NumPy() or np.array(v). Assign THROUGH .data, never by rebinding: `v.data = <expression>`, with a fresh vector from v.CreateVector(). Matrix-vector products read a.mat * v, and a constrained inverse is a.mat.Inverse(<free dofs>, inverse='sparsecholesky'). All of these shapes measured on this install; what you assemble into a and f, and how you constrain the solve, are yours.\n9. `inverse` IS A KEYWORD OF Inverse, NOT AN IMPORT. The solve is a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky'); adding `inverse` to the `from ngsolve import (...)` list raises ImportError: cannot import name 'inverse' from 'ngsolve' (measured -- a worker edited it into the served import line).\n10. A PYTHON FUNCTION IS NOT A CoefficientFunction. CoefficientFunction(f) for a def/lambda is a TypeError ('incompatible constructor arguments', measured), and calling a NumPy-written source on ngsolve's symbolic x, y fails or -- np.zeros_like(x) -- silently returns a 0-d object array. Sample it at the mesh vertices instead (np.array([v.point for v in mesh.vertices])) into a P1 GridFunction on your space (gf.vec.FV().NumPy()[vertex_dofs] = f(vx, vy)); a GridFunction IS a CoefficientFunction and integrates as gf * v * dx (the P1 interpolant of the source, O(h^2) like the discretisation itself).",
+    "ngsolve": "1. NEVER EVALUATE A COMPOUND-SPACE GridFunction DIRECTLY. On a product space (H1*H1, mixed), gfu(mesh(x,y)) either raises 'CompoundFESpace does not have an evaluator for VOL!' or -- measured, worse -- silently returns 0.0 while the field is nonzero. Evaluate the component: gfu.components[i](mesh(x,y)) (measured 0.2524 at the same point where the direct call returned 0.0).\n2. FORMS DO NOT SUPPORT -= (TypeError: unsupported operand). Subtract by adding the negated term at definition: a += (-1) * u * v * dx. Same for LinearForm.\n3. grad()/Grad() WORKS ON PROXIES AND GridFunctions, NOT ON ASSEMBLED CoefficientFunctions -- 'Operator grad not overloaded for CF ngfem::VectorialCoefficientFunction' (measured). Take grad(gfu.components[i]) and assemble what you need from those, or differentiate the symbolic expression BEFORE wrapping it in CoefficientFunction.\n4. Verbosity for a captured log: ngsolve.ngsglobals.msg_level = 3, or solvers.CG(..., printrates=True); NGSolve is otherwise quiet on success.\n5. THE 2-D GEOMETRY IS BUILT WITH netgen's SplineGeometry, AND IT HAS NEITHER AddVertex NOR AddRect (AttributeError, measured). A rectangle is one call: geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(<bottom>, <right>, <top>, <left>)) -- FOUR BOUNDARY NAMES OF YOUR CHOOSING, IN THAT EDGE ORDER. ds('<name>') and H1(..., dirichlet='<name>') select by exactly those names, and a ds() over a name the mesh does not carry integrates over NOTHING with no error; mesh with Mesh(geo.GenerateMesh(maxh=h)) and read the names back with mesh.GetBoundaries(). For a shape that is not a rectangle use AddPoint/AppendPoint plus Append/AddSegment -- and note both point calls take SEPARATE coordinates, AddPoint(x, y): handing them a tuple raises TypeError: AppendPoint(): incompatible function arguments (measured). Vertex coordinates come back as np.array([v.point for v in mesh.vertices]).\n6. THE DOF OF A VERTEX COMES FROM THE SPACE, NOT FROM THE VERTEX. A MeshNode carries .nr (its number) and .point (its coordinates) and NOTHING ELSE you want here -- it has no .ndof and no .index (both AttributeErrors, measured), and the space has no fes.Dofs() either. So the two calls you need are v.point for a vertex's coordinates and fes.GetDofNrs(NodeId(VERTEX, v.nr))[0] for its dof; WHICH vertices are yours to choose. (For H1(order=1) that dof map is the identity on this install, measured over 87 vertices, but read it with GetDofNrs rather than assuming it for a higher order.) Mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges -- mesh.Faces() and mesh.Vertices() are both AttributeErrors -- and a vertex's coordinates are v.point, not v.x. Boundary names come back from mesh.GetBoundaries(); mesh.Boundaries('interface') is a Region and a Region is NOT ITERABLE (TypeError, measured): iterate mesh.Boundaries('interface').Elements(), or take its .Mask() BitArray.\n7. A LinearForm MUST NOT CONTAIN THE TRIAL FUNCTION. Putting u * v * dx into one stops netgen with NgException: In MakeLinearFormIntegrator: must not have TrialFunction (measured) -- every term carrying u belongs in the BilinearForm, and the LinearForm carries only v.\n8. THE VECTORS ARE BaseVector, NOT ARRAYS AND NOT FORMS. A LinearForm's vector is f.vec and a BaseVector has no .vec of its own (AttributeError, measured -- a worker wrote f_vol.vec.vec). You cannot index one with a BitArray either (TypeError: __getitem__(): incompatible function arguments): take numbers out with v.FV().NumPy() or np.array(v). Assign THROUGH .data, never by rebinding: `v.data = <expression>`, with a fresh vector from v.CreateVector(). Matrix-vector products read a.mat * v, and a constrained inverse is a.mat.Inverse(<free dofs>, inverse='sparsecholesky'). All of these shapes measured on this install; what you assemble into a and f, and how you constrain the solve, are yours.\n9. `inverse` IS A KEYWORD OF Inverse, NOT AN IMPORT. The solve is a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky'); adding `inverse` to the `from ngsolve import (...)` list raises ImportError: cannot import name 'inverse' from 'ngsolve' (measured -- a worker edited it into the served import line).\n10. A PYTHON FUNCTION IS NOT A CoefficientFunction. CoefficientFunction(f) for a def/lambda is a TypeError ('incompatible constructor arguments', measured), and calling a NumPy-written source on ngsolve's symbolic x, y fails or -- np.zeros_like(x) -- silently returns a 0-d object array. Sample it at the mesh vertices instead (np.array([v.point for v in mesh.vertices])) into a P1 GridFunction on your space (gf.vec.FV().NumPy()[vertex_dofs] = f(vx, vy)); a GridFunction IS a CoefficientFunction and integrates as gf * v * dx (the P1 interpolant of the source, O(h^2) like the discretisation itself).",
     # deal.II facts measured by execution on the coupled elasticity
     # walk of 2026-09-07 (deal.II 9.8.0-pre, ~/dealii/build).
     "dealii": '1. deal.II prints NOTHING by default: a run whose log must carry the code own output needs BOTH deallog.depth_console(2); AND a SolverControl ctl(max_it, tol, true, true); (log_history, log_result) -- depth_console alone prints nothing. Then the console carries DEAL:cg lines per iteration.\n2. Print the DOF count yourself, on whatever line your task asks for: std::cout << "DOF count = " << dof_handler.n_dofs() << std::endl; -- nothing else emits it.\n3. ASSEMBLE WITH FEValues, NOT FEEvaluation. FEValues<2> fe_values(fe, QGauss<2>(degree + 1), update_values | update_gradients | update_quadrature_points | update_JxW_values); then for (const auto &cell : dof_handler.active_cell_iterators()) { fe_values.reinit(cell); ... fe_values.shape_grad(i, q) * fe_values.shape_grad(j, q) * fe_values.JxW(q) ... }. FEEvaluation is the MATRIX-FREE class with a different contract entirely, and using it this way fails to COMPILE, deep inside the deal.II headers -- a run lost its build to "template argument deduction/substitution failed" in synchronous_iterator.h that way, which reads like a compiler problem and is not one (measured on this install). READ THE FIRST ERROR AND CHECK YOUR CONSTRUCTOR, NOT THE COMPILER: a second worker put the FEValues arguments in the wrong order and got a page of template errors ending in "request for member unsubscribe" inside observer_pointer.h, with nothing pointing at its own file.\n4. Evaluate the solution at arbitrary (off-node) points with VectorTools::point_value(dof_handler, solution, Point<2>(x, y)) -- nearest-vertex lookup is the export defect that turns a converged solve into a wrong answer.\n5. BUILD IT WITH CMAKE, AND THESE SIX LINES ARE THE WHOLE CMakeLists (re-measured 2026-09-14 on this install: configures and builds first try, ~20 s):\n       cmake_minimum_required(VERSION 3.13)\n       find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR})\n       deal_ii_initialize_cached_variables()\n       project(<name>)\n       add_executable(<name> <name>.cc)\n       deal_ii_setup_target(<name>)\n   then `cmake -S <dir> -B build -DDEAL_II_DIR=<the deal.II BUILD or INSTALL tree> -DCMAKE_BUILD_TYPE=Release && make -C build -j8`. Check the cmake line that reads "Using the deal.II-<version> directory found at": pointing DEAL_II_DIR at a SOURCE checkout silently falls back to a system deal.II and the build then fails on things like a missing mpi.h, which looks like a fault in the program you wrote and is not.',
@@ -2848,8 +2979,8 @@ _DECIDING_FACTS["4c"] = _DECIDING_FACTS["fourc"]
 
 _DECIDING_UNIVERSAL = (
     "* READ YOUR FIELD AT THE PROBE POINTS BY INTERPOLATION, NEVER BY NEAREST "
-    "NODE. Measured against an independent reference: one solve exported two ways gave "
-    "order 1.9796 by interpolation and 0.9815 by nearest-node sampling. Free self-check: nearest-node sampling can only return "
+    "NODE. Measured: one solve exported two ways converged at second order by interpolation "
+    "and at first order by nearest-node sampling. Free self-check: nearest-node sampling can only return "
     "(N-1)^2+1 distinct values on N cells per side, however many probes: "
     "count yours.\n"
     "* GATE BEFORE YOU HAND IN, at EVERY level: the solver REPORTED convergence "
@@ -3403,9 +3534,10 @@ def register_consolidated_tools(mcp: FastMCP):
                   `category=`; `index=True` maps what exists first. A
                   narrowed answer always states how many entries it held
                   back and how to get them.
-                - "postmortems" — formal post-mortem records under
-                  data/postmortems/*.json, filtered by solver +
-                  physics + optional signal pattern. These are the
+                - "postmortems" — openPASO's formal post-mortem records,
+                  filtered by solver + physics + optional signal pattern
+                  (read them here: they are inside openPASO, not files in
+                  your working directory). These are the
                   audit-trail entries that record WHY each pitfall
                   exists; the critic-gate should retrieve them when
                   the agent's plan touches the matching (solver,
@@ -3576,8 +3708,8 @@ def register_consolidated_tools(mcp: FastMCP):
 
         elif topic == "postmortems":
             if _ABLATE_PITFALLS:
-                return ("No post-mortems found. data/postmortems/*.json is "
-                        "the canonical store; absence here means the failure "
+                return ("No post-mortems found. openPASO's post-mortem store is "
+                        "the canonical one; absence here means the failure "
                         "mode has not yet been audited.")
             postmortems = _load_matching_postmortems(solver, physics, signal)
             if not postmortems:
@@ -3587,8 +3719,8 @@ def register_consolidated_tools(mcp: FastMCP):
                      "signal": signal}.items() if v)
                 return (f"No post-mortems found"
                         f"{' for ' + what if what else ''}. "
-                        f"data/postmortems/*.json is the canonical "
-                        f"store; absence here means the failure mode "
+                        f"openPASO's post-mortem store is the canonical "
+                        f"one; absence here means the failure mode "
                         f"has not yet been audited.")
             return json.dumps(postmortems, indent=2)
 
@@ -4387,7 +4519,7 @@ def register_consolidated_tools(mcp: FastMCP):
     # ═══════════════════════════════════════════════════════════
 
     @mcp.tool()
-    def examples(keyword: str, solver: str = "fourc", action: str = "search",
+    def examples(keyword: str = "", solver: str = "fourc", action: str = "search",
                  max_results: int = 3, variant: str = "") -> str:
         """Find and retrieve example input files from solver test suites.
 
@@ -4402,6 +4534,10 @@ def register_consolidated_tools(mcp: FastMCP):
                 - "template" — get a generated template for this physics
                 - "tutorials" — list available tutorials
             max_results: Maximum results (default 3)
+            variant: For action="template": which of the physics' template
+                variants to generate (e.g. '2d', '3d'). action="tutorials"
+                lists them. With a variant and no keyword, the physics that
+                has that variant is used.
         """
         if action == "search":
             # Empty / whitespace-only keyword matches every
@@ -4557,13 +4693,29 @@ def register_consolidated_tools(mcp: FastMCP):
             return body
 
         elif action == "template":
-            if not keyword or not keyword.strip():
-                return ("Empty keyword. Provide a physics name "
-                        "(or substring), e.g. 'poisson', 'fluid', "
-                        "'contact'.")
             backend = get_backend(solver)
             if not backend:
                 return f"Unknown solver: {solver}"
+            if not keyword or not keyword.strip():
+                # A VARIANT NAMES ITS PHYSICS. Measured 2026-09-28: a run asked for
+                # examples(action="template", solver="fenics", variant=...) with no
+                # keyword; the keyword was a required argument, so the call died in
+                # argument validation with "Field required" and the run lost a step.
+                owners = [p.name for p in backend.supported_physics()
+                          if variant and variant in p.template_variants]
+                if len(owners) == 1:
+                    keyword = owners[0]
+                else:
+                    listing = "; ".join(
+                        f"{p.name} ({', '.join(p.template_variants) or 'no variants'})"
+                        for p in backend.supported_physics())
+                    head = (f"Variant `{variant}` belongs to several physics in {solver}: "
+                            f"{', '.join(owners)}. Name one as keyword."
+                            if len(owners) > 1 else
+                            f"No physics in {solver} has a variant `{variant}`."
+                            if variant else
+                            "Empty keyword. Name the physics as keyword, e.g. keyword='navier_stokes'.")
+                    return f"{head} Physics and their variants in {solver}: {listing}"
             # Route the keyword through the canonical fuzzy
             # resolver so short shorthands ('ns' -> navier_stokes,
             # 'em' -> maxwell, ...) route via the synonym map
@@ -4602,7 +4754,8 @@ def register_consolidated_tools(mcp: FastMCP):
                 lines.append(f"- **{p.name}**: {', '.join(p.template_variants)} — {p.description}")
             return "\n".join(lines)
 
-        return "Usage: examples(keyword, solver, action='search'|'template'|'tutorials')"
+        return ("Usage: examples(keyword, solver, action='search'|'template'|'tutorials', "
+                "variant='...' for a template)")
 
     # ═══════════════════════════════════════════════════════════
     # 4. SIMULATE (replaces run_simulation + run_with_generator)
@@ -4741,6 +4894,15 @@ def register_consolidated_tools(mcp: FastMCP):
             # The same rule, at the earlier door, costs one call instead of the
             # whole verification chain.
             _bad = _coupling_work_dir_faults(parsed)
+            # A SOLVER BINARY IS NOT A PARTICIPANT HERE EITHER: couple and couple_levels
+            # refuse it, and this door accepted a review of it (measured).
+            try:
+                _specs_rv = json.loads(parsed.get("participants") or "[]") \
+                    if isinstance(parsed.get("participants"), str) else (parsed.get("participants") or [])
+                _bad += [t for t in (_solver_binary_as_participant(sp) for sp in _specs_rv
+                                     if isinstance(sp, dict)) if t]
+            except (TypeError, ValueError):
+                pass
             if _bad:
                 return json.dumps({
                     "accepted": False,
@@ -4785,6 +4947,16 @@ def register_consolidated_tools(mcp: FastMCP):
                               solver=solver,
                               input_snapshot=_make_input_snapshot(
                                   setup_text, solver, {"type": "critic_review"}))
+        # A SETUP WHOSE NAMED FILES DO NOT EXIST IS ON RECORD AS WRITTEN, AND SAID.
+        # Measured: a review naming work_dir "$(pwd)/side_A" was accepted as "on
+        # record for this exact setup" while it had found none of its scripts.
+        _missing = []
+        try:
+            _fp = json.loads(setup_text).get("__participant_files__") or {}
+            _missing = sorted(f"{_n}/{_f}" for _n, _files in _fp.items()
+                              for _f, _h in (_files or {}).items() if _h == "absent")
+        except (ValueError, TypeError, AttributeError):
+            _missing = []
         return json.dumps({
             "accepted": True,
             "critic_token": rec.token,
@@ -4793,7 +4965,12 @@ def register_consolidated_tools(mcp: FastMCP):
             "note": ("This review is on record for this exact setup. Editing "
                      "the setup invalidates it. Pass critic_token to the run "
                      "tool to make the review single-use and bound to that "
-                     "job."),
+                     "job."
+                     + (f" NO FILE EXISTS AT {', '.join(_missing[:3])} as this setup names "
+                        f"it: the review is of a setup whose scripts it never saw, and a "
+                        f"run with the real paths is a different setup. A shell "
+                        f"expression such as $(pwd) is not expanded here; name the "
+                        f"absolute path." if _missing else "")),
         }, indent=2)
 
     @mcp.tool()
@@ -4861,6 +5038,26 @@ def register_consolidated_tools(mcp: FastMCP):
                             input_snapshot=_snap)
             return f"Solver {solver} not available: {_short_reason(msg)}"
 
+        # A PYTHON SOLVER'S SCRIPT IS ITS OWN INPUT. Measured 2026-09-29 in the web interface:
+        # a model passed a complete FEniCSx script here. It ran in openPASO's own Python, which
+        # has no dolfinx, the reply said "No module named 'dolfinx'", and the model concluded
+        # FEniCSx was not installed and left a working script for another solver. Such a
+        # script is refused before it runs, with the call that runs it.
+        from core.backend import InputFormat
+        _own = sorted(m for m, b in _solver_modules_in(generator_script).items() if b == solver)
+        if backend.input_format() == InputFormat.PYTHON and _own:
+            _msg = (f"This script imports {', '.join(_own)}: it is the {solver} input itself, not "
+                    f"a generator. run_with_generator runs its script in openPASO's own Python, "
+                    f"which is not {solver}'s, so it stops with \"No module named '{_own[0]}'\" "
+                    f"although {solver} is installed. Pass the same script to "
+                    f"run_simulation(solver='{solver}', input_content=<this script>): that runs "
+                    f"it in {solver}'s own interpreter.")
+            _journal.record("tool_error", "run_with_generator", solver=solver,
+                            error_message=_msg[:300], input_snapshot=_snap)
+            return json.dumps({"status": "failed", "phase": "routing", "error": _msg,
+                               "next_step": f"run_simulation(solver='{solver}', "
+                                            f"input_content=<this script>)"}, indent=2)
+
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         name = job_name or f"{solver}_gen_{ts}"
@@ -4875,17 +5072,32 @@ def register_consolidated_tools(mcp: FastMCP):
             [python, str(gen_path)],
             capture_output=True, text=True,
             cwd=str(work_dir),
+            stdin=subprocess.DEVNULL,
         )
 
         if gen_result.returncode != 0:
             _journal.record("tool_error", "run_with_generator", solver=solver,
                             error_message=f"Generator failed: {gen_result.stderr[-200:]}",
                             input_snapshot=_snap)
-            return json.dumps({
+            _failed = {
                 "status": "failed", "phase": "generator",
                 "error": gen_result.stderr[-500:],
                 "work_dir": str(work_dir),
-            }, indent=2)
+            }
+            _missing = __import__("re").search(r"No module named '([A-Za-z_]\w*)",
+                                               gen_result.stderr or "")
+            if _missing and _missing.group(1) in _solver_module_owners():
+                # the generator, not the solver, stopped: it ran in openPASO's own Python
+                _failed["what_the_error_is"] = (
+                    f"the GENERATOR stopped, in openPASO's own Python ({python}), which does not "
+                    f"have {_missing.group(1)}; the solver never ran. A generator only writes the "
+                    f"input files and needs no solver import. A script that is itself a solve in "
+                    f"Python goes to run_simulation, which runs it in that solver's interpreter.")
+            else:
+                _named = _what_the_error_is(gen_result.stderr, solver)
+                if _named:
+                    _failed["what_the_error_is"] = _named
+            return json.dumps(_failed, indent=2)
 
         from core.backend import find_generated_input
         input_file = find_generated_input(work_dir, backend)
@@ -4930,7 +5142,11 @@ def register_consolidated_tools(mcp: FastMCP):
         out_files = []
         if job.error:
             result["error"] = error_excerpt(job.error)
+            _named = _what_the_error_is(job.error, solver)
+            if _named:
+                result["what_the_error_is"] = _named
         nonfinite = []
+        _empty = []
         _stdout_text = ""
         if job.status == "completed":
             out_files = backend.get_result_files(job)
@@ -4956,6 +5172,18 @@ def register_consolidated_tools(mcp: FastMCP):
             nonfinite += inspect_result_artefacts(out_files)
             if nonfinite:
                 result.setdefault("validation", []).extend(nonfinite)
+            # WHAT THE RESULT HOLDS. A result that is exactly zero everywhere is not a result;
+            # a field that never changed in time, and the mesh the result lives on (cells,
+            # extent, area), are stated beside it. Measured 2026-09-29: a run on a 95-cell mesh
+            # of the obstacle's disc wrote zero velocity and pressure, and the gate said "the
+            # automated checks passed" (core/fabrication_gate.result_content_findings).
+            _empty, _notes, _mesh = result_content_findings(out_files)
+            if _mesh:
+                result["result_mesh"] = _mesh
+            if _notes:
+                result["result_notes"] = _notes
+            if _empty:
+                result.setdefault("validation", []).extend(_empty)
             # The 'finiteness not asserted' honesty note is a coverage gap,
             # not evidence of a bad number — it must not flip the verdict to
             # 'non-finite values' (FEBio .xplt / .bp-without-adios2 runs).
@@ -4985,6 +5213,8 @@ def register_consolidated_tools(mcp: FastMCP):
                       if any("non-finite" in x for x in nonfinite)
                       else "a result file is unreadable/corrupt, so the gate "
                            "could not assert the output's integrity")
+        elif _empty:
+            reason = _empty[0]
         elif _residual_blocks_verification(result):
             reason = ("the field this run produced does NOT satisfy the "
                       "equations it declared: "
@@ -4993,7 +5223,7 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = ""
         _stamp_verification(result,
                             evidence_ok=(bool(out_files) and not job.error
-                                         and not nonfinite
+                                         and not nonfinite and not _empty
                                          and not _residual_blocks_verification(result)),
                             reason=reason, critic_approved=critic_approved,
                             solver=solver, setup_text=generator_script,
@@ -5137,9 +5367,13 @@ def register_consolidated_tools(mcp: FastMCP):
         out_files = []
         if job.error:
             result["error"] = error_excerpt(job.error)
+            _named = _what_the_error_is(job.error, solver)
+            if _named:
+                result["what_the_error_is"] = _named
         if _input_warnings:
             result["input_validation_warnings"] = _input_warnings
         nonfinite = []
+        _empty = []
         _stdout_text = ""
         if job.status == "completed":
             out_files = backend.get_result_files(job)
@@ -5155,6 +5389,15 @@ def register_consolidated_tools(mcp: FastMCP):
                 result["status"] = "completed_unverified"
                 result["warning"] = ("Process exited cleanly but produced NO output files "
                                      "— this is NOT a verified solve. Do not treat as a result.")
+                # WHERE THE FILES WENT, when the script says so. Measured 2026-09-29: a
+                # 36-minute run changed directory with os.chdir, wrote every result there,
+                # and was reported as having produced nothing; the reason was one line up.
+                if re.search(r"\bos\.chdir\s*\(", input_content or ""):
+                    result["warning"] += (
+                        " The script changes its working directory (os.chdir), so its files "
+                        "were written there, outside this job's folder, which is the only "
+                        "place openPASO checks. Remove the chdir and write the results into "
+                        "the current directory.")
             else:
                 # ... and output full of NaN/Inf is a fabricated-looking result.
                 nonfinite = check_result_files_finite(out_files)
@@ -5168,6 +5411,18 @@ def register_consolidated_tools(mcp: FastMCP):
             nonfinite += inspect_result_artefacts(out_files)
             if nonfinite:
                 result.setdefault("validation", []).extend(nonfinite)
+            # WHAT THE RESULT HOLDS. A result that is exactly zero everywhere is not a result;
+            # a field that never changed in time, and the mesh the result lives on (cells,
+            # extent, area), are stated beside it. Measured 2026-09-29: a run on a 95-cell mesh
+            # of the obstacle's disc wrote zero velocity and pressure, and the gate said "the
+            # automated checks passed" (core/fabrication_gate.result_content_findings).
+            _empty, _notes, _mesh = result_content_findings(out_files)
+            if _mesh:
+                result["result_mesh"] = _mesh
+            if _notes:
+                result["result_notes"] = _notes
+            if _empty:
+                result.setdefault("validation", []).extend(_empty)
             # The 'finiteness not asserted' honesty note is a coverage gap,
             # not evidence of a bad number — it must not flip the verdict to
             # 'non-finite values' (FEBio .xplt / .bp-without-adios2 runs).
@@ -5197,6 +5452,8 @@ def register_consolidated_tools(mcp: FastMCP):
                       if any("non-finite" in x for x in nonfinite)
                       else "a result file is unreadable/corrupt, so the gate "
                            "could not assert the output's integrity")
+        elif _empty:
+            reason = _empty[0]
         elif _residual_blocks_verification(result):
             reason = ("the field this run produced does NOT satisfy the "
                       "equations it declared: "
@@ -5205,7 +5462,7 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = ""
         _stamp_verification(result,
                             evidence_ok=(bool(out_files) and not job.error
-                                         and not nonfinite
+                                         and not nonfinite and not _empty
                                          and not _residual_blocks_verification(result)),
                             reason=reason, critic_approved=critic_approved,
                             solver=solver, setup_text=input_content,
@@ -5969,7 +6226,7 @@ def register_consolidated_tools(mcp: FastMCP):
                 gen_path.write_text(content)
                 gen = subprocess.run([sys.executable, str(gen_path)],
                                      capture_output=True, text=True,
-                                     cwd=str(work_dir))
+                                     cwd=str(work_dir), stdin=subprocess.DEVNULL)
                 if gen.returncode != 0:
                     return _fail(f"level {lvl} (resolution "
                                  f"{mi.format_resolution(res_val)}): generator "
@@ -7044,6 +7301,20 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = _at_sentence(str(_nf[0].get("finding", "")), 400)
             val = list(val) + [str(f.get("finding", "")) for f in _nf]
             result["validation"] = val
+        # NOR IS A SIDE THAT NEVER SOLVED ITS INTERIOR. Measured: every level of a
+        # ladder whose side held exactly 0.0 at every interior node read
+        # trustworthy_result true, under a ladder verdict that named the side.
+        try:
+            _us = _ra_nf.unsolved_field_findings(
+                Path(str(parts[0].work_dir)).parent, dirs=[Path(str(p.work_dir)) for p in parts],
+                since=_t_level_wall - 1.0, scan=False)
+        except Exception:                                    # noqa: BLE001
+            _us = []
+        if _us:
+            checks_ok = False
+            reason = reason if _nf else _at_sentence(str(_us[0].get("finding", "")), 400)
+            val = list(val) + [str(f.get("finding", "")) for f in _us]
+            result["validation"] = val
         _stamp_verification(result, evidence_ok=checks_ok, reason=reason,
                             critic_approved=critic_approved,
                             solver="couple",
@@ -7210,8 +7481,11 @@ def register_consolidated_tools(mcp: FastMCP):
                 if _k in _seen:
                     continue
                 _seen.add(_k)
-                _compact.append({"sequence": _f.get("sequence"),
-                                 "finding": _f.get("finding")})
+                # WITH ITS RANK: copied as sequence and text alone, a priority-3 unsolved
+                # field went last behind two informational notes, and a VERIFIED ladder's
+                # "SATISFIES ITS OWN EQUATION" was shown as what to fix next (measured).
+                _compact.append({k: _f.get(k) for k in ("sequence", "finding", "priority",
+                                                        "informational") if k in _f})
             # WHEN THE LEVEL CONVERGED AND THE FUNNEL IS CLEAN, the lead names
             # the three writes that turn a converged coupling into a result.
             # Measured: a run coupled three real levels (9 iterations to 1e-8
@@ -7804,9 +8078,10 @@ def register_consolidated_tools(mcp: FastMCP):
                     "holding at the only moment those numbers are correct -- "
                     "exports.json is overwritten by the next level. Nothing was "
                     "invented: every number came out of your solver. The VOLUME "
-                    "field (field_level%d.csv) is still yours to write, and it "
-                    "cannot be recovered afterwards, so add the dump block to "
-                    "the participant before the next level." % k)
+                    "field (field_level%d.csv) is still yours to write: add the "
+                    "dump block to the participant and couple this level again "
+                    "-- a standalone run of the participant reads an empty "
+                    "imports.json, so its field is not the coupled one." % k)
             peaks = _level_field_peak(level_specs, k)
             if peaks:
                 compact["field_peak"] = peaks
@@ -8023,6 +8298,30 @@ def register_consolidated_tools(mcp: FastMCP):
         for _t in _eq:
             if "DOES NOT SATISFY" in str(_t):
                 _ladder_faults.append(_at_sentence(str(_t), 600))
+        # THE FIELD'S OWN BOUNDARY, TOO. Measured: a ladder whose side B left both
+        # interface corners free read VERIFIED LADDER while every level led with the
+        # free-corner finding, and another buried a located outer-boundary finding
+        # under "this level's numbers passed".
+        try:
+            from .result_audit import free_interface_end_findings as _free_ends
+            for _f in _free_ends(Path(history_dir), dirs=_part_dirs):
+                if not _f.get("informational") and int(_f.get("priority", 99)) <= 10:
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 600))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import outer_boundary_findings as _outer
+            for _f in _outer(Path(history_dir)):
+                if not _f.get("informational"):
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 600))
+        except Exception:                                    # noqa: BLE001
+            pass
+        # WHAT IS WRONG WITH A FIELD LEADS; the review record and a level's caveat follow.
+        def _record_fault(_t: str) -> bool:
+            return (_t.startswith("no critic review") or "Global residual is NOT representative" in _t
+                    or ("is not verified:" in _t and ("critic review" in _t or "caveat" in _t)))
+        _ladder_faults = ([_t for _t in _ladder_faults if not _record_fault(_t)]
+                          + [_t for _t in _ladder_faults if _record_fault(_t)])
         # VERIFIED MEANS EACH SIDE'S OWN EQUATION WAS CHECKED AND HOLDS, not only
         # that the two sides agree with each other. The equation findings are
         # keyed by the side's folder name; a participant with none is unchecked.
@@ -8097,6 +8396,15 @@ def register_consolidated_tools(mcp: FastMCP):
                "critic_review": {"reviewed": bool(_reviewed), "note": _review_note,
                                  "self_reported_flag": bool(critic_approved)},
                "levels": out_levels, "next_step": nxt}
+        # A LADDER FAULT COMES BEFORE THE DELIVERABLES, as an equation that is not
+        # satisfied does. Measured: a ladder that named a side never solved inside its
+        # subdomain still told the run to write every deliverable from that side.
+        if _ladder_faults and all_ok:
+            _lead_fault = str(_ladder_faults[0])
+            out["next_step"] = (_at_sentence(_lead_fault, 400)
+                                + ("" if _record_fault(_lead_fault) else
+                                   " Fix that before the deliverables: files written from "
+                                   "this ladder carry it.") + " " + str(nxt))
         if _eq_gaps:
             out["equation_check_not_run"] = _eq_gaps
         if _eq:
@@ -8178,7 +8486,10 @@ def register_consolidated_tools(mcp: FastMCP):
         # but the elided contract -- and the reply says where it went.
         replaced = ""
         try:
-            if target.exists() and target.stat().st_size not in (0, len(text.encode())):
+            # ANY NON-EMPTY FILE, NOT BY SIZE: a filled participant of exactly the
+            # served contract's byte count was overwritten without being moved aside,
+            # and this tool never reads the caller's file to tell the two apart.
+            if target.exists() and target.stat().st_size > 0:
                 import time as _time
                 _size = target.stat().st_size
                 _keep = target.with_name(f"{target.stem}.replaced-{_time.strftime('%H%M%S')}{target.suffix}")
@@ -9328,8 +9639,10 @@ def register_consolidated_tools(mcp: FastMCP):
                                " shape: fixed [-1,1]^2 minus [0,1]x[-1,0]")
                 if isinstance(result, tuple):
                     path, *meta = result
+                    from tools.mesh_generation import reading_note
                     return (f"mesh: {path} (nodes={meta[0]}, "
-                            f"elements={meta[1]});{_shape_note}")
+                            f"elements={meta[1]});{_shape_note}"
+                            + reading_note(geometry, path))
                 return (f"{result};{_shape_note}" if result is not None
                         else f"ok;{_shape_note}")
             return f"Unknown geometry: {geometry}. Available: {list(generators.keys())}"
@@ -9344,14 +9657,13 @@ def register_consolidated_tools(mcp: FastMCP):
     def reload_catalog() -> str:
         """Hot-reload the per-backend KNOWLEDGE dicts from disk.
 
-        Closes the gap identified by the
-        mcp-catalog-staleness-runtime-isolation post-mortem
-        (2026-06-01): the MCP server normally imports
+        Closes a gap one of openPASO's own post-mortems recorded:
+        the MCP server normally imports
         src/backends/<be>/generators/<physics>.py modules ONCE at
         startup and never refreshes them, so catalog edits made
-        during a long-running session are invisible. Postmortems
-        in data/postmortems/ are scanned on every request (already
-        hot), but pitfall dicts are not.
+        during a long-running session are invisible. Post-mortem
+        records are read on every request (already hot), but
+        pitfall dicts are not.
 
         This tool walks every imported `backends.<be>.generators.*`
         and `backends.<be>.backend` module, runs importlib.reload
@@ -10359,7 +10671,7 @@ sees nothing but this task= string (measured: a worker whose brief kept
     write the served CONTRACT for the role the task gives side A to
     ./side_A/participant_A.py with write_participant_contract(solver=<code>,
     path='./side_A/participant_A.py', variant=<physics word above or ''>) --
-    the knowledge reply's text byte for byte, never re-typed; fill
+    the knowledge reply's code with its comments, never re-typed; fill
     only its marked hole(s) IN PLACE -- never re-type the file -- with the mesh, form, material, source and solve
     for subdomain A from THIS DATA, which is all you know of the task:
     <SUBDOMAIN A, COPIED FROM YOUR TASK WORD FOR WORD: geometry and interface
@@ -10463,7 +10775,7 @@ its mesh size from a tiny ./config.json ({"level": 1, "nx": <nx>, "ny": <ny>})
 instead of hard-coding it; advancing a level is then: DOUBLE nx and ny
 (halve h) and set the next level in each side's config, call couple again,
 save that level's outputs. The level key is a label; only nx and ny change
-the mesh (measured: three runs raised the label alone and coupled the same
+the mesh (measured: a run that raised the label alone coupled the same
 mesh three times). Measured
 both ways: participants built this way ran all three levels in under two
 minutes of compute; sessions that regenerated their meshes by hand inside
@@ -10496,7 +10808,7 @@ the list with them.
 CHECK EACH SUBDOMAIN AGAINST ITS OWN EQUATION FIRST. A converged interface
 residual says the two sides AGREE, not that either is right, and the two
 failures are independent: one run converged to 8e-07 in 16 steps with a field
-TEN TIMES too small, at order -0.02 against an independent reference. Run
+TEN TIMES too small, whose error did not fall at all under refinement. Run
 verify_pde_consistency(...) on each side, with that side's own source and
 coefficient, before spending budget on the iteration.
 

@@ -668,6 +668,7 @@ class SpartaBackend(SolverBackend):
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir), env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

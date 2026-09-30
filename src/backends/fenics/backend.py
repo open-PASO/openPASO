@@ -30,6 +30,53 @@ _CONDA_PREFIX = os.environ.get("FENICS_CONDA_PREFIX", "")
 _FENICS_PYTHON = os.environ.get("FENICS_PYTHON", "")
 
 
+# THE INSTALLED DOLFINX VERSION, ASKED ONCE PER INTERPRETER. get_knowledge runs once per
+# physics, and knowledge(topic='pitfalls') walks every physics: 226 calls, each of which
+# started the FEniCSx interpreter to import dolfinx (about 0.5 s). Measured 2026-09-28: one
+# pitfalls lookup took 107-115 s, and a critic's two lookups held a web-interface run for
+# over two minutes. A version found is kept for the life of the process; a probe that
+# failed is kept for a minute, so a broken or busy interpreter is not asked 226 times in
+# a row and a repaired one is seen again.
+_DOLFINX_VERSION: dict[str, tuple[Optional[str], float]] = {}
+_DOLFINX_PROBE_RETRY_S = 60.0
+
+
+def _installed_dolfinx_version(python: Path) -> Optional[str]:
+    """dolfinx.__version__ as `python` imports it, or None."""
+    import subprocess
+    key = str(python)
+    hit = _DOLFINX_VERSION.get(key)
+    if hit is not None and (hit[0] is not None or time.time() - hit[1] < _DOLFINX_PROBE_RETRY_S):
+        return hit[0]
+    ver = None
+    try:
+        r = subprocess.run([key, "-c", "import dolfinx; print(dolfinx.__version__)"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            ver = r.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        ver = None
+    _DOLFINX_VERSION[key] = (ver, time.time())
+    return ver
+
+
+def _mpi_launcher_for(python: Path) -> Optional[str]:
+    """The MPI launcher that belongs to this interpreter's own MPI.
+
+    A conda FEniCSx environment carries its own MPI (MPICH from conda-forge) and its own
+    mpiexec beside the interpreter; the first mpirun on PATH is usually the system's. Measured
+    2026-09-28: with np=4 the system's Open MPI 4.0.3 mpirun started the environment's MPICH
+    interpreter and every rank died in MPI_Init ("launcher not compatible with PMI1 client"),
+    0.4 s into run_simulation -- every FEniCSx run with np > 1 on this machine. The launcher
+    beside the interpreter comes first; PATH is the fallback for an install that has none.
+    """
+    for name in ("mpiexec", "mpirun"):
+        beside = python.parent / name
+        if beside.is_file() and os.access(beside, os.X_OK):
+            return str(beside)
+    return shutil.which("mpirun")
+
+
 def _find_fenics_python() -> Optional[Path]:
     """Locate the Python binary with dolfinx installed.
 
@@ -119,10 +166,11 @@ _PHYSICS_CAPABILITIES = [
     ),
     PhysicsCapability(
         name="navier_stokes",
-        description="Incompressible Navier-Stokes (cavity, channel with obstacle)",
+        description="Incompressible Navier-Stokes (cavity, channel with obstacle; the unsteady wake "
+                    "is a contract: mesh, forces and pictures served, the solve is yours)",
         spatial_dims=[2, 3],
         element_types=["triangle", "tetrahedron"],
-        template_variants=["2d", "3d", "channel_cylinder"],
+        template_variants=["2d", "3d", "channel_cylinder", "channel_cylinder_transient"],
     ),
     PhysicsCapability(
         name="thermal_structural",
@@ -470,13 +518,10 @@ class FenicsBackend(SolverBackend):
         # Detect installed version and add API notes
         version_note = ""
         try:
-            import subprocess
             p = _find_fenics_python()
             if p:
-                r = subprocess.run([str(p), "-c", "import dolfinx; print(dolfinx.__version__)"], stdin=subprocess.DEVNULL,
-                                   capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    ver = r.stdout.strip()
+                ver = _installed_dolfinx_version(p)
+                if ver:
                     version_note = (
                         f"\n\n**Installed dolfinx version: {ver}**\n"
                         "API notes for 0.9+/0.10+:\n"
@@ -592,7 +637,7 @@ class FenicsBackend(SolverBackend):
             status="running",
         )
 
-        mpirun = shutil.which("mpirun")
+        mpirun = _mpi_launcher_for(Path(python))
         if np > 1 and mpirun:
             cmd = [mpirun, "-np", str(np), str(python), str(script_path)]
         else:
@@ -606,6 +651,7 @@ class FenicsBackend(SolverBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

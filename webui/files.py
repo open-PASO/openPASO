@@ -94,13 +94,17 @@ def read_text(rel: str) -> dict:
         return {"path": str(p), "error": "not a file"}
     try:
         data = p.read_bytes()[:TEXT_PREVIEW_BYTES]
-        try:
-            text = data.decode("utf-8")
-            truncated = p.stat().st_size > TEXT_PREVIEW_BYTES
-            return {"path": str(p), "text": text, "truncated": truncated,
+        for drop in range(0, 4):
+            # the cut can land in the middle of a character, which is not a
+            # reason to call a text file binary and refuse to show it
+            try:
+                text = (data[:len(data) - drop] if drop else data).decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            return {"path": str(p), "text": text,
+                    "truncated": p.stat().st_size > TEXT_PREVIEW_BYTES,
                     "kind": classify(p)}
-        except UnicodeDecodeError:
-            return {"path": str(p), "binary": True,
-                    "size": p.stat().st_size, "kind": classify(p)}
+        return {"path": str(p), "binary": True,
+                "size": p.stat().st_size, "kind": classify(p)}
     except OSError as e:
         return {"path": str(p), "error": str(e)}

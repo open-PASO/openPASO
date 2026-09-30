@@ -784,12 +784,9 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
     with the value at the closest node is O(h) accurate, so it caps your
     reported order at 1 no matter how good the solve was.
 
-    PROVEN against an independent reference, one solve exported two ways and
-    nothing else changed:
-        interpolated       verified correct   order 1.9796
-        nearest node       confidently wrong  order 0.9815
-    A second problem gave +1.9516 interpolated against +1.0179 nearest-node,
-    and +1.0179 is exactly what that result set reported.
+    MEASURED on one solve exported two ways, nothing else changed: read by
+    interpolation its error fell at second order, read at the nearest node at
+    first order.
 
     CHECK IT FOR FREE, no reference needed: count the DISTINCT values you
     wrote. Nearest-node sampling on a mesh of N cells per side can only ever

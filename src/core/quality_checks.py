@@ -182,7 +182,7 @@ def _scan_point_cloud_vtu(p) -> "list[str] | None":
         "    print(json.dumps({'ok': False, 'err': type(e).__name__ + ': ' + str(e)[:120]}))\n"
     )
     try:
-        r = _sp.run([_sys.executable, "-c", code, str(p)], capture_output=True, text=True, timeout=60)
+        r = _sp.run([_sys.executable, "-c", code, str(p)], capture_output=True, text=True, timeout=60, stdin=_sp.DEVNULL)
         import json as _json
         line = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("{")), None)
         res = _json.loads(line) if line else {"ok": False, "err": f"reader exited {r.returncode}"}
@@ -607,6 +607,7 @@ def _interface_balance_core(export_a, export_b, label_a="A", label_b="B",
     # path stays for two genuinely different samplings.
     _support_note = ""
     _support_kind = "same" if _same_sampling else "sums"
+    _common_integrate = False
     _shared = (_common_support(ca, cb)
                if (ca is not None and cb is not None and not _same_sampling)
                else None)
@@ -625,14 +626,18 @@ def _interface_balance_core(export_a, export_b, label_a="A", label_b="B",
             ca, cb = ca[_ia], cb[_ib]
             _same_sampling = True
             _support_kind = "common"
+            # ON THE SHARED POINTS' OWN WEIGHTS: summed plainly, a non-uniform shared
+            # point set is not the interface integral (the weights were computed here
+            # and never used).
+            _common_integrate = _wts is not None
             if len(_ia) < max(_n_a, _n_b):
                 _support_note = (
                     f" (compared on the {len(_ia)} interface points both sides "
                     f"export; {label_a} exports {_n_a}, {label_b} {_n_b}, and "
                     f"the points one side alone exports are outside the "
                     f"comparison)")
-    _integrate = ca is not None and cb is not None and not _same_sampling
-    if _integrate:
+    _integrate = ca is not None and cb is not None and (not _same_sampling or _common_integrate)
+    if _integrate and not _common_integrate:
         _support_kind = "integrated"
     # A NEUMANN SIDE'S CONSISTENT FLUX IS THE FLUX IT WAS GIVEN. On a
     # Dirichlet-Neumann pair the Neumann side applies the partner's flux as its
@@ -1305,9 +1310,12 @@ def check_participant_responsiveness(responsiveness: dict,
         findings.append(
             f"Participant(s) {whole} produced byte-identical output while the data "
             "handed to them CHANGED — their answer does not depend on their "
-            "imports. Either the script never reads imports.json, or it re-serves "
-            "a cached/initial result. Any convergence reported here is the "
-            "coupling standing still, not a solution.")
+            "imports. Ways measured to get here: the script never reads "
+            "imports.json; it re-serves a cached or initial result; or it reads "
+            "them and its solve never uses them (an interface held at one fixed "
+            "value, imported values written where the solve does not look). Any "
+            "convergence reported here is the coupling standing still, not a "
+            "solution.")
     if frozen:
         not_checked.append(
             f"participant responsiveness for {frozen}: the data handed to them "

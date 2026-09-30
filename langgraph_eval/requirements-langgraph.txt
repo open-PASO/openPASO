@@ -5,4 +5,4 @@ langchain-mcp-adapters>=0.1.0
 mcp>=1.1
 pydantic>=2.8
 httpx>=0.27
-duckduckgo-search>=6.2
+ddgs>=9.0                  # web_search; the older duckduckgo-search still works, DuckDuckGo only

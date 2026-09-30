@@ -745,6 +745,7 @@ class DealiiBackend(SolverBackend):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a
@@ -786,6 +787,7 @@ class DealiiBackend(SolverBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
+                stdin=asyncio.subprocess.DEVNULL,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
             if proc.returncode != 0:
@@ -829,6 +831,7 @@ class DealiiBackend(SolverBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
+                stdin=asyncio.subprocess.DEVNULL,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             job.elapsed = time.time() - start

@@ -60,17 +60,46 @@ def _payload(raw: str) -> dict | None:
         return None
     try:
         obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        # Claude Code hands an MCP tool's text back as {"result": "<the reply>"}:
+        # the report is the string inside, not the wrapper around it
+        if isinstance(obj, dict) and set(obj) == {"result"} and isinstance(obj["result"], str):
+            inner = _payload(obj["result"])
+            if inner is not None:
+                return inner
         return obj if isinstance(obj, dict) else None
     except ValueError:
         pass
-    # fall back to reading the two fields that matter
-    st = re.search(r'"status"\s*:\s*"([A-Za-z_]+)"', text)
-    tr = re.search(r'"trustworthy_result"\s*:\s*(true|false)', text)
-    if not st:
+    # The text is not a whole document — a record shortened for storage, or a
+    # reply wrapped in something else. Read the two fields that matter, with
+    # the structure unknown, so:
+    #
+    #  * trustworthy_result alone is enough. A coupling reply carries no
+    #    "status" at all, and requiring one made every long coupling — which is
+    #    most of them, they embed their histories and log paths — read as a
+    #    call that computed nothing.
+    #  * a mixture is never verified. These matches may belong to different
+    #    objects, and pairing the first good one with the first bad one
+    #    reported a failed run whose first participant looked fine as a
+    #    verified result. If anything here says not trustworthy, or a status
+    #    that is not "completed", the most that can honestly be said is that it
+    #    ran.
+    # the quotes may be escaped: a shortened copy of a reply wrapped as {"result": "..."}
+    st = [m.lower() for m in re.findall(r'\\?"status\\?"\s*:\s*\\?"([A-Za-z_]+)\\?"', text)]
+    tr = re.findall(r'\\?"trustworthy_result\\?"\s*:\s*(true|false)', text)
+    if not st and not tr:
         return None
-    out = {"status": st.group(1)}
+    out: dict = {}
+    if st and len(set(st)) == 1:
+        # one status in the whole text: it can only be this report's own
+        out["status"] = st[0]
+    elif st:
+        # several, and no way to tell whose. Promoting one of them to the whole
+        # report is how a failed run's healthy participant became the verdict,
+        # so none is promoted and the verification flags decide: what can
+        # honestly be said is that it ran.
+        out["trustworthy_result"] = False
     if tr:
-        out["trustworthy_result"] = tr.group(1) == "true"
+        out["trustworthy_result"] = all(v == "true" for v in tr) and out.get("trustworthy_result", True)
     return out
 
 
@@ -142,22 +171,79 @@ def classify_solver_result(raw: str) -> str:
     top = _verdict_of(p)
     if top:
         return top
+    # No verdict at the top. Whatever is inside answers for its own part, not
+    # for the whole, so the whole is verified only when nothing inside says
+    # otherwise — the docstring's ladder, where one null level sinks it. The
+    # best evidence anywhere would report exactly that ladder as finished.
     found: list[str] = []
     _walk(p, found)
-    if "verified" in found:
+    if not found:
+        return "failed"
+    if all(v == "verified" for v in found):
         return "verified"
-    if "unverified" in found:
-        return "unverified"
-    return "failed"
+    if "failed" in found and not any(v in ("verified", "unverified") for v in found):
+        return "failed"
+    return "unverified"
+
+
+_RAISED = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception|Fault)): ?(.*)$", re.M)
+
+
+def _what_broke(error: str) -> str:
+    """The line of an error text that says what went wrong: a traceback's LAST exception
+    line, not its banner; the text itself when it names no exception."""
+    raised = _RAISED.findall(error or "")
+    return f"{raised[-1][0]}: {raised[-1][1]}".strip() if raised else error
+
+
+def verdict_reason(raw: str) -> str:
+    """Why, in the report's own words.
+
+    A solver that verifies a result also says what it checked, and one that
+    refuses says what is missing. Replacing that with "openPASO did not verify
+    its result" throws away the answer: for a ladder whose levels are each
+    sound but whose mesh never refined, the difference between "not verified"
+    and "each level converged, but the mesh did not change between them, so the
+    sequence shows nothing about convergence" is the difference between a
+    person re-running the work and a person fixing it.
+
+    A FAILED run is explained by what broke. Measured 2026-09-29: this read the
+    verification sentence first, and for every failure that sentence is the same
+    "NOT VERIFIED -- the solver run errored ...", so nine failed steps and the
+    closing lines all said it and none said the error ("NameError: name
+    'SplineGeometry' is not defined"), nor any fix openPASO names beside it."""
+    p = _payload(raw) or {}
+    if classify_solver_result(raw) == "failed":
+        broke = p.get("error")
+        if isinstance(broke, str) and broke.strip():
+            said = " ".join(_what_broke(broke).split())
+            named = p.get("what_the_error_is")
+            if isinstance(named, str) and named.strip():
+                said += " -- " + " ".join(named.split())
+            return said
+    for key in ("verification", "error", "what_to_fix_next", "message"):
+        text = p.get(key)
+        if isinstance(text, str) and text.strip():
+            return " ".join(text.split())
+    m = re.search(r'"(?:verification|error)"\s*:\s*"((?:[^"\\]|\\.){4,})"', raw or "")
+    return " ".join(m.group(1).encode().decode("unicode_escape", "ignore").split()) if m else ""
 
 
 def solver_verdict(events) -> str | None:
     """The best solver evidence in these events: 'verified', 'unverified',
-    'failed' (a solver tool was called and computed nothing), or None."""
+    'failed' (a solver tool was called and computed nothing), or None.
+
+    A verdict recorded on the event is the one that counts. It was read from the
+    whole result, while the text beside it is a shortened copy that may no
+    longer contain the field the verdict rests on — a coupling's
+    trustworthy_result sits in the middle of a long reply, which is exactly the
+    part that is cut. Re-reading the copy here made the run list and the
+    downloaded record say a run computed nothing while its own transcript said
+    it had finished: one fact, two readers, two answers."""
     seen = None
     for e in events:
         if e.get("type") == "tool_result" and e.get("tool") in SOLVER_TOOLS:
-            v = classify_solver_result(e.get("result") or "")
+            v = e.get("verdict") or classify_solver_result(e.get("result") or "")
             if v == "verified":
                 return v
             if v == "unverified" or seen is None:

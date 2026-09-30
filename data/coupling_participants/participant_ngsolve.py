@@ -375,123 +375,126 @@ else:
         gfun.vec[int(d)] = float(q)
     f += gfun * v * ds("interface")        # APPLY the partner's number unchanged
 
-with TaskManager():
+# THE SOLVE AND THE RECOVERY RUN AT MODULE LEVEL, NOT INSIDE A `with` BLOCK: the hole
+# sat inside `with TaskManager():`, and a fill written at column 0 ended that block and
+# broke the served lines after it with an IndentationError (measured in 3 of 5 cells).
+# Wrap your own solve in `with TaskManager():` if you want its threads.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
-    a.Assemble()
-    f.Assemble()
-    f_vol.Assemble()
-    res = f.vec.CreateVector()
-    res.data = f.vec - a.mat * gfu.vec
-    gfu.vec.data += a.mat.Inverse(fes.FreeDofs(),
-                                  inverse="sparsecholesky") * res
+a.Assemble()
+f.Assemble()
+f_vol.Assemble()
+res = f.vec.CreateVector()
+res.data = f.vec - a.mat * gfu.vec
+gfu.vec.data += a.mat.Inverse(fes.FreeDofs(),
+                              inverse="sparsecholesky") * res
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
-    # ── DID THE PARTNER'S TRACE ENTER THE SOLVE? (served) ─ keep this block.
-    #    A Dirichlet side whose solve freed the interface dofs returns its own
-    #    answer there, and the coupling "converges" to two fields that disagree.
-    #    Measured on a coupled run: the interface was left out of the space's
-    #    dirichlet= set and the solved vector replaced the imported values, so the
-    #    side exported its own insulated trace; nothing stopped it. The two end
-    #    nodes are left out -- the outer boundary may hold them too. The nodes
-    #    are the mesh's own on the interface line, never the list the trace was
-    #    written through: a list naming the wrong dofs agrees with itself.
-    _tv = sorted((float(_d2p[_d][AL]), _d) for _d in _line)
-    _tv = [(_a, _d) for _a, _d in _tv if ALO + TOL < _a < AHI - TOL]
-    if SIDE == "dirichlet" and _tv:
-        _gap = max(abs(float(gfu.vec[_d]) - float(_t)) for (_a, _d), _t in
-                   zip(_tv, sample(imp, "values", T_INIT, np.array([_a for _a, _ in _tv], float))))
-        if _gap > 1e-9 * max(1.0, float(np.abs(np.asarray(T_if, float)).max())):
-            raise SystemExit("EXPORT SELF-CHECK: the partner's temperature is not in the solution at "
-                             "the interface nodes (largest gap %.3e): on the Dirichlet side the "
-                             "interface must be held -- named in the space's dirichlet= set, or "
-                             "cleared from the mask the solve inverts on -- and the solve must keep "
-                             "the values already in gfu. A solve that frees them returns this "
-                             "side's own answer and couples to nothing." % _gap)
+# ── DID THE PARTNER'S TRACE ENTER THE SOLVE? (served) ─ keep this block.
+#    A Dirichlet side whose solve freed the interface dofs returns its own
+#    answer there, and the coupling "converges" to two fields that disagree.
+#    Measured on a coupled run: the interface was left out of the space's
+#    dirichlet= set and the solved vector replaced the imported values, so the
+#    side exported its own insulated trace; nothing stopped it. The two end
+#    nodes are left out -- the outer boundary may hold them too. The nodes
+#    are the mesh's own on the interface line, never the list the trace was
+#    written through: a list naming the wrong dofs agrees with itself.
+_tv = sorted((float(_d2p[_d][AL]), _d) for _d in _line)
+_tv = [(_a, _d) for _a, _d in _tv if ALO + TOL < _a < AHI - TOL]
+if SIDE == "dirichlet" and _tv:
+    _gap = max(abs(float(gfu.vec[_d]) - float(_t)) for (_a, _d), _t in
+               zip(_tv, sample(imp, "values", T_INIT, np.array([_a for _a, _ in _tv], float))))
+    if _gap > 1e-9 * max(1.0, float(np.abs(np.asarray(T_if, float)).max())):
+        raise SystemExit("EXPORT SELF-CHECK: the partner's temperature is not in the solution at "
+                         "the interface nodes (largest gap %.3e): on the Dirichlet side the "
+                         "interface must be held -- named in the space's dirichlet= set, or "
+                         "cleared from the mask the solve inverts on -- and the solve must keep "
+                         "the values already in gfu. A solve that frees them returns this "
+                         "side's own answer and couples to nothing." % _gap)
 
-    # Outward normal flux density q = -(k grad T).n on the interface.
-    #
-    # WHY NOT AN L2 PROJECTION OF THE GRADIENT. That is what this file used to
-    # do: project -k dT/dx over the whole subdomain and sample it at the
-    # interface. The gradient of a P1 solution is only O(h) accurate ON the
-    # boundary — the superconvergence points are interior — and the boundary
-    # trace is exactly what the coupling reads. Measured against a manufactured
-    # solution with a known exact interface flux, the projection converges at
-    # order ~1 while the consistent flux below converges at ~2, so the recovery,
-    # not the physics and not the partner, was setting the answer.
-    #
-    # THE CONSISTENT (REACTION) FLUX. From
-    #     a(u,v) - (f,v) = int_dOmega (k grad u . n) v ds = -int_Gamma qn v ds
-    # it follows that for every basis function phi_i on the interface
-    #     int_Gamma qn phi_i ds = -r_i,   r = A u_h - b
-    # with r the UNCONSTRAINED residual: NGSolve's a.mat and f.vec are exactly
-    # that — the Dirichlet condition lives in fes.FreeDofs() at solve time and
-    # never touches the assembled operator, so the constrained rows still carry
-    # the reaction. Dividing by w_i = int_Gamma phi_i ds turns the functional
-    # into a density the partner can interpolate pointwise.
-    # ONE FORMULA, BOTH SIDES. An earlier version used the reaction on the
-    # Dirichlet side and an L2-projected gradient on the Neumann side, on the
-    # reasoning that the Neumann interface dofs are free, so r comes out ~0
-    # there. That holds only when the residual is taken against a load that
-    # ALREADY CONTAINS the interface term. Subtract the VOLUME load alone and
-    # those same rows carry exactly the interface functional the partner
-    # applied. On the Dirichlet side there is no interface term, so f_vol == f
-    # and the two cases are one expression.
-    #
-    # WHAT IS MEASURED, AND WHAT IS ONLY ALGEBRA. Handing the NEUMANN side a
-    # flux and asking for it back is an ASSEMBLY IDENTITY, not a convergence
-    # test: on free interface rows r = A u - b_vol IS M_Gamma g, so the export
-    # is -(M_Gamma g)/(M_Gamma 1) and its offset from -g is -(h^2/6) g''(y) for
-    # ANY correct assembly of ANY equation. The "order 2.00" that used to stand
-    # here was read off that fixture; it is a property of the P1 boundary mass
-    # matrix, not of this code — a bare NumPy mass matrix reproduces the same
-    # numbers with no PDE, no solver and no material in it. That fixture is
-    # kept (tests/test_interface_flux_recovery.py) for what it really tests:
-    # sign convention, interface weight, facet set, blocked dofs.
-    #
-    # THE ORDER is measured on the DIRICHLET side against an ANALYTIC interface
-    # flux the participant is never handed
-    # (tests/test_interface_flux_converges_to_a_known_exact_flux.py). FEniCSx,
-    # the same formulation, 8/16/32/64 uniform triangle meshes, max error over
-    # interior interface nodes:
-    #   2.889e-01  7.243e-02  1.814e-02  4.556e-03   ORDER 1.996 1.998 1.993
-    # and only first order (1.10, 1.06, 1.04) at the two nodes where the
-    # interface meets the outer boundary, handled apart just below.
-    #
-    # THE RETIRED L2-PROJECTED GRADIENT, in the norms it was measured in: order
-    # ~1 in the interior AWAY FROM THE ENDS (0.93), 0.50 in rms, and
-    # non-convergent in the max norm that includes the near-end nodes, where it
-    # stalls at 2.6 against a true flux of size 2 to 5. It was written up as a
-    # flat "order 0.00, it never converges", which was true of one norm only.
-    # Not re-measured since the branch was deleted.
-    rvec = f.vec.CreateVector()
-    rvec.data = a.mat * gfu.vec - f_vol.vec    # r = A u_h - b_vol, no bc
-    fw = LinearForm(fes)
-    fw += v * ds("interface")                  # w_i = int_Gamma phi_i ds
-    fw.Assemble()
+# Outward normal flux density q = -(k grad T).n on the interface.
+#
+# WHY NOT AN L2 PROJECTION OF THE GRADIENT. That is what this file used to
+# do: project -k dT/dx over the whole subdomain and sample it at the
+# interface. The gradient of a P1 solution is only O(h) accurate ON the
+# boundary — the superconvergence points are interior — and the boundary
+# trace is exactly what the coupling reads. Measured against a manufactured
+# solution with a known exact interface flux, the projection converges at
+# order ~1 while the consistent flux below converges at ~2, so the recovery,
+# not the physics and not the partner, was setting the answer.
+#
+# THE CONSISTENT (REACTION) FLUX. From
+#     a(u,v) - (f,v) = int_dOmega (k grad u . n) v ds = -int_Gamma qn v ds
+# it follows that for every basis function phi_i on the interface
+#     int_Gamma qn phi_i ds = -r_i,   r = A u_h - b
+# with r the UNCONSTRAINED residual: NGSolve's a.mat and f.vec are exactly
+# that — the Dirichlet condition lives in fes.FreeDofs() at solve time and
+# never touches the assembled operator, so the constrained rows still carry
+# the reaction. Dividing by w_i = int_Gamma phi_i ds turns the functional
+# into a density the partner can interpolate pointwise.
+# ONE FORMULA, BOTH SIDES. An earlier version used the reaction on the
+# Dirichlet side and an L2-projected gradient on the Neumann side, on the
+# reasoning that the Neumann interface dofs are free, so r comes out ~0
+# there. That holds only when the residual is taken against a load that
+# ALREADY CONTAINS the interface term. Subtract the VOLUME load alone and
+# those same rows carry exactly the interface functional the partner
+# applied. On the Dirichlet side there is no interface term, so f_vol == f
+# and the two cases are one expression.
+#
+# WHAT IS MEASURED, AND WHAT IS ONLY ALGEBRA. Handing the NEUMANN side a
+# flux and asking for it back is an ASSEMBLY IDENTITY, not a convergence
+# test: on free interface rows r = A u - b_vol IS M_Gamma g, so the export
+# is -(M_Gamma g)/(M_Gamma 1) and its offset from -g is -(h^2/6) g''(y) for
+# ANY correct assembly of ANY equation. The "order 2.00" that used to stand
+# here was read off that fixture; it is a property of the P1 boundary mass
+# matrix, not of this code — a bare NumPy mass matrix reproduces the same
+# numbers with no PDE, no solver and no material in it. That fixture is
+# kept (tests/test_interface_flux_recovery.py) for what it really tests:
+# sign convention, interface weight, facet set, blocked dofs.
+#
+# THE ORDER is measured on the DIRICHLET side against an ANALYTIC interface
+# flux the participant is never handed
+# (tests/test_interface_flux_converges_to_a_known_exact_flux.py). FEniCSx,
+# the same formulation, 8/16/32/64 uniform triangle meshes, max error over
+# interior interface nodes:
+#   2.889e-01  7.243e-02  1.814e-02  4.556e-03   ORDER 1.996 1.998 1.993
+# and only first order (1.10, 1.06, 1.04) at the two nodes where the
+# interface meets the outer boundary, handled apart just below.
+#
+# THE RETIRED L2-PROJECTED GRADIENT, in the norms it was measured in: order
+# ~1 in the interior AWAY FROM THE ENDS (0.93), 0.50 in rms, and
+# non-convergent in the max norm that includes the near-end nodes, where it
+# stalls at 2.6 against a true flux of size 2 to 5. It was written up as a
+# flat "order 0.00, it never converges", which was true of one norm only.
+# Not re-measured since the branch was deleted.
+rvec = f.vec.CreateVector()
+rvec.data = a.mat * gfu.vec - f_vol.vec    # r = A u_h - b_vol, no bc
+fw = LinearForm(fes)
+fw += v * ds("interface")                  # w_i = int_Gamma phi_i ds
+fw.Assemble()
 
-    r_if = np.array([rvec[int(d)] for d in iface_dofs], float)
-    w_if = np.array([fw.vec[int(d)] for d in iface_dofs], float)
-    Q = np.zeros(len(iface_dofs))
-    ok = np.abs(w_if) > 1e-14
-    Q[ok] = -r_if[ok] / w_if[ok]
+r_if = np.array([rvec[int(d)] for d in iface_dofs], float)
+w_if = np.array([fw.vec[int(d)] for d in iface_dofs], float)
+Q = np.zeros(len(iface_dofs))
+ok = np.abs(w_if) > 1e-14
+Q[ok] = -r_if[ok] / w_if[ok]
 
-    # An interface node that ALSO lies on the outer Dirichlet boundary
-    # carries the OUTER reaction as well, so its residual is not this
-    # interface's flux. Take the nearest interior interface node rather than
-    # exporting a corner value that is physically a different quantity.
-    # outer_dofs AS DOF NUMBERS, whatever the hole built: np.isin reads a Python set
-    # as ONE object and a BitArray (fes.GetDofs(...)) as bits, and on four coupled
-    # runs this rule matched nothing and the corner values went out unreplaced.
-    _od = outer_dofs
-    if type(_od).__name__ == "BitArray":
-        _od = [_i for _i in range(len(_od)) if _od[_i]]
-    elif isinstance(_od, (set, frozenset)):
-        _od = sorted(_od)
-    suspect = np.isin(iface_dofs, np.asarray(_od, int)) | ~ok
-    good = np.where(~suspect)[0]
-    if len(good):
-        for i in np.where(suspect)[0]:
-            Q[i] = Q[good[np.argmin(np.abs(good - i))]]
+# An interface node that ALSO lies on the outer Dirichlet boundary
+# carries the OUTER reaction as well, so its residual is not this
+# interface's flux. Take the nearest interior interface node rather than
+# exporting a corner value that is physically a different quantity.
+# outer_dofs AS DOF NUMBERS, whatever the hole built: np.isin reads a Python set
+# as ONE object and a BitArray (fes.GetDofs(...)) as bits, and on four coupled
+# runs this rule matched nothing and the corner values went out unreplaced.
+_od = outer_dofs
+if type(_od).__name__ == "BitArray":
+    _od = [_i for _i in range(len(_od)) if _od[_i]]
+elif isinstance(_od, (set, frozenset)):
+    _od = sorted(_od)
+suspect = np.isin(iface_dofs, np.asarray(_od, int)) | ~ok
+good = np.where(~suspect)[0]
+if len(good):
+    for i in np.where(suspect)[0]:
+        Q[i] = Q[good[np.argmin(np.abs(good - i))]]
 # ── EXPORT SELF-CHECK ─ keep this block. It stops the three exports that look
 #    fine and are worthless: a non-finite field; a Neumann side whose imported
 #    load never entered the assembled system (it returns the no-load answer and
@@ -554,17 +557,19 @@ if _chk_in.size and _chk_rows is not None and not getattr(a, "condense", False):
             f"r = A u - f reaches {_chk_r.max():.2e} against a system scale of {_chk_sc:.2e} "
             f"({int((_chk_r > 1e-6 * _chk_sc).sum())} of {_chk_in.size} dofs); a solved "
             f"system leaves round-off there. The field was not solved for those dofs from "
-            f"this a and f. Two ways measured to get here: a mask whose bits are not the "
-            f"free dofs (a loop over a BitArray yields True/False, not dof numbers), or a "
+            f"this a and f. Three ways measured to get here: a mask whose bits are not the "
+            f"free dofs (a loop over a BitArray yields True/False, not dof numbers), a "
             f"correction applied to the load alone instead of to the residual that the "
-            f"values already in gfu leave. The flux recovery above reads the same a.mat, "
-            f"so nothing was exported.")
+            f"values already in gfu leave, and a solve whose result went into another "
+            f"vector (M.Mult(x, y) writes M x INTO y). The flux recovery above reads the "
+            f"same a.mat, so nothing was exported.")
 
 # THE LOAD THE SOLVE USED CARRIES THE SOURCE. Off every boundary, f (the solve's
 # load) and f_vol (the one the flux recovery subtracts) are the same volume
-# integral. Measured on a coupled run: f was built and never assembled, the side
-# solved with no source through a whole ladder, and the check above -- which
-# compares A u with that same f -- passed it.
+# integral. Measured on coupled runs: f built and never assembled (the side solved
+# with no source through a whole ladder, and the check above -- which compares A u
+# with that same f -- passed it); and f assembled, then written over by the solve's
+# own Mult call.
 _chk_bd = fes.GetDofs(mesh.Boundaries(".*"))
 _chk_io = np.array([d for d in range(fes.ndof) if not _chk_bd[d]], int)
 if _chk_io.size:
@@ -581,8 +586,9 @@ if _chk_io.size:
             f"LOAD: off the boundary, the load the solve used (f) reaches {np.abs(_chk_lf).max():.3e} "
             f"and the volume load the flux recovery subtracts (f_vol) {np.abs(_chk_lv).max():.3e}"
             + (f", while F_SRC reaches {_chk_s:.3e}" if _chk_m == 0 else "")
-            + ". There both are the same volume integral of the source, and a form built but "
-              "never assembled holds zeros. Nothing was exported.")
+            + ". There both are the same volume integral of the source. Two ways measured to get "
+              "here: a form built and never assembled (it holds zeros), and a vector written over "
+              "after its assembly -- M.Mult(x, y) writes M x INTO y. Nothing was exported.")
 # WHAT THE HELD NON-INTERFACE EDGES HOLD, read from the solved field: the line
 # printed before the solve says only what this file or config.json states.
 _chk_hd = [(_d, _pt) for _d, _pt in _d2p.items() if not _chk_fd[_d] and abs(_pt[AX] - IFACE_X) > TOL]

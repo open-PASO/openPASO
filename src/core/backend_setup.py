@@ -606,7 +606,7 @@ def execute_setup(backend: str, route_kind: str | None = None,
             t0 = time.time()
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True,
-                                      timeout=timeout)
+                                      timeout=timeout, stdin=subprocess.DEVNULL)
                 result["steps"].append({
                     "step": " ".join(cmd)[:120],
                     "rc": proc.returncode,

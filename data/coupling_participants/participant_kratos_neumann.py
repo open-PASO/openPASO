@@ -111,16 +111,12 @@ def source(x, y):
     return F_SRC(x, y)
 # ─────────────────────────────────────────────────────────────────────────
 
-# ── THE PER-LEVEL RULE (served). A ./config.json next to this script overrides
-#    the mesh and names the level; the per-level dumps below carry that level so
-#    the coarse levels survive the fine ones. Write the WHOLE contract:
+# ── THE PER-LEVEL RULE (served). ./config.json names the level and overrides the
+#    mesh, the box, K, F_SRC and T_OUTER; the dumps below carry the level. Write:
 #      {"level": k, "nx": .., "ny": .., "x0": .., "x1": .., "y0": .., "y1": ..,
 #       "iface": "left|right|bottom|top", "k": <diffusivity>, "reaction": <c or 0.0>,
 #       "source_expr": "<f(x, y), or 0.0>", "outer": <the non-interface value, if any>}
-#    The box, k, reaction and source_expr are what openPASO judges this side's field
-#    against -- the one check that tells a field converging to the right function
-#    from one converging to a wrong one. Without them it abstains, and a wrong
-#    boundary or source rides through.
+#    openPASO judges this side's field against them; without them it abstains.
 LEVEL = 1
 if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
     try:
@@ -131,6 +127,11 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
         NY = int(_cfg.get("ny", NY))
         X0 = float(_cfg.get("x0", X0)); X1 = float(_cfg.get("x1", X1))
         Y0 = float(_cfg.get("y0", Y0)); Y1 = float(_cfg.get("y1", Y1))
+        K = float(_cfg.get("k", K)); T_OUTER = float(_cfg.get("outer", T_OUTER))
+        if _cfg.get("source_expr") is not None:
+            _src = compile(str(_cfg["source_expr"]).replace("^", "**"), "<source_expr>", "eval")
+            F_SRC = lambda x, y, _c=_src: eval(_c, {"__builtins__": {}}, dict(  # noqa: E731
+                x=x, y=y, pi=np.pi, sin=np.sin, cos=np.cos, exp=np.exp, sqrt=np.sqrt)) + 0.0 * x
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
 

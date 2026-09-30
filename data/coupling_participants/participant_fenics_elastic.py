@@ -86,6 +86,67 @@ def B_SRC(x, y):
     """
     return np.zeros_like(x), np.zeros_like(y)
 NX, NY    = 24, 16        # this subdomain's OWN mesh; need not match the partner
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). config.json may carry this
+#    subdomain's box, interface, material, outer displacement and body force AS
+#    THE TASK WRITES THEM -- side, partner; x0, x1, y0, y1; iface ("left"|"right"|"bottom"|"top",
+#    or the coordinate of the interface line) and iface_axis ("x"|"y"); E and nu,
+#    or lam and mu; udx, udy (the four polynomial coefficients of the outer
+#    displacement); source_ux, source_uy as strings in x and y (`^` allowed) --
+#    and when it does they override the constants and the B_SRC body above.
+#    Measured on the thermo-elastic family: the side written as CODE solved a
+#    textbook sine source while its own config.json held the task's polynomials;
+#    a source typed twice is transcribed once wrong. The audit's momentum check
+#    reads the same keys, so a side that states them is the side it can judge.
+def _expr_fn(expr):
+    """A NumPy function of (x, y) from an expression string as a task writes it."""
+    src = str(expr).replace("^", "**")
+    code = compile(src, "<source>", "eval")
+    names = {"pi": np.pi, "sin": np.sin, "cos": np.cos, "exp": np.exp, "sqrt": np.sqrt,
+             "abs": np.abs, "log": np.log, "tanh": np.tanh, "cosh": np.cosh, "sinh": np.sinh}
+    def f(x, y):
+        env = dict(names); env["x"] = x; env["y"] = y
+        return eval(code, {"__builtins__": {}}, env) + 0.0 * x
+    return f
+try:
+    _cfg_all = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
+    _cfg_all.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+except (ValueError, TypeError, json.JSONDecodeError):
+    _cfg_all = {}
+if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
+if str(_cfg_all.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
+    IFACE_AXIS = str(_cfg_all["iface_axis"]).strip().lower()[:1]
+_ifc = str(_cfg_all.get("iface", "")).strip().lower()
+if _ifc in ("left", "right", "bottom", "top"):
+    IFACE_AXIS = ("x" if _ifc in ("left", "right") else "y")
+    IFACE_X = {"left": X0, "right": X1, "bottom": Y0, "top": Y1}[_ifc]
+elif _ifc:
+    try:
+        IFACE_X = float(_ifc)
+    except ValueError:
+        pass
+if str(_cfg_all.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
+    SIDE = str(_cfg_all["side"]).strip().lower()
+if str(_cfg_all.get("partner", "")).strip():
+    PARTNER = str(_cfg_all["partner"]).strip()
+if "E" in _cfg_all and "nu" in _cfg_all:
+    E_MOD, NU = float(_cfg_all["E"]), float(_cfg_all["nu"])
+elif ("lam" in _cfg_all or "lambda" in _cfg_all) and "mu" in _cfg_all:
+    _lam, _mu = float(_cfg_all.get("lam", _cfg_all.get("lambda"))), float(_cfg_all["mu"])
+    E_MOD, NU = _mu * (3.0 * _lam + 2.0 * _mu) / (_lam + _mu), _lam / (2.0 * (_lam + _mu))
+for _nm, _key in (("UDX", "udx"), ("UDY", "udy")):
+    if isinstance(_cfg_all.get(_key), (list, tuple)) and len(_cfg_all[_key]) == 4:
+        globals()[_nm] = tuple(float(_c) for _c in _cfg_all[_key])
+_SOURCES_FROM = "code (the B_SRC body above)"
+if _cfg_all.get("source_ux") is not None and _cfg_all.get("source_uy") is not None:
+    _bx_cfg, _by_cfg = _expr_fn(_cfg_all["source_ux"]), _expr_fn(_cfg_all["source_uy"])
+    def B_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
+        return _bx_cfg(x, y), _by_cfg(x, y)
+    _SOURCES_FROM = "config.json"
+print(f"SOURCES IN USE: from {_SOURCES_FROM}"
+      + (f"; b_x = {str(_cfg_all.get('source_ux'))[:60]}; b_y = {str(_cfg_all.get('source_uy'))[:60]}"
+         if _cfg_all.get("source_ux") is not None else "; b = the B_SRC body above (config carries no source_ux/source_uy)"))
+
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction export
 # ─────────────────────────────────────────────────────────────────────────

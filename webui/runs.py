@@ -119,7 +119,10 @@ class Run:
         # a result was verified while this rule called it unverified. What the
         # server decided is what the page shows; the page keeps its own reading
         # only for records written before this stamp existed.
-        if event.get("type") == "tool_result" and event.get("tool") in SOLVER_TOOLS:
+        if (event.get("type") == "tool_result" and event.get("tool") in SOLVER_TOOLS
+                and "verdict" not in event):
+            # only where the tool layer did not judge the full result already:
+            # this text may be a shortened copy, and that is not the evidence
             event["verdict"] = classify_solver_result(event.get("result") or "")
         if event.get("type") == "done" and event.get("outcome"):
             event["by"] = "server"

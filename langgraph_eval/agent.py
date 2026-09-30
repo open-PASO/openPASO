@@ -1183,7 +1183,7 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
 # for is a slow leak. Oldest out first; 256 is far more than one run asks.
 _BLOCKED_MESSAGE = (
     "[the search returned nothing after three attempts on all backends. "
-    "DuckDuckGo answers an empty list when it is throttling a machine, which is "
+    "A search engine answers an empty list when it is throttling a machine, which is "
     "the usual reason for this, so treat it as 'could not search', NOT as 'the "
     "web has nothing on this'. Do not conclude anything from it: wait and try "
     "once more, ask a shorter query, or use openPASO's own knowledge and "
@@ -1205,7 +1205,7 @@ SEARCH_SCOPE: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 @tool
 def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web (DuckDuckGo). Returns up to max_results result snippets.
+    """Search the web. Returns up to max_results result snippets.
 
     DuckDuckGo throttles repeated searches from one machine, and when it does it
     answers with an EMPTY LIST rather than an error. The old code read that as
@@ -1219,16 +1219,23 @@ def web_search(query: str, max_results: int = 5) -> str:
     again, and an empty answer is reported as what it almost always is — a
     block, not an empty web — so nobody mistakes it for evidence of absence.
     """
+    # THE MAINTAINED CLIENT FIRST. duckduckgo_search was renamed ddgs and the old
+    # name asks DuckDuckGo alone; ddgs asks several engines. Measured 2026-09-28 on
+    # this machine: duckduckgo_search 8.1.1 answered 0 hits for "Schafer Turek
+    # benchmark cylinder" on all three of its backends, and furniture-shop and
+    # language-course pages for two other queries of one web-interface run, while
+    # ddgs 9.16 answered all four queries with the benchmark paper, the FEniCSx
+    # tutorial and the dolfinx forum.
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
+        backends = ("auto",)               # ddgs picks among its engines itself
     except ImportError:
         try:
-            from ddgs import DDGS          # the same package, renamed
+            from duckduckgo_search import DDGS   # the old name: DuckDuckGo only
+            backends = ("auto", "html", "lite")
         except ImportError:
             return ("[web_search unavailable: install the search client to enable it — "
-                    "`pip install ddgs`, or `pip install duckduckgo-search` for the older "
-                    "name this repository still pins in "
-                    "langgraph_eval/requirements-langgraph.txt]")
+                    "`pip install ddgs` (see langgraph_eval/requirements-langgraph.txt)]")
 
     # the query that is remembered is the query that is sent: keying on a
     # lowercased form while searching the original would let one spelling
@@ -1250,7 +1257,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     for pause in (0.0, 1.5, 4.0):
         if pause:
             time.sleep(pause)
-        for backend in ("auto", "html", "lite"):
+        for backend in backends:
             try:
                 with DDGS() as ddgs:
                     hits = list(ddgs.text(query, max_results=max_results,

@@ -36,7 +36,7 @@ def grammar(bin_path, ld: str | None = None) -> dict:
             env = dict(os.environ)
             if ld:
                 env["LD_LIBRARY_PATH"] = f"{ld}:{env.get('LD_LIBRARY_PATH', '')}"
-            dump = subprocess.run([key, "-p"], capture_output=True, text=True, timeout=180, env=env).stdout
+            dump = subprocess.run([key, "-p"], capture_output=True, text=True, timeout=180, env=env, stdin=subprocess.DEVNULL).stdout
             g["sections"] = set(re.findall(r"^    - name: (.+?)\s*$", dump, re.M)) | set(
                 re.findall(r"^  - ([A-Z][A-Z0-9 _/.:-]*?)\s*$", dump.split("legacy_string_sections:", 1)[-1], re.M)) | {"TITLE"}
             g["elements"] = set(re.findall(r"^  ([A-Z][A-Z0-9_]*):\s*$",

@@ -50,9 +50,10 @@ The text below is the tool's own description, exactly as the AI model receives i
               `category=`; `index=True` maps what exists first. A
               narrowed answer always states how many entries it held
               back and how to get them.
-            - "postmortems" — formal post-mortem records under
-              data/postmortems/*.json, filtered by solver +
-              physics + optional signal pattern. These are the
+            - "postmortems" — openPASO's formal post-mortem records,
+              filtered by solver + physics + optional signal pattern
+              (read them here: they are inside openPASO, not files in
+              your working directory). These are the
               audit-trail entries that record WHY each pitfall
               exists; the critic-gate should retrieve them when
               the agent's plan touches the matching (solver,

@@ -175,10 +175,14 @@ async def get_manifest(sid: str):
 
     A result that cannot be traced back to what produced it is not a result. The
     interface shows a summary; this is the record behind it: every event of the
-    run in order, and a hash for every artefact it wrote. A tool result longer
-    than 8000 characters was shortened when it was recorded, keeping both ends
-    and saying in the middle how much was left out — so what is here is what the
-    model was given, and where something is missing it says so."""
+    run in order, and a hash for every artefact it wrote.
+
+    One thing here is not verbatim. A tool result longer than 8000 characters
+    is shortened when it is recorded — both ends kept, and the middle marked
+    with how much was left out. The model was given the whole of it; the
+    verdict on a solver result was read from the whole of it before shortening
+    and is recorded beside the text. The files themselves are on disk,
+    unshortened, with their checksums below."""
     # a live run's record on disk is a checkpoint, not the present: turn
     # boundaries and endings are written at once and the rest every tenth event,
     # so a download during a run would miss the newest steps it promises
