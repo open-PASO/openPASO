@@ -65,8 +65,8 @@ def F_SRC(x, y):
         return -K * (6.0 * x * y**2 + 2.0 * x**3)
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the outer edges your solve holds (outer_dofs)
-NX, NY    = 24, 16        # this subdomain's own mesh
+T_OUTER   = 335.0         # Dirichlet value on the outer edges your solve holds (outer_dofs)
+NX, NY    = 46, 26        # this subdomain's own mesh
 T_INIT    = 310.0          # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 # ─────────────────────────────────────────────────────────────────────────

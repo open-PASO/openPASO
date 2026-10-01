@@ -172,7 +172,7 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
 # The interface face itself must not appear.
 DIRICHLET_FACES = ("x0",)
 
-T_INIT     = 300.0           # iteration-1 fallback interface temperature
+T_INIT     = 295.0           # iteration-1 fallback interface temperature
 Q_INIT     = 0.0             # iteration-1 fallback interface flux density
 LIN_SOLVER = "amgcl"         # "amgcl" (needed in 3-D past ~5k nodes) | "direct"
 

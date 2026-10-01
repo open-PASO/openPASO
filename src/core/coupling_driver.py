@@ -78,6 +78,7 @@ bit-identical, the floor is 0, and `max(tol, 0) == tol`.
 from __future__ import annotations
 import hashlib
 import json
+import re
 import os
 import tempfile
 import shutil
@@ -320,6 +321,23 @@ def _bounded_stream(text: str) -> str:
             + raw[-half:].decode("utf-8", errors="replace"))
 
 
+# A STOP KEEPS ITS NAME. The tail was the last 300 characters of a participant's stderr, and a
+# served check's message runs longer: measured, couple()'s lead quoted a solve self-check from
+# mid-word ("ale ...") without the check's name, and the run read it as a check of ours that was
+# "too strict". The tail now starts at the last line that names a stop (a capitalised label and a
+# colon, or a Python exception line) when that line starts within the last `most` characters.
+_STOP_LINE = re.compile(r"^(?!NOTE\b|WARNING\b)(?:[A-Z][A-Z0-9_ ()/'-]{2,60}:|\w*(?:Error|Exception):|"
+                        r"SPARTA failed)", re.M)
+
+
+def _stderr_tail(text: str, n: int = 300, most: int = 1500) -> str:
+    """The end of a participant's stderr: from the last line that names a stop, when that line
+    starts within the last `most` characters, else the last `n` characters."""
+    text = text or ""
+    hits = [m for m in _STOP_LINE.finditer(text) if m.start() >= len(text) - most]
+    return text[hits[-1].start():] if hits else text[-n:]
+
+
 def _persist_participant_output(p: Participant, result, iteration: int) -> None:
     """Atomically retain the latest native process output for attribution."""
     log = p.work_dir / "participant_output.log"
@@ -416,7 +434,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, f"participant {p.name} timed out"
     if not ep.exists():
         return None, (f"participant {p.name} wrote no exports.json "
-                      f"(rc={r.returncode}). stderr tail: {r.stderr[-300:]}")
+                      f"(rc={r.returncode}). stderr tail: {_stderr_tail(r.stderr)}")
     # Same rule as the loop: a solver that writes its last iterate and then
     # aborts has not answered the question, and a floor measured across crashed
     # runs is a floor on the crash, not on the sampling.
@@ -424,7 +442,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, (f"participant {p.name} exited with code {r.returncode} "
                       f"during a replicate run; its exports.json is the output "
                       f"of a FAILED run and cannot define a noise floor. "
-                      f"stderr tail: {r.stderr[-300:]}")
+                      f"stderr tail: {_stderr_tail(r.stderr)}")
     try:
         return InterfaceData.from_json(ep), None
     except Exception as e:
@@ -887,7 +905,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
                                error=f"participant {p.name} wrote no exports.json "
-                                     f"(rc={r.returncode}). stderr tail: {r.stderr[-300:]}")
+                                     f"(rc={r.returncode}). stderr tail: {_stderr_tail(r.stderr)}")
             # A NON-ZERO exit code is a failed solve even when exports.json is
             # present: a solver that diverges often writes its last iterate and
             # then aborts. Continuing on that output produced a converged-looking
@@ -900,7 +918,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                                       f"{r.returncode} at iteration {it}; its "
                                       "exports.json is the output of a FAILED run "
                                       "and must not be coupled on. stderr tail: "
-                                      f"{r.stderr[-300:]}"))
+                                      f"{_stderr_tail(r.stderr)}"))
             try:
                 new_exports[p.name] = InterfaceData.from_json(ep)
             except Exception as e:

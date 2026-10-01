@@ -44,14 +44,14 @@ def F_SRC(x, y):
     VOLUME_SOURCE on when its assembly integrated them.
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the held NON-interface edges
+T_OUTER   = 335.0         # Dirichlet value on the held NON-interface edges
 REACTION  = 0.0           # c in -div(K grad T) + c T = f (0 when there is none)
 # WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY: the edge
 # opposite the interface is held; True if the two edges the interface ends on
 # are held too, False if they are natural (zero flux). The script refuses to
 # run until you set it, and the program checks your hole 4 against it.
 FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
-NX, NY    = 24, 16
+NX, NY    = 46, 26
 T_INIT    = 310.0
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 DEAL_II_DIR = ""          # the deal.II build or install tree discover(query='list') names;
@@ -244,16 +244,26 @@ if r.returncode < 0:          # killed by a signal: a crash inside the program
     # THE MESSAGE SAYS WHICH BUILD CRASHED: a DEBUG build was told to turn DEBUG on (measured).
     _debug = _cml.is_file() and _re.search(r"^\s*target_compile_definitions\s*\([^)#]*\bDEBUG\b",
                                            _cml.read_text(), _re.M)
+    # DEBUG REACHES DEAL.II'S HEADERS, NOT ITS LIBRARY (measured on this install: a SparseMatrix
+    # copy-constructed from a filled one is left empty, and the call that uses it crashes with no
+    # message with DEBUG on as with it off).
+    _said = "An error occurred in line" in r.stderr
     sys.exit(f"the deal.II program was KILLED BY {_signal.Signals(-r.returncode).name} (return code "
              f"{r.returncode}): a crash inside the program, not an install fault. "
-             + ("This build has DEBUG on (the target_compile_definitions line of CMakeLists.txt): deal.II "
-                "checked its own assertions, and a failed one prints 'An error occurred in line' and the "
-                "violated condition on the stderr above, naming the call. An unsized index vector handed "
-                "to get_dof_indices crashes with or without DEBUG." if _debug else
+             + ("This build has DEBUG on (the target_compile_definitions line of CMakeLists.txt), which turns "
+                "on the checks in deal.II's headers: the one that failed is on the stderr above ('An error "
+                "occurred in line' and the violated condition)." if _debug and _said else
+                "This build has DEBUG on (the target_compile_definitions line of CMakeLists.txt) and no deal.II "
+                "check printed: DEBUG turns on the checks in deal.II's headers, not the ones compiled into its "
+                "library. Measured to crash so with DEBUG on: a SparseMatrix copy-constructed from a filled one, "
+                "which is left empty (build the copy on sparsity, then copy_from), copy_from into a SparseMatrix "
+                "never built on a pattern, and an unsized index vector handed to get_dof_indices." if _debug else
                 "This build is a Release build, which asserts nothing: an FEValues accessor whose update "
-                "flag was not requested, or an unsized index vector, crashes with no message. Uncomment the "
+                "flag was not requested, an unsized index vector, or a SparseMatrix copy-constructed from a "
+                "filled one (it is left empty) crashes with no message. Uncomment the "
                 "target_compile_definitions(dealii_side PRIVATE DEBUG) line in CMakeLists.txt and run "
-                "again: deal.II then names a missing flag itself."))
+                "again: deal.II's header checks then name a missing flag; the empty matrix and the unsized "
+                "vector crash with no message even then."))
 if r.returncode != 0 or not _if_out.is_file():
     sys.exit(f"the deal.II program failed (return code {r.returncode}); its own message is above")
 # A PROGRAM THAT DROPPED THE SOURCE RETURNS THE BOUNDARY-DATA-ONLY ANSWER WITH NO

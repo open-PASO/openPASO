@@ -55,6 +55,8 @@ class LevelResult:
     residual: float
     detail: str = ""
     umax: float = 0.0           # the field's largest magnitude at this level
+    scale: float = float("nan")     # the discrete check: A u as a multiple of the load (least squares)
+    left: float = float("nan")      # ... and what is left of the load after that factor
 
 
 @dataclass
@@ -446,13 +448,32 @@ def check_levels_on_grid(raw_levels: dict, source_expr: str, coefficient, box: l
 # nodes' triangles, which here are netgen's own), the same fields judged with the scalar
 # K[0][0] read 0.45 .. 1.0, and a side that had solved with K[0][0] read 0.59 .. 0.65.
 #
-# IT CONFIRMS, IT NEVER CONDEMNS. The rebuild is exact only when the side's mesh, element and
-# load are the ones rebuilt here (P1 on the nodes' Delaunay triangles, or on a tensor grid P1
-# with either diagonal or bilinear cells; the load the source's nodal interpolant). A side
-# with another element, a mesh that is not its nodes' Delaunay triangulation, or a source
-# integrated at quadrature points leaves more than round-off here while solving its equation,
-# so a residual above round-off is reported as measured and the weak identity decides.
+# IT CONFIRMS, AND CONDEMNS ONLY A LOAD OFF BY ONE FACTOR. The rebuild is exact only when the
+# side's mesh, element and load are the ones rebuilt here (P1 on the nodes' Delaunay triangles, or
+# on a tensor grid P1 with either diagonal or bilinear cells; the load the source's nodal
+# interpolant), so a residual above round-off alone condemns nothing and the weak identity decides.
+# A RESIDUAL THAT ONE FACTOR EXPLAINS DOES CONDEMN, at any level and at the first. Measured on a
+# coupled round: a side whose load left out its test function read A u = 3.87, 3.97, 3.99 times the
+# load of f at its three levels (after that factor 7.6e-2, 3.2e-2, 1.0e-2 of the load were left,
+# against 2.8, 3.0, 3.0 before it), and one that added its load inside the trial-function loop 4.00
+# times it (1.3e-7 left); both converged cleanly to the wrong field, and the first read VERIFIED at
+# level 1. Over 785 levels of
+# 329 coupled cells of earlier rounds (their own dumps and configs), the rule below -- the residual
+# above 0.1 of the load, the factor off one by more than 0.1, and at most a quarter of the residual
+# left after it -- held on none of the 188 sides (542 levels) the three-level identity confirms (the
+# largest factor there, 0.76 on a rebuild that does not match its mesh, left 0.91 of its residual);
+# it held on three sides whose A u was about zero times the load, two of them already condemned by
+# the identity and one it had not judged.
 _DISCRETE_ROUNDOFF = 1e-6
+_SCALE_RESIDUAL, _SCALE_OFF, _SCALE_LEFT = 0.1, 0.1, 0.25
+
+
+def _one_factor_condemns(r) -> bool:
+    """True when this level's A u is one factor other than one times the load (see above)."""
+    import math
+    return (math.isfinite(r.residual) and math.isfinite(r.scale) and math.isfinite(r.left)
+            and r.residual > _SCALE_RESIDUAL and abs(r.scale - 1.0) > _SCALE_OFF
+            and r.left <= _SCALE_LEFT * r.residual)
 _GAUSS2 = (-1.0 / math.sqrt(3.0), 1.0 / math.sqrt(3.0))
 
 
@@ -523,8 +544,10 @@ def check_levels_discrete(raw_levels: dict, source_expr: str, coefficient, box: 
     symmetric part acts). The residual is taken at the nodes strictly inside the box -- free
     whatever the boundary conditions -- relative to the load there; on a tensor grid the
     smallest of the three rebuilds (bilinear cells, triangles cut along either diagonal)
-    counts. CONSISTENT when every level is at round-off (see _DISCRETE_ROUNDOFF); otherwise
-    NOT_APPLICABLE with the residuals measured, because only an exact rebuild can condemn."""
+    counts. CONSISTENT when every level is at round-off (see _DISCRETE_ROUNDOFF); INCONSISTENT
+    when at some level, the first included, one factor other than one explains the residual
+    (see _one_factor_condemns); otherwise NOT_APPLICABLE with the residuals and the factor
+    measured, because only an exact rebuild can condemn anything else."""
     import numpy as np
     from scipy.spatial import Delaunay
     K = _k_matrix(coefficient)
@@ -573,18 +596,22 @@ def check_levels_discrete(raw_levels: dict, source_expr: str, coefficient, box: 
             scale = float(np.abs(b[inner]).max())
             if not scale > 0:
                 continue
-            rel = float(np.abs((A @ u - b)[inner]).max()) / scale
+            Au, bi = (A @ u)[inner], b[inner]
+            rel = float(np.abs(Au - bi).max()) / scale
             if best is None or rel < best[0]:
-                best = (rel, how)
+                s = float(Au @ bi) / float(bi @ bi)             # A u as a multiple of the load
+                best = (rel, how, s, float(np.abs(Au - s * bi).max()) / scale)
         if best is None:
             res.levels.append(LevelResult(lvl, len(P), float("nan"),
                                           "no rebuild with a nonzero load inside the box"))
             continue
         hows.add(best[1])
-        res.levels.append(LevelResult(lvl, len(P), best[0], best[1], umax=float(np.abs(u).max())))
+        res.levels.append(LevelResult(lvl, len(P), best[0], best[1], umax=float(np.abs(u).max()),
+                                      scale=best[2], left=best[3]))
     good = [r for r in res.levels if math.isfinite(r.residual)]
     seq = ", ".join(f"{r.residual:.1e}" for r in good)
     how = " / ".join(sorted(hows))
+    factor = [r for r in good if _one_factor_condemns(r)]
     if good and all(r.residual <= _DISCRETE_ROUNDOFF for r in good):
         res.verdict = "CONSISTENT"
         res.explanation = (
@@ -593,14 +620,33 @@ def check_levels_discrete(raw_levels: dict, source_expr: str, coefficient, box: 
             f"the box, at every level ({seq} of the load): the field is that system's solution. "
             f"That says nothing about the values it holds on its boundary and interface, which "
             f"the interface and outer-boundary checks judge.")
+    elif factor:
+        res.verdict = "INCONSISTENT"
+        _lv = ", ".join(str(r.level) for r in factor)
+        res.explanation = (
+            f"rebuilt on its own nodes ({how}) with the full coefficient and the source at the "
+            f"nodes, the field's A u at the nodes inside the box is "
+            f"{', '.join(f'{r.scale:.3g}' for r in factor)} times the load of f at level"
+            f"{'s' if len(factor) > 1 else ''} {_lv}, and after that factor "
+            f"{', '.join(f'{r.left:.1e}' for r in factor)} of the load is left (against "
+            f"{', '.join(f'{r.residual:.1e}' for r in factor)} before it): "
+            + ("the field solves this equation with no load: none of the load of f is in it."
+               if all(abs(r.scale) < _SCALE_OFF for r in factor) else
+               "the field solves this equation with its load scaled by that factor, so its load or its "
+               "stiffness is off by it."
+               + (" A load summed without its test function is about the dofs of one cell times the "
+                  "right one." if any(r.scale > 1.5 for r in factor) else "")))
     else:
         res.verdict = "NOT_APPLICABLE"
         res.explanation = (
             (f"rebuilt on its own nodes ({how}) with the full coefficient and the source at the "
              f"nodes, the discrete system of this equation leaves {seq} of the load at the nodes "
-             f"inside the box, level by level; round-off would confirm the field solves it, and "
-             f"more than that condemns nothing on its own (another element, mesh or load rule "
-             f"leaves more)." if good else
+             f"inside the box, level by level, and A u there is "
+             f"{', '.join(f'{r.scale:.3g}' for r in good)} times the load with "
+             f"{', '.join(f'{r.left:.1e}' for r in good)} of it left after that factor. Round-off "
+             f"would confirm that the field solves this system, and a residual that one factor "
+             f"other than one explains would condemn it; this one is neither, so this check does not "
+             f"judge it." if good else
              "no level could be rebuilt: " + "; ".join(r.detail for r in res.levels if r.detail)[:300]))
     return res
 

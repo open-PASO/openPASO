@@ -56,7 +56,7 @@ X0, X1    = 0.6, 1.4      # this subdomain's x-extent
 Y0, Y1    = 0.0, 1.0      # this subdomain's y-extent
 IFACE_X   = 0.6           # the shared interface; must equal X0 or X1
 K         = 1.0           # conductivity
-LAM, MU   = 500.0, 300.0  # Lame parameters (plane strain)
+LAM, MU   = 560.0, 330.0  # Lame parameters (plane strain)
 BETA      = 1.0           # thermal stress coefficient: sigma_tot = sigma_el - BETA*T*I
 
 
@@ -73,7 +73,7 @@ def F_U(x, y):
     return 0.0 * x, 0.0 * y
 T_OUTER   = 0.0           # T on the whole NON-interface boundary
 UX_OUTER, UY_OUTER = 0.0, 0.0   # u on the whole NON-interface boundary
-NX, NY    = 16, 20        # this subdomain's OWN mesh; halve h per level
+NX, NY    = 26, 46        # this subdomain's OWN mesh; halve h per level
 T_INIT, UX_INIT, UY_INIT = 0.0, 0.0, 0.0   # iteration-1 fallback field
 Q_INIT    = (0.0, 0.0, 0.0)                # iteration-1 fallback flux/traction
 # ─────────────────────────────────────────────────────────────────────────

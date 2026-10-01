@@ -30,8 +30,8 @@ PARTNER = "right"
 X0, X1 = 0.0, 0.5
 H = 1.0
 K = 1.0
-T_OUTER = 100.0
-T_INIT = 50.0            # iteration-1 fallback interface temperature
+T_OUTER = 115.0
+T_INIT = 62.0            # iteration-1 fallback interface temperature
 nx, ny = 32, 32
 # ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
 #    next to this script overrides nx, ny and names the level; the per-level

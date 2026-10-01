@@ -110,9 +110,10 @@ import numpy as np
 #    Replace ALL of them with your problem's geometry, material and BCs.
 PARTNER    = "fluid"     # the fluid participant's `name` in your couple(...) call
 LX         = 1.2         # wall length
-Y0         = 0.25        # the FSI interface (this body's LOWER edge)
+Y0         = 0.18        # the FSI interface (this body's LOWER edge)
 HS         = 0.04        # wall thickness
-NXS, NYS   = 24, 3       # this body's OWN QUAD4 mesh; need not match the fluid's
+NXS, NYS   = 46, 3       # this body's OWN QUAD4 mesh; need not match the fluid's;
+                         # config.json's nx, ny set it per level (below)
 E_MOD      = 1.5e6       # Young's modulus
 NU         = 0.35       # Poisson ratio
 CLAMP_X    = (0.0, 1.2)  # x positions of the clamped ends; each must land on a
@@ -136,6 +137,22 @@ MONITOR_REACTION = False  # ask 4C for the clamp reaction forces, so the applied
                          # without it if 4C aborts, so it cannot lose you a run,
                          # only a second.
 # ─────────────────────────────────────────────────────────────────────────
+
+
+# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..} next to this
+#    script, and the keys a multi-level couple call hands in OPENPASO_CONFIG_JSON (they win), set
+#    NXS, NYS and name the level; the per-level dumps below carry that level, so the coarse levels
+#    survive the fine ones. A config that cannot be read stops the run: a level run on the edit
+#    block's mesh would hand in the wrong level.
+LEVEL = 1
+try:
+    _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
+    _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+    LEVEL = int(_cfg.get("level", LEVEL))
+    NXS, NYS = int(_cfg.get("nx", NXS)), int(_cfg.get("ny", NYS))
+except (ValueError, TypeError, AttributeError) as _cfg_exc:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON: the level and the mesh keys nx, ny could "
+                     f"not be read ({_cfg_exc!r}); fix them, nothing was run")
 
 GAUSS2 = (np.array([-1.0, 1.0]) / np.sqrt(3.0), np.array([1.0, 1.0]))
 
@@ -478,7 +495,7 @@ def main():
     # three times. The LEADING NEWLINE is deliberate: a program that writes without
     # a trailing newline glues its text onto the front of the next line.
     try:
-        print(f"\nNDOF = {int(2 * len(ux))}")
+        print(f"\nNDOF = {2 * int(n_nodes)}")          # the whole structure's dofs
     except Exception as _ndof_exc:
         print(f"[fsi-solid] could not report NDOF: {_ndof_exc!r}. Your task's execution"
               f" log needs `NDOF = <integer>` on a line of its own, so print your"
@@ -512,6 +529,35 @@ def main():
                          "(the Neumann condition that applies it is missing or "
                          "on the wrong surface). Fix the application; do not "
                          "couple on")
+
+
+    # PER-LEVEL PERSISTENCE: this level's whole displacement field, at this body's nodes, and its
+    # interface data -- the displacement and the traction applied there -- named by LEVEL and never
+    # overwritten by the next level (exports.json is). Interpolate THESE onto the points your task
+    # names. A DUMP DEFECT MUST NOT COST THE SOLVE: exports.json is written after them either way,
+    # and a half-written dump is removed.
+    _dumps = (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv")
+    try:
+        # a 4C VTU repeats each node once per element: one row per node
+        _, _first = np.unique(np.round(pts, 10), axis=0, return_index=True)
+        with open(_dumps[0], "w") as _f:
+            _f.write("x,y,ux,uy\n")
+            for (_px, _py), (_ux, _uy) in zip(pts[_first], dsp[_first]):
+                _f.write(f"{_px:.11e},{_py:.11e},{_ux:.11e},{_uy:.11e}\n")
+        with open(_dumps[1], "w") as _f:
+            _f.write("x,y,ux,uy,tx,ty\n")
+            for _px, (_ux, _uy), (_tx, _ty) in zip(ux, D, t_applied):
+                _f.write(f"{_px:.11e},{float(Y0):.11e},{_ux:.11e},{_uy:.11e},{_tx:.11e},{_ty:.11e}\n")
+    except Exception as _dump_exc:
+        for _partial in _dumps:
+            try:
+                if Path(_partial).is_file() and len(Path(_partial).read_text().splitlines()) <= 1:
+                    Path(_partial).unlink()
+            except OSError:
+                pass
+        print(f"[4C solid per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "
+              f"still written, so the coupling continues, but this level has no field file to hand "
+              f"in. Fix the names the dump reads and run this level again.")
 
     out = {
         "field_name": "interface_displacement",

@@ -95,6 +95,22 @@ _PROGRAM_IO_ELIDED = """\
 # ─────────────────────────────────────────────────────────────────────────"""
 
 
+# A DECK WRITER'S HOLE IS THE DECK, NOT A FINITE ELEMENT SOLVE. The SPARTA contract's one hole
+# defines write_deck(seed); the served lines around it write the per-element temperature file,
+# run the binary and read its dump. Measured on a coupled round: the generic banner told that hole
+# to "assemble and solve" and promised a flux recovery that subtracts a volume load, none of which
+# exists in a DSMC contract.
+_DECK_IO_ELIDED = """\
+# ─────────────────────────────────────────────────────────────────────────
+# THE SOLVE ITSELF IS YOURS AND IS NOT SERVED HERE.
+# HOLE {k} OF {n}: THE DECK GOES HERE. write_deck(seed) writes SPARTA's input deck
+# to DECK: the geometry, the gas, the grid, the walls and the sampling are yours.
+# The deck MUST read SURF_FILE first, load TSURF_IN with `custom surf ... file` and
+# dump SURF_FILE's elements to FLUX_OUT, as the docstring's step 3 shows.
+# ─────────────────────────────────────────────────────────────────────────"""
+_DECK_WRITER = __import__("re").compile(r"^\s*def write_deck\(", __import__("re").M)
+
+
 def _hole_banner(k: int, n: int, m: int | None, program_io: bool = False) -> str:
     """The banner for hole k of n when hole m holds the solve (None: unknown)."""
     if program_io and k == m:
@@ -306,7 +322,7 @@ def _dealii_cmake(program: str) -> str:
             f"project({name} CXX)\n"
             f"add_executable({name} {program})\n"
             f"deal_ii_setup_target({name})\n"
-            f"# target_compile_definitions({name} PRIVATE DEBUG)  # uncommented: deal.II names a silent crash\n")
+            f"# target_compile_definitions({name} PRIVATE DEBUG)  # uncommented: deal.II's header checks name a crash\n")
 
 
 def _elide_cc(text: str) -> tuple:
@@ -455,6 +471,57 @@ def _hole_indent(body: str) -> str:
     return min(pads, key=len) if pads else ""
 
 
+# WHAT EACH NAME A HOLE LEAVES BEHIND MUST BE, IN WORDS, where a contract states it. The list at
+# the end of a contract is read off the code and holds names only; measured on a fluid-structure
+# round, the fluid contract's list ("W dofc ds gdim msh n nit ph sigma tt vv ...") sent two cells
+# to tabulate the mixed space W for `dofc` -- a call that raises -- while the served lines need
+# the P1 vector space's coordinates. A contract states the words between these two lines, as
+# "#   <name>  <what it must be>" rows (a row indented deeper continues the one above); the
+# serving door moves them into that list, and the solve banner then points to them instead of
+# the generic "what you are expected to have produced", which is a heat contract's.
+_NAMES_BEGIN = "# ── HOLE NAMES IN WORDS ─ begin"
+_NAMES_END = "# ── HOLE NAMES IN WORDS ─ end"
+_GENERIC_PRODUCED = (
+    "# At this point you are expected to have produced:\n"
+    "#   * the discrete solution on this subdomain, with the partner's interface\n"
+    "#     data applied according to SIDE, and\n"
+    "#   * the assembled operator and the VOLUME load separately, because the flux\n"
+    "#     recovery below subtracts the volume load alone.\n")
+_NAMED_PRODUCED = (
+    "# At this point you are expected to have produced what the served lines\n"
+    "# below use: the names listed at the end of this file, each with what it\n"
+    "# must be.\n")
+_GENERIC_INTROS = (
+    "# Build the mesh, the function space, the weak form and the linear solve for\n"
+    "# the problem you were given, in this backend, however you judge best. That is\n",
+    "# Assemble and solve here the system the earlier hole set up -- the linear\n"
+    "# solve itself -- however you judge best. That is\n")
+_NAMED_INTRO = (
+    "# Write here the part of the solve the served lines below need -- the list\n"
+    "# at the end of this file says what each name is -- however you judge best. That is\n")
+
+
+def _hole_name_words(text: str) -> tuple:
+    """({name: its words}, the text without the block) for a contract's HOLE NAMES IN WORDS block;
+    ({}, text) when it has none."""
+    import re
+    a = text.find(_NAMES_BEGIN)
+    b = text.find(_NAMES_END, a + 1) if a >= 0 else -1
+    if a < 0 or b < 0:
+        return {}, text
+    words, cur = {}, None
+    for ln in text[a + len(_NAMES_BEGIN):b].splitlines():
+        m = re.match(r"#   (\w+)\s+(\S.*)$", ln)
+        if m:
+            cur = m.group(1)
+            words[cur] = m.group(2).strip()
+        elif cur and re.match(r"#\s{5,}\S", ln):
+            words[cur] += " " + ln.lstrip("#").strip()
+    a0 = text.rfind("\n", 0, a) + 1
+    b1 = text.find("\n", b)
+    return words, text[:a0] + (text[b1 + 1:] if b1 >= 0 else "")
+
+
 def _elide_solve(text: str) -> str:
     """Cut every marked SOLVE region out of a participant's source.
 
@@ -467,6 +534,7 @@ def _elide_solve(text: str) -> str:
     second route while the first was clean. The mechanism has to sit where
     every door passes through it, not where the first one did.
     """
+    words, text = _hole_name_words(text)
     spans, i = [], 0
     while True:
         a = text.find(_SOLVE_BEGIN, i)
@@ -481,11 +549,20 @@ def _elide_solve(text: str) -> str:
                if b > a and _SOLVE_CALL.search(_code_lines(text[a:b]))]
     m = solving[0] if len(solving) == 1 else None
     program_io = "DEALII_EXE" in text           # a deal.II wrapper: its hole runs the program
+    decks = {k for k, (a, b) in enumerate(spans, 1)  # a SPARTA wrapper: its hole writes the deck
+             if b > a and "SPARTA" in text and _DECK_WRITER.search(text[a:b])
+             and not _SOLVE_CALL.search(_code_lines(text[a:b]))}
     out, i = [], 0
     for k, (a, b) in enumerate(spans, 1):
         out.append(text[i:a])
         pad = _hole_indent(text[a + len(_SOLVE_BEGIN):b]) if b > a else ""
-        out.append("\n".join(pad + ln for ln in _hole_banner(k, len(spans), m, program_io).splitlines()) + "\n")
+        banner = (_DECK_IO_ELIDED.replace("{k}", str(k)).replace("{n}", str(len(spans))) if k in decks
+                  else _hole_banner(k, len(spans), m, program_io))
+        if words:
+            banner = banner.replace(_GENERIC_PRODUCED, _NAMED_PRODUCED)
+            for _intro in _GENERIC_INTROS:
+                banner = banner.replace(_intro, _NAMED_INTRO)
+        out.append("\n".join(pad + ln for ln in banner.splitlines()) + "\n")
         if b < 0:
             i = len(text)
             break
@@ -493,7 +570,7 @@ def _elide_solve(text: str) -> str:
         if i < len(text) and text[i] == "\n":
             i += 1
     out.append(text[i:])
-    return _append_reconstruction_contract("".join(out), text)
+    return _append_reconstruction_contract("".join(out), text, words)
 
 
 def _cut_regions(original: str) -> list:
@@ -746,11 +823,30 @@ def _free_loads(src: str):
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and not _bound(n)}
 
 
-def _append_reconstruction_contract(served: str, original: str) -> str:
+def _worded_names(names: list, words: dict) -> list:
+    """Comment rows saying what each listed name must be, from the contract's own words. A row
+    that continues one is indented and never a lone identifier (the write check reads a lone
+    identifier on an indented comment row as a listed name)."""
+    import textwrap
+    rows = []
+    width = max((len(n) for n in names if n in words), default=0)
+    for n in names:
+        if n not in words:
+            continue
+        lines = textwrap.wrap(words[n], 72 - width, break_on_hyphens=False, break_long_words=False)
+        if len(lines) > 1 and len(lines[-1].split()) == 1:
+            lines[-2] += " " + lines.pop()
+        rows.append(f"#   {n:<{width}}  {lines[0]}")
+        rows += [f"#   {'':<{width}}  {ln}" for ln in lines[1:]]
+    return rows
+
+
+def _append_reconstruction_contract(served: str, original: str, words: dict | None = None) -> str:
     names = _reconstruction_contract(served, original)
     if not names:
         return served
     uses = _definition_uses(served, original, names)
+    worded = _worded_names(names, words or {})
     return served + (
         "\n# ── WHAT YOUR SOLVE MUST LEAVE BEHIND ─────────────────────────\n"
         "# The code above and below the elided block uses these names. Your\n"
@@ -759,11 +855,16 @@ def _append_reconstruction_contract(served: str, original: str) -> str:
         + "".join(f"#     {n}\n" for n in names) +
         "#\n"
         + "".join(f"{ln}\n" for ln in uses)
-        + ("#\n" if uses else "") +
-        "# That is the whole contract. Read the surviving lines to see the\n"
-        "# shape each one has to have -- they are already indexed, assembled\n"
-        "# or written out there. openPASO does not serve the solve itself, but\n"
-        "# it will not make you guess which names the hole was filling.\n")
+        + ("#\n" if uses else "")
+        + ("# What each one must be:\n" + "".join(f"{ln}\n" for ln in worded) + "#\n"
+           "# That is the whole contract: the surviving lines show where each\n"
+           "# one is indexed, assembled or written out. openPASO does not serve the\n"
+           "# solve itself, but it will not make you guess which names the hole\n"
+           "# was filling.\n" if worded else
+           "# That is the whole contract. Read the surviving lines to see the\n"
+           "# shape each one has to have -- they are already indexed, assembled\n"
+           "# or written out there. openPASO does not serve the solve itself, but\n"
+           "# it will not make you guess which names the hole was filling.\n"))
 
 # ══════════════════════════════════════════════════════════════════════════
 # CORE — served by knowledge(topic='coupling') with no solver
@@ -2896,7 +2997,7 @@ _LAUNCH_PY = '''\
 1. Make TWO copies of the script, one per subdomain, and write each into that
    participant's own `work_dir` (an absolute path). Name them whatever you
    reference in `command` — `participant_left.py` and `participant_right.py`
-   below. The driver does not copy anything for you.
+   below. The driver copies no script for you.
 2. {STEP2}
 3. Run each copy BY HAND in its own directory first, with no `imports.json`
    present (delete a leftover one from an earlier attempt — the driver never
@@ -3001,9 +3102,9 @@ Y0, Y1    = 0.0, 1.0      # same cross-section as the partner
 Z0, Z1    = 0.0, 0.1      # same cross-section as the partner
 IFACE_X   = 0.5           # SAME interface coordinate as the partner
 E_MOD     = 2250.0        # this subdomain's own material
-NU        = 0.3
+NU        = 0.29
 U_OUTER   = 1.0e-4        # prescribed u_x on ITS outer face (here x = 1.0)
-NX, NY    = 12, 6         # its own mesh — deliberately NOT the partner's
+NX, NY    = 14, 6         # its own mesh — deliberately NOT the partner's
 U_INIT    = 5.0e-5
 Q_INIT    = 0.0
 """
@@ -3924,14 +4025,18 @@ def _fsi() -> str:
         "interface is a material surface, so that parametrisation is fixed; "
         "sending deformed coordinates makes each side interpolate against "
         "something that moves with the answer.\n\n"
-        "## THE FLUID PARTICIPANT — contract, solve elided; edit the marked block and write the solve\n\n"
+        "## THE FLUID PARTICIPANT (FEniCSx) — contract, solve elided; edit the marked block and write the solve\n\n"
+        "write_participant_contract(solver='fenics', variant='fsi_fluid', path=...) writes it.\n\n"
         f"```python\n{_script('fsi_fluid_fenics')}```\n\n"
-        "## THE STRUCTURE PARTICIPANT — contract, solve elided; edit the marked block and write the solve\n\n"
+        "## THE STRUCTURE PARTICIPANT (scikit-fem) — contract, solve elided; edit the marked block and write the solve\n\n"
+        "write_participant_contract(solver='skfem', variant='fsi', path=...) writes it.\n\n"
         f"```python\n{_script('fsi_solid_skfem')}```\n\n"
         "TWO MORE STRUCTURE PARTICIPANTS ship with the same contract, and both "
         "have been run as real coupled FSI on this install: "
         "`participant_fsi_solid_fenics.py` (FEniCSx, same interpreter as the "
-        "fluid) and `participant_fsi_solid_fourc.py` (4C — a plain-Python "
+        "fluid; write_participant_contract(solver='fenics', variant='fsi_solid', ...)) "
+        "and `participant_fsi_solid_fourc.py` (write_participant_contract(solver='fourc', "
+        "variant='fsi', ...); 4C — a plain-Python "
         "WRAPPER that writes an inline-mesh 4C deck, runs the binary and reads "
         "the VTU back, so it runs under an ordinary python with numpy and "
         "meshio, not under 4C). Running the pair once with each is how you find "
@@ -4038,7 +4143,95 @@ _PARTICIPANT_LABELS = {
   "elastic": "vector elasticity",
   "transient": "transient",
   "3d": "3-D",
+  # THE FLUID-STRUCTURE CONTRACTS ARE NAMED THE OTHER WAY ROUND, participant_fsi_<role>_<code>.py,
+  # and this resolver could not see them. Measured on a fluid-structure round: every orchestrator
+  # passed physics='fsi', four of five wrote variant='fsi', and the writer put the SCALAR heat
+  # contract on disk in all five cells, its reply calling it "the base contract" (5-8 minutes a
+  # cell; one fluid side was built on it, and a restore step overwrote a cell's fluid file with it).
+  "fsi_fluid": "fluid-structure FLUID-side",
+  "fsi_solid": "fluid-structure STRUCTURE-side",
 }
+# Words a request may carry that choose no variant: the parts door's own words, words that name no
+# physics, and the Dirichlet role, which no code ships a file of its own for (the base contract is
+# that side, or both).
+_REQUEST_FILLER = __import__("re").compile(
+  r"participants?|contract|script|program|part\d*|base|default|dirichlet|side|file|code|whole|full"
+  r"|the|for|of|a|my|this|")
+
+
+def _request_word(request: str) -> tuple:
+  """(the variant word a request names, '' for the base; the words in it that name nothing).
+
+  A request is a variant word (the writer's `variant`) or a parts signal, 'participant[:<word>]
+  :part<k>', with the knowledge door's physics word appended. A word that holds a label
+  ('elasticity' holds 'elastic') names that label, the first in _PARTICIPANT_LABELS order; any
+  spelling of fluid-structure names 'fsi', its role 'fsi_fluid' or 'fsi_solid' when it says one.
+  A word that names none of them is returned as unknown -- never read as the base contract."""
+  found, unknown = [], []
+  # the brackets of the notation 'participant[:<variant>]:part<k>', which the writer's description
+  # shows, are not part of a word
+  for tok in (request or "").strip().lower().replace("_", "-").replace("[", "").replace("]", "").split(":"):
+    tok = " ".join(tok.split())
+    fsi = tok.replace("fluid-structure", "fsi").replace("fluid structure", "fsi")
+    if "fsi" in fsi.replace("-", " ").split() or fsi.startswith("fsi"):
+      rest = fsi.replace("fsi", "", 1)
+      found.append("fsi_fluid" if "fluid" in rest else
+                   "fsi_solid" if ("solid" in rest or "structur" in rest) else "fsi")
+      continue
+    hit = next((c for c in _PARTICIPANT_LABELS if not c.startswith("fsi") and c in tok), None)
+    if hit is not None:
+      found.append(hit)
+    elif not all(_REQUEST_FILLER.fullmatch(w) for w in tok.replace("-", " ").split()):
+      unknown.append(tok)
+  order = ["fsi_fluid", "fsi_solid", "fsi"] + [c for c in _PARTICIPANT_LABELS if not c.startswith("fsi")]
+  word = min(found, key=order.index) if found else ""
+  return word, unknown
+
+
+def _fsi_paths(key: str) -> dict:
+  """{'fsi_fluid' | 'fsi_solid': path} of the fluid-structure contracts `key` ships."""
+  return {f"fsi_{role}": p for role in ("fluid", "solid")
+          for p in [_PARTICIPANT_DIR / f"participant_fsi_{role}_{key}.py"] if p.is_file()}
+
+
+def _variant_listing(key: str) -> str:
+  """The variant words `key` has, as the refusals name them."""
+  words = [w for w in _PARTICIPANT_LABELS if _variant_path(key, w) is not None]
+  return ("'' (the base contract: single-field, steady, 2-D)"
+          + "".join(f", '{w}'" for w in words)
+          + (" -- 'fsi' names the fluid-structure one" if len(_fsi_paths(key)) == 1 else ""))
+
+
+def _variant_path(key: str, word: str):
+  """The contract file of `key` a resolved variant word names, or None."""
+  if word.startswith("fsi_"):
+    return _fsi_paths(key).get(word)
+  path = _PARTICIPANT_DIR / f"participant_{key}{'_' + word if word else ''}.py"
+  return path if path.is_file() else None
+
+
+def _resolved_word(key: str, request: str) -> tuple:
+  """(the label key the request resolves to for `key`, '' for the base; refusal text or '')."""
+  word, unknown = _request_word(request)
+  if unknown:
+    return "", (f"# No contract for variant {unknown[0]!r} of solver={key!r}\n\n"
+                f"{unknown[0]!r} names none of this install's {key} contracts, so nothing was "
+                f"served or written. The variant words it has: {_variant_listing(key)}.")
+  if word == "fsi":
+    fsi = _fsi_paths(key)
+    if len(fsi) == 1:
+      return next(iter(fsi)), ""
+    if len(fsi) == 2:
+      return "", (f"# {key} ships TWO fluid-structure contracts: name the side\n\n"
+                  f"variant='fsi_fluid' is the fluid side ({fsi['fsi_fluid'].name}) and "
+                  f"variant='fsi_solid' the structure side ({fsi['fsi_solid'].name}); take the one "
+                  f"your task gives this code. Nothing was served or written for 'fsi'.")
+    return "", (f"# No fluid-structure participant for solver={key!r}\n\n"
+                f"The fluid-structure contracts ship for "
+                + ", ".join(sorted({p.stem.rsplit("_", 1)[1]
+                                    for p in _PARTICIPANT_DIR.glob("participant_fsi_*_*.py")}))
+                + f". The variant words {key} has: {_variant_listing(key)}.")
+  return word, ""
 
 
 def resolve_participant(solver: str, request: str = "") -> tuple:
@@ -4047,33 +4240,27 @@ def resolve_participant(solver: str, request: str = "") -> tuple:
   One resolver for every door that hands out a participant, so the file the
   knowledge reply serves in parts and the file the writer puts on disk can
   never be two different files. `error` is the served refusal text when there
-  is no such contract; then `path` is None."""
+  is no such contract; then `path` is None. A request whose word names no
+  contract is refused with the words that do: it is never served the base."""
   key = _ALIAS_CANON.get((solver or "").strip().lower())
   if not key or key not in _BACKEND_ORDER:
     return None, "", (f"# No coupling participant for solver={solver!r}\n\n"
                       f"Choose one of: {', '.join(_BACKEND_ORDER)}.")
-  requested = (request or "").strip().lower().replace("_", "-")
-  suffix = ""
-  for candidate in _PARTICIPANT_LABELS:
-    if candidate in requested:
-      suffix = f"_{candidate}"
-      break
-  path = _PARTICIPANT_DIR / f"participant_{key}{suffix}.py"
-  if not path.is_file():
-    available = [
-      p.stem.removeprefix(f"participant_{key}").lstrip("_") or "base"
-      for p in sorted(_PARTICIPANT_DIR.glob(f"participant_{key}*.py"))
-    ]
+  word, refusal = _resolved_word(key, request)
+  if refusal:
+    return None, "", refusal
+  path = _variant_path(key, word)
+  if path is None:
     # THE BASE CONTRACT TAKES BOTH ROLES where it carries a SIDE switch: a request for
     # its Neumann side is answered with it, said, rather than with a bare "none".
-    both = suffix == "_neumann" and _base_takes_both_sides(key)
-    return None, "", (f"# No {_PARTICIPANT_LABELS.get(suffix.lstrip('_'), suffix or 'base')} "
+    both = word == "neumann" and _base_takes_both_sides(key)
+    return None, "", (f"# No {_PARTICIPANT_LABELS.get(word, word or 'base')} "
                       f"participant for solver={solver!r}\n\n"
                       + (f"The base contract (variant='') serves BOTH sides: set SIDE = \"neumann\" "
                          f"in it, or \"side\": \"neumann\" in config.json where it reads config. "
                          if both else "")
-                      + f"Available variants: {', '.join(available) or 'none'}.")
-  return path, _PARTICIPANT_LABELS.get(suffix.lstrip("_"), "base"), ""
+                      + f"The variant words {key} has: {_variant_listing(key)}.")
+  return path, _PARTICIPANT_LABELS.get(word, "base"), ""
 
 
 def _base_takes_both_sides(key: str) -> bool:
@@ -4100,19 +4287,25 @@ def participant_variants_text() -> str:
                     for key, ws in table.items())
   both = [key for key, ws in table.items() if "neumann" not in ws and _base_takes_both_sides(key)]
   own = [key for key, ws in table.items() if "neumann" in ws]
+  two = [key for key, ws in table.items() if "fsi_fluid" in ws and "fsi_solid" in ws]
   return (f"`variant` is '' for the base contract, or one of the words this install's contracts "
           f"carry: {words}. The base contract serves both the Dirichlet and the Neumann side for "
           f"{', '.join(both)} (SIDE in its edit block, or \"side\" in config.json where it reads "
           f"config)" + (f"; {', '.join(own)} {'has' if len(own) == 1 else 'have'} a 'neumann' variant "
-                        f"for that side" if own else "") + ".")
+                        f"for that side" if own else "")
+          + f". 'fsi' writes a code's one fluid-structure contract"
+          + (f" ({', '.join(two)} {'ships' if len(two) == 1 else 'ship'} two, the fluid and the "
+             f"structure side: name 'fsi_fluid' or 'fsi_solid')" if two else "")
+          + "; a word that names no contract of the code is refused with the words it has.")
 
 
 def _participant_key_suffix(solver: str, request: str = "") -> tuple:
   """(canonical solver key, file suffix) the resolver used; ('', '') when unknown."""
   key = _ALIAS_CANON.get((solver or "").strip().lower()) or ""
-  requested = (request or "").strip().lower().replace("_", "-")
-  suffix = next((f"_{c}" for c in _PARTICIPANT_LABELS if c in requested), "")
-  return key, suffix
+  if not key:
+    return "", ""
+  word, _refusal = _resolved_word(key, request)
+  return key, (f"_{word}" if word else "")
 
 
 def _door_scaffold(key: str) -> str:
@@ -4221,12 +4414,16 @@ def coupling_participant(solver: str, request: str = "") -> str:
   # (74k characters, about seven minutes), then hit API errors the served facts for their codes
   # name -- facts neither fetched. The header said only "Concatenate only the fenced code".
   variant = f"variant='{suffix.lstrip('_')}', " if suffix else ""
+  # A FLUID-STRUCTURE SIDE'S FACTS COME WITH THE FLUID-STRUCTURE DOOR: the plain door serves the
+  # code's single-field facts, and a structure or fluid side needs its own.
+  facts_door = (f"knowledge(topic='coupling', solver='{key}', physics='fsi')" if suffix.startswith("_fsi")
+                else f"knowledge(topic='coupling', solver='{key}')")
   return (
     f"# {key} {label} participant CONTRACT (solve elided): part {part} of {len(chunks)}\n\n"
     f"ONE CALL WRITES THIS WHOLE FILE, byte for byte: write_participant_contract(solver='{key}', "
     f"{variant}path='<absolute path of the .py file in your working directory>'); use it rather "
     f"than retyping the parts. The API facts measured for {key} on this install -- the calls that "
-    f"work and what a wrong one prints -- come with knowledge(topic='coupling', solver='{key}'); "
+    f"work and what a wrong one prints -- come with {facts_door}; "
     "read them before you fill a hole. Assembling the parts instead: concatenate only the fenced "
     "code contents in part order, without the headings. Then edit `EDIT THIS BLOCK` and "
     + (f"fill the holes of the program {companions[0][0]} beside it.\n\n" if companions else
@@ -4930,8 +5127,8 @@ def _febio() -> str:
 def _sparta() -> str:
     return _payload(
         "SPARTA (DSMC)",
-        "**DIRICHLET-TYPE IN PRACTICE, and it will not pass the convergence "
-        "check.** SPARTA imports a wall TEMPERATURE and exports the energy flux "
+        "**DIRICHLET-TYPE IN PRACTICE.** SPARTA imports a wall TEMPERATURE and "
+        "exports the energy flux "
         "the gas deposits, which is exactly the Dirichlet role. There is NO "
         "native flux boundary condition: of the nine `surf_collide` styles "
         "(`adiabatic`, `cll`, `diffuse`, `impulsive`, `piston`, `specular`, "
@@ -4993,9 +5190,11 @@ def _sparta() -> str:
   converging residual is possible even when the physics has not settled — that
   is more dangerous than the noise, not less. `noise_notes` in the result says
   so when the floor measures zero.
-* YOU MUST STAGE THE DATA FILES. `couple` does not copy anything. Put the surf,
-  species and vss files in `work_dir` yourself, or the deck dies with
-  `Cannot open species file ...` from inside SPARTA.
+* THE DATA FILES MUST BE IN `work_dir`, where SPARTA opens them. `couple` copies
+  every file listed in a participant's `data_files` (absolute paths) into its
+  `work_dir` before the first iteration, and stops before any iteration when one
+  is missing; it does not read the deck for file names. A file in neither place
+  dies inside SPARTA with `Cannot open species file ...`.
 * PER-ELEMENT interface data goes in through a custom surf attribute:
   `custom surf create tsurf float 0 file tsurf.in 1 tsurf` and then
   `surf_collide 1 diffuse s_tsurf 1.0`. That is the only route to a spatially
@@ -5561,7 +5760,12 @@ def _dealii() -> str:
   tutorials apply the boundary values to the system matrix in place
   (`MatrixTools::apply_boundary_values(boundary_values, system_matrix, ...)`),
   which empties every held row but its diagonal; the reaction those rows carry
-  is then gone. Keep system_matrix as assembled and apply them to a copy; the
+  is then gone. Keep system_matrix as assembled and apply them to a copy: a
+  SparseMatrix<double> built on `sparsity` (or given reinit(sparsity)), then
+  filled by copy_from(system_matrix). A SparseMatrix copy-constructed from
+  system_matrix does not copy it: deal.II leaves it empty, and the library
+  call that uses it (apply_boundary_values, condense, a direct solver's
+  initialize) crashes with no message, with DEBUG on or off (measured). The
   program stops if a held row of system_matrix has lost its off-diagonal
   entries.
 * Neumann side: the partner's flux is `+ integral(g * phi_i) ds` over the

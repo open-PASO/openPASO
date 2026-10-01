@@ -71,6 +71,16 @@ def scrub_text(s: str) -> str:
     return "".join(out)
 
 
+# STRICT base64, the whole value: its alphabet has no space, no "." "-" "_", padding only at the end,
+# and a length that is a multiple of four. The looser class above lets letters, "/" and spaces
+# through, so a home path matched it from end to end ('A' * 64 + ' /home/<user>/x' did).
+_STRICT_BASE64 = re.compile(r"[A-Za-z0-9+/]{38,}={0,2}")
+
+
+def _is_base64(value: str) -> bool:
+    return len(value) % 4 == 0 and _STRICT_BASE64.fullmatch(value) is not None
+
+
 # The keys whose values are encoded data. scrub_text() recognises them written
 # out ("frames": "..."), which is how a whole document reaches it — but walking
 # a parsed object hands over the bare value with its key already stripped, so
@@ -82,7 +92,10 @@ _ENCODED_KEYS = {"frames", "mask", "data", "image"}
 
 def scrub(obj, _key: str | None = None):
     if isinstance(obj, str):
-        if _key in _ENCODED_KEYS and _LOOKS_ENCODED.match(obj[:64]):
+        # THE WHOLE VALUE, not its start (Copilot on the org PR): a value under one of these keys
+        # that only begins with encoded-looking characters, 'A' * 64 + ' /home/<user>/x', was
+        # returned unscrubbed. Encoded data is encoded data from its first character to its last.
+        if _key in _ENCODED_KEYS and _is_base64(obj):
             return obj                      # the numbers a solver produced
         return scrub_text(obj)
     if isinstance(obj, list):

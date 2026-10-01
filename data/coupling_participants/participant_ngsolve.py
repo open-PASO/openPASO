@@ -30,7 +30,7 @@ IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the lin
                           # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.6           # shared interface (X0/X1 for axis "x", Y0/Y1 for axis "y")
-K         = 0.8           # conductivity
+K         = 0.8           # conductivity: one number, or a 2x2 tensor [[kxx, kxy], [kyx, kyy]]
 
 
 def F_SRC(x, y):
@@ -72,7 +72,7 @@ def F_SRC(x, y):
     with: ..., V<n>).
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the held NON-interface boundary
+T_OUTER   = 335.0         # Dirichlet value on the held NON-interface boundary
 REACTION  = 0.0           # c in -div(K grad T) + c T = f (0 when there is none)
 # WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY, NOT THIS FILE'S:
 # a default here once chose a boundary condition for problems it never saw, and
@@ -80,7 +80,7 @@ REACTION  = 0.0           # c in -div(K grad T) + c T = f (0 when there is none)
 # True if the two edges the interface ends on are held too, False if they are
 # natural (zero flux); the script refuses to run until you set it.
 FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
-NX, NY    = 24, 16        # this subdomain's own mesh (netgen maxh derived below)
+NX, NY    = 46, 26        # this subdomain's own mesh (netgen maxh derived below)
 T_INIT    = 310.0          # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 # ─────────────────────────────────────────────────────────────────────────
@@ -139,20 +139,27 @@ if str(_cfg_all.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
     SIDE = str(_cfg_all["side"]).strip().lower()
 if str(_cfg_all.get("partner", "")).strip():
     PARTNER = str(_cfg_all["partner"]).strip()
+
+
+def _k_tensor(value, where):
+    """A TENSOR CONDUCTIVITY, [[kxx, kxy], [kyx, kyy]] (or its four numbers row by row), as the
+    CoefficientFunction the form below reads: K * grad(u) is the matrix times the gradient."""
+    _flat = [float(_c) for _row in value for _c in (_row if isinstance(_row, (list, tuple)) else [_row])]
+    if len(_flat) != 4:
+        raise SystemExit(f"{where} is a matrix of {len(_flat)} entries; a 2-D conductivity tensor has "
+                         f"four, [[kxx, kxy], [kyx, kyy]].")
+    return ngsolve.CoefficientFunction(tuple(_flat), dims=(2, 2))
+
+
 _K_TEXT = None
 for _nm, _key in (("K", "k"), ("REACTION", "reaction"), ("T_OUTER", "outer")):
     if _cfg_all.get(_key) is not None:
         if _nm == "K" and isinstance(_cfg_all[_key], (list, tuple)):
-            # A TENSOR CONDUCTIVITY, [[kxx, kxy], [kyx, kyy]]: the form below reads
-            # K * grad(u) as the matrix times the gradient.
-            _flat = [float(_c) for _row in _cfg_all[_key] for _c in _row]
-            if len(_flat) != 4:
-                raise SystemExit(f"config.json's k is a matrix of {len(_flat)} entries; a 2-D "
-                                 f"conductivity tensor has four, [[kxx, kxy], [kyx, kyy]].")
-            K = ngsolve.CoefficientFunction(tuple(_flat), dims=(2, 2))
-            _K_TEXT = str(_cfg_all[_key])
+            K, _K_TEXT = _k_tensor(_cfg_all[_key], "config.json's k"), str(_cfg_all[_key])
         else:
             globals()[_nm] = float(_cfg_all[_key])
+if isinstance(K, (list, tuple)):          # a tensor typed into K above reads as config.json's k does
+    K, _K_TEXT = _k_tensor(K, "K in this file"), str(K)
 if isinstance(_cfg_all.get("full_outer_dirichlet"), bool):
     FULL_OUTER_DIRICHLET = _cfg_all["full_outer_dirichlet"]
 _SOURCE_FROM = "code (the F_SRC body above)"
@@ -394,7 +401,7 @@ else:
 
 # THE SOLVE AND THE RECOVERY RUN AT MODULE LEVEL, NOT INSIDE A `with` BLOCK: the hole
 # sat inside `with TaskManager():`, and a fill written at column 0 ended that block and
-# broke the served lines after it with an IndentationError (measured in 3 of 5 cells).
+# broke the served lines after it with an IndentationError (measured).
 # Wrap your own solve in `with TaskManager():` if you want its threads.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 a.Assemble()

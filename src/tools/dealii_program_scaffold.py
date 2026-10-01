@@ -318,7 +318,11 @@ int main(int argc, char **argv)
     // a boundary value or a constraint: the consistent flux recovery reads
     // system_matrix u - volume_rhs on the interface rows, and a row a boundary
     // condition emptied has lost the flux it carried.
-    // The lines after it stop when f is non-zero and volume_rhs is zero.
+    // The lines after it stop when f is non-zero and volume_rhs is zero, when
+    // volume_rhs does not sum to the integral of f over the box (its test
+    // functions sum to one) or, weighted by f at the support points, to the
+    // integral of f times its interpolant, and, with no reaction, when a row
+    // of system_matrix at a dof inside the box does not sum to zero.
     // ── HOLE 3 OF 5 IS YOURS AND IS NOT SERVED HERE: write the code the comment
     //    above asks for, in place of these two lines. ──
 
@@ -348,8 +352,70 @@ int main(int argc, char **argv)
         }
     if (f_max > 0 && volume_rhs.linfty_norm() == 0)
       fail("VOLUME_SOURCE: the source is not zero and volume_rhs is: hole 3 never integrated f");
+    // served: for a finite element function w = sum_i w_i phi_i, a load vector of f has sum_i
+    // volume_rhs_i w_i equal to the integral of f w over the box, whatever quadrature built it. Two are
+    // checked, the integrals taken with a finer Gauss rule than an assembly needs: w = 1 (the test
+    // functions sum to one, so volume_rhs sums to the integral of f) and w = f at the support points
+    // (f times its interpolant cannot cancel over the box, as f alone can). Measured on coarse meshes,
+    // f written out or sampled: a right load meets the first to within 8 % of the integral of |f| and
+    // the second to within 35 % of that of |f w| with one Gauss point per cell, both to within 2e-2 with
+    // two; a load summed without its test function is about the dofs of a cell times the right one.
+    Vector<double> f_node(n);
+    for (unsigned int i = 0; i < n; ++i)
+      f_node(i) = source(support[i]);
+    double b_sum[2] = {0, 0}, f_int[2] = {0, 0}, f_abs[2] = {0, 0};
+    FEValues<2> fe_sum(mapping, fe, QGauss<2>(fe.degree + 2), update_values | update_quadrature_points | update_JxW_values);
+    for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      fe_sum.reinit(cell);
+      cell->get_dof_indices(dofs);
+      for (unsigned int q = 0; q < fe_sum.n_quadrature_points; ++q)
+      {
+        double f_interp = 0;
+        for (unsigned int i = 0; i < dpc; ++i)
+          f_interp += f_node(dofs[i]) * fe_sum.shape_value(i, q);
+        const double f_here = source(fe_sum.quadrature_point(q)), w = fe_sum.JxW(q);
+        f_int[0] += f_here * w, f_abs[0] += std::abs(f_here) * w;
+        f_int[1] += f_here * f_interp * w, f_abs[1] += std::abs(f_here * f_interp) * w;
+      }
+    }
+    for (unsigned int i = 0; i < n; ++i)
+      b_sum[0] += volume_rhs(i), b_sum[1] += volume_rhs(i) * f_node(i);
+    const double within[2] = {0.15, 0.5};
+    for (unsigned int k = 0; k < 2; ++k)
+      if (std::abs(b_sum[k] - f_int[k]) > within[k] * f_abs[k])
+        fail(std::string("VOLUME_SOURCE: volume_rhs ") + (k ? "weighted by f at the support points " : "") + "sums to " +
+             num(b_sum[k]) + ", and " + (k ? "f times its interpolant" : "f") + " integrates to " + num(f_int[k]) +
+             " over the box" + (std::abs(f_int[k]) > 1e-3 * f_abs[k] ? ", so volume_rhs is " +
+             num(b_sum[k] / f_int[k]) + " times the load of f" : "") + ". A load vector of f, weighted by any finite "
+             "element function w at its support points, sums to the integral of f w, to within " +
+             (k ? "50" : "15") + " % of that of |f w| (" + num(f_abs[k]) + ") whatever the quadrature: hole 3's "
+             "volume_rhs is not the load vector of f");
+    if (in.reaction == 0)
+    {
+      double worst = 0;
+      unsigned int row_at = 0;
+      for (unsigned int i = 0; i < n; ++i)
+      {
+        const Point<2> &p = support[i];
+        if (p[0] < in.x0 + tol || p[0] > in.x1 - tol || p[1] < in.y0 + tol || p[1] > in.y1 - tol)
+          continue;                   // a dof on the boundary
+        double sum = 0, size = 0;
+        for (auto it = system_matrix.begin(i); it != system_matrix.end(i); ++it)
+          sum += it->value(), size += std::abs(it->value());
+        if (size > 0 && std::abs(sum) > worst * size)
+          worst = std::abs(sum) / size, row_at = i;
+      }
+      if (worst > 1e-9)
+        fail("MATRIX: with no reaction every row of the matrix of -div(K grad u) sums to zero (the gradients of its "
+             "test functions sum to zero), and the row of the dof at (" + num(support[row_at][0]) + ", " +
+             num(support[row_at][1]) + ") sums to " + num(worst) + " of the size of its entries: hole 3's system_matrix "
+             "carries more than that operator");
+    }
     std::cout << "VOLUME_SOURCE " << (f_max > 0 ? "on" : "off") << ": max|f| = " << f_max
-              << ", max|volume_rhs| = " << volume_rhs.linfty_norm() << std::endl;
+              << ", max|volume_rhs| = " << volume_rhs.linfty_norm() << "; volume_rhs sums to " << b_sum[0]
+              << " (the integral of f: " << f_int[0] << ") and, weighted by f at the support points, to " << b_sum[1]
+              << " (the integral of f times its interpolant: " << f_int[1] << ")" << std::endl;
     system_rhs = volume_rhs;
 
     // HOLE 4 OF 5 -- THE BOUNDARY DATA.
@@ -427,7 +493,9 @@ int main(int argc, char **argv)
       row_max = std::max(row_max, row);
       if (held(i) && off == 0)
         fail("SOLVE: a held row of system_matrix has no off-diagonal entries left: the boundary values went "
-             "into system_matrix itself; apply them to a copy");
+             "into system_matrix itself. Apply them to a copy: a SparseMatrix<double> built on `sparsity` (or "
+             "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
+             "from system_matrix is left empty, and a library call on it crashes with no message");
       if (held(i))
         kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
       else
@@ -871,6 +939,8 @@ int main(int argc, char **argv)
     Vector<double> weight(n), flux_load(n);
     FEFaceValues<2> fe_face(mapping, fe, QGauss<1>(fe.degree + 2),
                             update_values | update_quadrature_points | update_JxW_values);
+    FEValues<2> fe_sum(mapping, fe, QGauss<2>(fe.degree + 2),   // served: the step checks' integrals
+                       update_values | update_quadrature_points | update_JxW_values);
     auto interface_integrals = [&]() {
       weight = 0;
       flux_load = 0;
@@ -925,12 +995,58 @@ int main(int argc, char **argv)
       // interface rows, and a row a boundary condition emptied has lost the
       // flux it carried.
       // The lines after it stop when system_matrix is zero or volume_rhs is
-      // not finite.
+      // not finite, when the entries of system_matrix do not sum to
+      // (rho_c/dt + theta c) times the area of the box, and when volume_rhs
+      // does not sum to the integral of (rho_c/dt - (1 - theta) c) u^n +
+      // theta f^(n+1) + (1 - theta) f^n over the box (its test functions sum
+      // to one, and their gradients to zero).
       // ── HOLE 3 OF 5 IS YOURS AND IS NOT SERVED HERE: write the code the comment
       //    above asks for, in place of these two lines. ──
 
       if (system_matrix.frobenius_norm() == 0 || !std::isfinite(volume_rhs.l2_norm()))
         fail("STEP SYSTEM: at " + at + " system_matrix is zero or volume_rhs is not finite: hole 3 assembled nothing");
+      {
+        // served: the test functions sum to one and their gradients to zero, so the entries of
+        // M/dt + theta A sum to (rho_c/dt + theta c) times the area of the box, and the step's load
+        // sums to the integral of (rho_c/dt - (1 - theta) c) u^n + theta f^(n+1) + (1 - theta) f^n,
+        // taken here with a finer Gauss rule than an assembly needs. The part in u^n is exact with any
+        // rule; the part in f of a right load sits within 8 % of the integral of |f| on coarse meshes
+        // (measured, f written out, a one-point rule), and within round-off with the wrapper's samples.
+        // A factor on the part in f is seen only as far as f does not cancel over the box.
+        double want = 0, f_abs = 0, u_abs = 0, area = 0, b_sum = 0, m_sum = 0, m_abs = 0;
+        std::vector<double> u_here(fe_sum.n_quadrature_points);
+        for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          fe_sum.reinit(cell);
+          fe_sum.get_function_values(old_solution, u_here);
+          for (unsigned int q = 0; q < fe_sum.n_quadrature_points; ++q)
+          {
+            const Point<2> &xq = fe_sum.quadrature_point(q);
+            const double f_new = source(xq, step + 1), f_old = source(xq, step), w = fe_sum.JxW(q);
+            const double u_part = (in.rho_c / dt - (1 - theta) * in.reaction) * u_here[q];
+            const double f_part = theta * f_new + (1 - theta) * f_old;
+            want += (u_part + f_part) * w, f_abs += std::abs(f_part) * w, u_abs += std::abs(u_part) * w;
+            area += w;
+          }
+        }
+        for (unsigned int i = 0; i < n; ++i)
+          b_sum += volume_rhs(i);
+        for (auto it = system_matrix.begin(); it != system_matrix.end(); ++it)
+          m_sum += it->value(), m_abs += std::abs(it->value());
+        const double m_want = (in.rho_c / dt + theta * in.reaction) * area;
+        if (std::abs(m_sum - m_want) > 1e-9 * m_abs)
+          fail("STEP SYSTEM: at " + at + " the entries of system_matrix sum to " + num(m_sum) + ", and those of "
+               "M/dt + theta A sum to (rho_c/dt + theta c) times the area of the box, " + num(m_want) +
+               (m_want != 0 ? ", so system_matrix is " + num(m_sum / m_want) + " times that" : "") +
+               ": its test functions sum to one and their gradients to zero, whatever the quadrature");
+        if (std::abs(b_sum - want) > 0.15 * f_abs + 1e-9 * u_abs)
+          fail("STEP SYSTEM: at " + at + " volume_rhs sums to " + num(b_sum) + ", and the step's load sums to " +
+               num(want) + ", the integral of (rho_c/dt - (1 - theta) c) u^n + theta f^(n+1) + (1 - theta) f^n "
+               "over the box" + (std::abs(want) > 1e-3 * (f_abs + u_abs) ? " (volume_rhs is " +
+               num(b_sum / want) + " times that)" : "") + ": its test functions sum to one and their gradients to "
+               "zero, so the load sums to that integral, to within 15 % of the integral of |f| (" + num(f_abs) +
+               ") whatever the quadrature: hole 3's volume_rhs is not the step's load");
+      }
       interface_integrals();   // served: this step's w_i and flux_load
       system_rhs = volume_rhs;
 
@@ -1018,7 +1134,9 @@ int main(int argc, char **argv)
         row_max = std::max(row_max, row);
         if (held(i) && off == 0)
           fail("SOLVE: at " + at + " a held row of system_matrix has no off-diagonal entries left: the boundary values "
-               "went into system_matrix itself; apply them to a copy");
+               "went into system_matrix itself. Apply them to a copy: a SparseMatrix<double> built on `sparsity` (or "
+               "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
+               "from system_matrix is left empty, and a library call on it crashes with no message");
         if (held(i))
           kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
         else
@@ -1632,7 +1750,9 @@ int main(int argc, char **argv)
       row_max = std::max(row_max, row);
       if (held(i) && off == 0)
         fail("SOLVE: a held row of system_matrix has no off-diagonal entries left: the boundary values went "
-             "into system_matrix itself; apply them to a copy");
+             "into system_matrix itself. Apply them to a copy: a SparseMatrix<double> built on `sparsity` (or "
+             "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
+             "from system_matrix is left empty, and a library call on it crashes with no message");
       if (held(i))
         kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
       else

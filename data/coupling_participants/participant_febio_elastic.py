@@ -88,13 +88,13 @@ SIDE      = "dirichlet"   # "dirichlet" (import u, export traction) | "neumann"
 PARTNER   = "right"       # the partner's `name` in your couple(...) call
 X0, X1    = 0.0, 0.5      # this subdomain's x-extent
 Y0, Y1    = 0.0, 1.0      # this subdomain's y-extent
-ZTHICK    = 0.05          # slab thickness; ANY positive value, plane strain
+ZTHICK    = 0.07          # slab thickness; ANY positive value, plane strain
 IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the line x = IFACE_X
                           # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.5           # the shared interface: X0/X1 for axis "x", Y0/Y1 for axis "y"
-E_MOD     = 1040.0        # Young's modulus
-NU        = 0.3           # Poisson ratio (PLANE STRAIN)
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
 # (its outer face and the two faces the interface ends on), a quadratic in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*x*x + UDX[4]*x*y + UDX[5]*y*y
@@ -127,7 +127,7 @@ def B_SRC(x, y):
     use it.)
     """
     return np.zeros_like(x), np.zeros_like(y)
-NX, NY    = 16, 16        # this subdomain's OWN mesh; need not match the partner
+NX, NY    = 26, 26        # this subdomain's OWN mesh; need not match the partner
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction export
 FEBIO     = "febio4"      # the FEBio binary path `discover(query='list')` prints

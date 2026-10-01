@@ -397,6 +397,8 @@ int main(int argc, char **argv)
     Vector<double> weight(n), flux_load(n);
     FEFaceValues<2> fe_face(mapping, fe, QGauss<1>(fe.degree + 2),
                             update_values | update_quadrature_points | update_JxW_values);
+    FEValues<2> fe_sum(mapping, fe, QGauss<2>(fe.degree + 2),   // served: the step checks' integrals
+                       update_values | update_quadrature_points | update_JxW_values);
     auto interface_integrals = [&]() {
       weight = 0;
       flux_load = 0;
@@ -451,7 +453,11 @@ int main(int argc, char **argv)
       // interface rows, and a row a boundary condition emptied has lost the
       // flux it carried.
       // The lines after it stop when system_matrix is zero or volume_rhs is
-      // not finite.
+      // not finite, when the entries of system_matrix do not sum to
+      // (rho_c/dt + theta c) times the area of the box, and when volume_rhs
+      // does not sum to the integral of (rho_c/dt - (1 - theta) c) u^n +
+      // theta f^(n+1) + (1 - theta) f^n over the box (its test functions sum
+      // to one, and their gradients to zero).
       // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
       {
         FEValues<2> fe_values(mapping, fe, QGauss<2>(fe.degree + 1),
@@ -498,6 +504,48 @@ int main(int argc, char **argv)
 
       if (system_matrix.frobenius_norm() == 0 || !std::isfinite(volume_rhs.l2_norm()))
         fail("STEP SYSTEM: at " + at + " system_matrix is zero or volume_rhs is not finite: hole 3 assembled nothing");
+      {
+        // served: the test functions sum to one and their gradients to zero, so the entries of
+        // M/dt + theta A sum to (rho_c/dt + theta c) times the area of the box, and the step's load
+        // sums to the integral of (rho_c/dt - (1 - theta) c) u^n + theta f^(n+1) + (1 - theta) f^n,
+        // taken here with a finer Gauss rule than an assembly needs. The part in u^n is exact with any
+        // rule; the part in f of a right load sits within 8 % of the integral of |f| on coarse meshes
+        // (measured, f written out, a one-point rule), and within round-off with the wrapper's samples.
+        // A factor on the part in f is seen only as far as f does not cancel over the box.
+        double want = 0, f_abs = 0, u_abs = 0, area = 0, b_sum = 0, m_sum = 0, m_abs = 0;
+        std::vector<double> u_here(fe_sum.n_quadrature_points);
+        for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          fe_sum.reinit(cell);
+          fe_sum.get_function_values(old_solution, u_here);
+          for (unsigned int q = 0; q < fe_sum.n_quadrature_points; ++q)
+          {
+            const Point<2> &xq = fe_sum.quadrature_point(q);
+            const double f_new = source(xq, step + 1), f_old = source(xq, step), w = fe_sum.JxW(q);
+            const double u_part = (in.rho_c / dt - (1 - theta) * in.reaction) * u_here[q];
+            const double f_part = theta * f_new + (1 - theta) * f_old;
+            want += (u_part + f_part) * w, f_abs += std::abs(f_part) * w, u_abs += std::abs(u_part) * w;
+            area += w;
+          }
+        }
+        for (unsigned int i = 0; i < n; ++i)
+          b_sum += volume_rhs(i);
+        for (auto it = system_matrix.begin(); it != system_matrix.end(); ++it)
+          m_sum += it->value(), m_abs += std::abs(it->value());
+        const double m_want = (in.rho_c / dt + theta * in.reaction) * area;
+        if (std::abs(m_sum - m_want) > 1e-9 * m_abs)
+          fail("STEP SYSTEM: at " + at + " the entries of system_matrix sum to " + num(m_sum) + ", and those of "
+               "M/dt + theta A sum to (rho_c/dt + theta c) times the area of the box, " + num(m_want) +
+               (m_want != 0 ? ", so system_matrix is " + num(m_sum / m_want) + " times that" : "") +
+               ": its test functions sum to one and their gradients to zero, whatever the quadrature");
+        if (std::abs(b_sum - want) > 0.15 * f_abs + 1e-9 * u_abs)
+          fail("STEP SYSTEM: at " + at + " volume_rhs sums to " + num(b_sum) + ", and the step's load sums to " +
+               num(want) + ", the integral of (rho_c/dt - (1 - theta) c) u^n + theta f^(n+1) + (1 - theta) f^n "
+               "over the box" + (std::abs(want) > 1e-3 * (f_abs + u_abs) ? " (volume_rhs is " +
+               num(b_sum / want) + " times that)" : "") + ": its test functions sum to one and their gradients to "
+               "zero, so the load sums to that integral, to within 15 % of the integral of |f| (" + num(f_abs) +
+               ") whatever the quadrature: hole 3's volume_rhs is not the step's load");
+      }
       interface_integrals();   // served: this step's w_i and flux_load
       system_rhs = volume_rhs;
 
@@ -599,7 +647,9 @@ int main(int argc, char **argv)
         row_max = std::max(row_max, row);
         if (held(i) && off == 0)
           fail("SOLVE: at " + at + " a held row of system_matrix has no off-diagonal entries left: the boundary values "
-               "went into system_matrix itself; apply them to a copy");
+               "went into system_matrix itself. Apply them to a copy: a SparseMatrix<double> built on `sparsity` (or "
+               "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
+               "from system_matrix is left empty, and a library call on it crashes with no message");
         if (held(i))
           kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
         else

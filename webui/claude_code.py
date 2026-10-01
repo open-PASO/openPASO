@@ -76,11 +76,14 @@ def _mcp_config(servers: list[str], workdir: Path | None = None) -> dict:
 def _hook_settings(servers: dict) -> dict:
     """Claude Code settings for one run: the hook that refuses the main conversation's review
     filing (webui/critic_hook.py), for every openPASO server the run is given."""
+    import shlex
     import sys
     hook = str(Path(__file__).resolve().parent / "critic_hook.py")
     return {"hooks": {"PreToolUse": [
         {"matcher": f"mcp__{sid}__submit_critic_review",
-         "hooks": [{"type": "command", "command": f"{sys.executable} {hook}"}]}
+         # quoted: a path with a space or a shell character would not start the hook, and a hook
+         # that does not start lets the call through (Copilot on the org PR)
+         "hooks": [{"type": "command", "command": shlex.join([sys.executable, hook])}]}
         for sid in servers]}}
 
 

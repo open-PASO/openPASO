@@ -602,6 +602,56 @@ def _one_sequence(by_level: dict, key: tuple, _csv, sources: dict | None = None)
 
 
 
+def _uniform_finding(work: Path, label: str, seq: list, sources: dict, col: str, tag: str,
+                     mag: float) -> dict | None:
+    """The UNIFORM FIELD finding for a column that holds one value at every probe point, or None.
+
+    AN INTERFACE TRACE IS NOT THE FIELD. Measured on a coupled round: a side whose temperature
+    varies only across the gap to its partner exports a trace and a flux that are uniform along
+    the interface -- the right answer when nothing varies along it -- and UNIFORM FIELD led the
+    hand-in screen of three right sides. An interface column is judged by the side's own field
+    dump: a field that varies is not a constant, whatever its trace along one line does. A side
+    that imported nothing is said to have imported nothing, as the NEAR-ZERO finding does."""
+    finding = (f"UNIFORM FIELD: {col} on {tag} holds ONE value ({mag:.3e}) at "
+               f"every probe point of the finest level. That is not a solution "
+               f"but a constant -- a solve that no Dirichlet condition reached "
+               f"(uniform, and usually astronomical), or a column filled from one "
+               f"number. Nothing computed from this column is evidence; find the "
+               f"run that produced it before anything else.")
+    src = sources.get(tag)
+    if src and Path(src).name.lower().startswith("interface"):
+        side = Path(src).parent
+        if not _is_participant_dir(side):              # a delivered file: the side its name carries
+            want = tag.rpartition("_")[2].upper() if "_" in tag else ""
+            hits = [d for d in _side_dirs(work) if want and
+                    (d.name.upper() == want or d.name.upper().endswith("_" + want))]
+            side = hits[0] if len(hits) == 1 else None
+        dumps = sorted(side.glob("field_level*.csv"), key=lambda q: q.stat().st_mtime) if side else []
+        vals = []
+        if dumps:
+            try:
+                h, rows = _read_named_csv(dumps[-1])
+                vc = next((i for i, c in enumerate(h) if c not in ("x", "y", "z")), None)
+                vals = [r[vc] for r in rows] if vc is not None else []
+            except (OSError, ValueError, IndexError):
+                vals = []
+        peak = max((abs(v) for v in vals), default=0.0)
+        if vals and peak > 0 and max(vals) - min(vals) > 1e-9 * peak:
+            return None                      # the side's field varies; its trace along one line may not
+        none_in = side is not None and not (side / "imports.json").is_file()
+        if not vals:
+            return {"sequence": label, "values": seq, "informational": True, "finding": (
+                f"UNIFORM INTERFACE COLUMN NOT JUDGED: {col} on {tag} holds one value ({mag:.3e}) along "
+                f"the interface, which is right where nothing varies along it, and no field_level<k>.csv "
+                f"of that side holds its field to tell."
+                + (" That side has no imports.json either." if none_in else ""))}
+        if none_in:
+            finding += (" This side has no imports.json: a side that imported nothing holds its "
+                        "first-iteration fallback on the interface, so that column can be the "
+                        "fallback itself.")
+    return {"sequence": label, "values": seq, "priority": 6, "finding": finding}
+
+
 def _near_zero_finding(work: Path, label: str, seq: list, sources: dict) -> dict | None:
     """The NEAR-ZERO FIELD finding for one magnitude below 1e-8, naming the file and column it
     read. AN INTERFACE COLUMN BESIDE A ZERO IMPORT IS NOT A FIELD. Measured: a Dirichlet side run
@@ -622,34 +672,47 @@ def _near_zero_finding(work: Path, label: str, seq: list, sources: dict) -> dict
             "and that the boundary values are not all zero, before reading "
             "it as a small answer.")
     imp = Path(src).parent / "imports.json" if src else None
-    if src and Path(src).name.lower().startswith("interface") and imp.is_file():
+    # NOR BESIDE NO IMPORT AT ALL. Measured: a Dirichlet side run with no imports.json held the
+    # wrapper's first-iteration fallback on its interface; the column was 0.0 and a give-up screen
+    # led with "NEAR-ZERO FIELD", which the run read as "the solution is wrong".
+    if src and Path(src).name.lower().startswith("interface"):
+        if imp.is_file():
+            try:
+                nums = [abs(float(x)) for blk in (json.loads(imp.read_text() or "{}") or {}).values()
+                        if isinstance(blk, dict) for key in ("values", "normal_fluxes")
+                        for x in _flat(blk.get(key) or [])]
+            except (OSError, ValueError, TypeError, AttributeError):
+                nums = None
+            echo = nums is not None and max(nums, default=0.0) < 1e-8
+            why = ("and so is every value this side imported (its imports.json): that column can be the "
+                   "import itself")
+        else:
+            echo = True
+            why = ("and this side has no imports.json: a side that imported nothing holds its fallback on "
+                   "the interface (the served contracts' first-iteration value), so that column can be the "
+                   "fallback itself")
+    else:
+        echo = False
+    if echo:
+        dumps = sorted(Path(src).parent.glob("field_level*.csv"), key=lambda q: q.stat().st_mtime)
+        if not dumps:
+            return {"sequence": label, "values": seq, "informational": True, "finding": (
+                f"NEAR-ZERO FIELD NOT JUDGED: {rel} column `{col}` is below 1e-8, {why}, and no "
+                f"field_level<k>.csv beside it holds the field to read instead.")}
         try:
-            nums = [abs(float(x)) for blk in (json.loads(imp.read_text() or "{}") or {}).values()
-                    if isinstance(blk, dict) for key in ("values", "normal_fluxes")
-                    for x in _flat(blk.get(key) or [])]
-        except (OSError, ValueError, TypeError, AttributeError):
-            nums = None
-        if nums is not None and max(nums, default=0.0) < 1e-8:
-            dumps = sorted(Path(src).parent.glob("field_level*.csv"), key=lambda q: q.stat().st_mtime)
-            if not dumps:
-                return {"sequence": label, "values": seq, "informational": True, "finding": (
-                    f"NEAR-ZERO FIELD NOT JUDGED: {rel} column `{col}` is below 1e-8, and so is every value "
-                    f"this side imported (its imports.json): that column can be the import itself, and no "
-                    f"field_level<k>.csv beside it holds the field to read instead.")}
-            try:
-                h, rows = _read_named_csv(dumps[-1])
-                vc = [i for i, c in enumerate(h) if c not in ("x", "y", "z")]
-                peak = max((abs(r[i]) for r in rows for i in vc), default=None)
-            except (OSError, ValueError):
-                peak = None
-            if peak is None or peak >= 1e-8:
-                return None                  # the field is not near zero; the column echoes the import
-            try:
-                rel = str(dumps[-1].relative_to(work))
-            except ValueError:
-                rel = dumps[-1].name
-            return {"sequence": label, "values": [peak], "finding": (
-                f"NEAR-ZERO FIELD: {rel} peaks at {peak:.1e}, below 1e-8. " + tail)}
+            h, rows = _read_named_csv(dumps[-1])
+            vc = [i for i, c in enumerate(h) if c not in ("x", "y", "z")]
+            peak = max((abs(r[i]) for r in rows for i in vc), default=None)
+        except (OSError, ValueError):
+            peak = None
+        if peak is None or peak >= 1e-8:
+            return None                  # the field is not near zero; the column echoes the import or fallback
+        try:
+            rel = str(dumps[-1].relative_to(work))
+        except ValueError:
+            rel = dumps[-1].name
+        return {"sequence": label, "values": [peak], "finding": (
+            f"NEAR-ZERO FIELD: {rel} peaks at {peak:.1e}, below 1e-8. " + tail)}
     where = f"{rel} column `{col}` peaks at {seq[0]:.1e}, below 1e-8" if rel else "the finest-level field peaks below 1e-8"
     return {"sequence": label, "values": seq, "finding": f"NEAR-ZERO FIELD: {where}. " + tail}
 
@@ -5572,6 +5635,60 @@ def _not_judged_in_3d(side: str, what: str) -> str:
             f"no key in a config.json changes that.")
 
 
+# A FLUID SIDE IS NOT A HEAT OR AN ELASTIC SIDE. Measured on a fluid-structure round: the equation and
+# outer-boundary checks asked a fluid side for "the coefficient k ... and source_expr", "lam and mu"
+# and the one value its outer edges hold -- data a flow does not have -- in couple() and in every
+# give-up screen. No check here judges a flow, and the text did not say so.
+_FLOW_WORDS = re.compile(r"\b(?:navier|stokes)\b", re.I)
+
+
+def _fluid_side(d: Path) -> str:
+    """What shows that the side in `d` solves a flow, or '': its exports carry the traction a flow
+    exerts on a structure, or its participant script names Navier-Stokes / Stokes or solves on a
+    mixed space with a pressure."""
+    try:
+        e = json.loads((Path(d) / "exports.json").read_text() or "{}")
+        if isinstance(e, dict) and str(e.get("field_name") or "").startswith("traction_on_structure"):
+            return "its exports.json carries field_name 'traction_on_structure', a flow's load on a structure"
+    except Exception:                                        # noqa: BLE001
+        pass
+    for q in sorted(Path(d).glob("participant*.py")):
+        if _is_backup(q) or ".replaced-" in q.name:
+            continue
+        try:
+            t = q.read_text(errors="ignore")
+        except OSError:
+            continue
+        if _FLOW_WORDS.search(t) or ("mixed_element" in t and re.search(r"\bpressure\b", t, re.I)):
+            return f"{q.name} solves a flow"
+    return ""
+
+
+def _not_judged_as_fluid(lead: str, why: str, check: str) -> str:
+    """The one sentence a fluid side gets from a check that judges a heat or an elastic field."""
+    return (f"{lead}: it is a fluid side ({why}), and this check judges {check}, so it does not "
+            f"judge this side; no key in its config.json changes that.")
+
+
+def _is_dsmc_side(d: Path) -> bool:
+    """True when the side in `d` is a DSMC side: its participant drives SPARTA (a deck with surface
+    commands, or the binary), or SPARTA's log is there. Such a side has no finite element field,
+    so the checks that ask for one -- its equation, its outer edges -- do not apply to it (measured:
+    a SPARTA side was asked to state a conductivity, a source, a box and an outer value)."""
+    try:
+        if (Path(d) / "log.sparta").is_file():
+            return True
+        for q in Path(d).glob("participant*.py"):
+            if _is_backup(q) or ".replaced-" in q.name:
+                continue
+            if re.search(r"\bsurf_collide\b|\bread_surf\b|\bspa_(?:serial|mpi)\b",
+                         q.read_text(errors="ignore")):
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _side_operators(work: Path) -> dict:
     """Each side's operator, as that side's OWN config.json states it.
 
@@ -5600,7 +5717,8 @@ def _side_operators(work: Path) -> dict:
             side = str(cfg_path.parent.relative_to(work))
         missing = [k for k in ("x0", "x1", "y0", "y1", "k") if k not in cfg]
         entry = {"dir": cfg_path.parent, "missing": missing,
-                 "three_d": _dumps_are_3d(cfg_path.parent)}
+                 "three_d": _dumps_are_3d(cfg_path.parent), "fluid": _fluid_side(cfg_path.parent),
+                 "dsmc": _is_dsmc_side(cfg_path.parent)}
         # THE BOX DOES NOT DEPEND ON THE CONDUCTIVITY. It was read only when k
         # was present too, so an elastic side -- which states lam and mu, or E
         # and nu, and no k -- had no box and its displacement was never judged.
@@ -6488,6 +6606,14 @@ def outer_boundary_findings(work: Path, levels=None, dirs=None) -> list[dict]:
     _EDGE = {"left": (0, 0), "right": (0, 1), "bottom": (1, 0), "top": (1, 1)}
     _all_ops = _side_operators(work)
     for side, op in sorted(_all_ops.items()):
+        if op.get("dsmc"):
+            continue                      # a DSMC side has no field and no held edges to judge
+        if op.get("fluid"):
+            out.append({"sequence": f"outer boundary {side}", "values": [], "priority": 26,
+                        "informational": True, "finding": _not_judged_as_fluid(
+                            f"SIDE {side}'S OUTER BOUNDARY WAS NOT CHECKED", op["fluid"],
+                            "a field against the one value its non-interface edges hold")})
+            continue
         if op.get("three_d"):
             out.append({"sequence": f"outer boundary {side}", "values": [], "priority": 26,
                         "informational": True, "finding": _not_judged_in_3d(side, "OUTER BOUNDARY")})
@@ -6603,6 +6729,17 @@ def outer_boundary_findings(work: Path, levels=None, dirs=None) -> list[dict]:
         (x0, x1), (y0, y1) = op["box"]
         span = max(x1 - x0, y1 - y0) or 1.0
         skip = _EDGE.get(op.get("iface", ""))
+        # THE EDGES THE SIDE SAYS ARE NATURAL ARE NOT JUDGED. Measured on a coupled round: a
+        # right side whose two edges at the interface's ends are insulated was told its field
+        # "DOES NOT HOLD THE OUTER VALUE ... worst at" a point on one of them. Stated False
+        # (full_outer_dirichlet / FULL_OUTER_DIRICHLET), only the edge opposite the interface
+        # is judged; stated True, or not stated, every non-interface edge is.
+        _held = _all_outer_held(op["dir"])
+        only = (skip[0], 1 - skip[1]) if (_held is False and skip is not None) else None
+        _how = ("" if _held is not None else
+                " If your problem leaves the two edges the interface ends on natural (zero flux), "
+                "say so in the participant, FULL_OUTER_DIRICHLET = False (or \"full_outer_dirichlet\": "
+                "false in config.json), and this check judges only the edge opposite the interface.")
         worst, where, lvl_seen = 0.0, "", None
         by_lvl: dict = {}                 # level -> this level's worst departure
         for lvl in sorted(chosen):
@@ -6631,6 +6768,8 @@ def outer_boundary_findings(work: Path, levels=None, dirs=None) -> list[dict]:
                     for end, bound in ((0, lo), (1, hi)):
                         if abs(c - bound) > 1e-9 * span:
                             continue
+                        if only is not None and (axis, end) != only:
+                            continue                  # an edge the side says is natural
                         dev = abs(v - op["outer"]) / scale
                         by_lvl[lvl] = max(by_lvl[lvl], dev)
                         if dev > worst:
@@ -6657,7 +6796,7 @@ def outer_boundary_findings(work: Path, levels=None, dirs=None) -> list[dict]:
                 f"one comes closer as the mesh refines; a departure that stays is a value this "
                 f"side put on its boundary. It solves the same interior equation, so the "
                 f"equation check cannot see it. Check which nodes your participant writes "
-                f"values into.")})
+                f"values into." + _how)})
         if worst > 0.02:
             out.append({"sequence": f"outer boundary {side}", "priority": 6,
                         "values": [worst], "finding": (
@@ -6675,7 +6814,7 @@ def outer_boundary_findings(work: Path, levels=None, dirs=None) -> list[dict]:
                 f"so every boundary term vanishes -- and converges cleanly to "
                 f"the wrong function, which reads afterwards as a refinement "
                 f"study that did not converge. Check which edges your "
-                f"participant fixes against the ones it declares here.")})
+                f"participant fixes against the ones it declares here." + _how)})
     return out
 
 
@@ -6809,14 +6948,17 @@ def _transient_note(side: str, marks: list) -> dict:
 
 
 def _k_not_one_number(side_dir: Path):
-    """How a side's config.json states k when that is not one number (a list, an object, a
-    text), or None. The equation check judges one k over one box and says so rather than
-    asking such a side for "a numeric k" it cannot give."""
+    """How a side's config.json states k when the check cannot judge it (a list that is no 2x2
+    matrix, an object, a text), or None. The equation check judges one k over one box -- one
+    number, or one 2x2 matrix, nested or four numbers row by row -- and says so rather than
+    asking such a side for "a numeric k" it cannot give. A 2x2 matrix is judged, so it is never
+    the reason: measured, a side whose config stated a 2x2 k and no source_expr was told its k
+    was the reason it went unchecked."""
     try:
         k = json.loads((Path(side_dir) / "config.json").read_text() or "{}").get("k")
     except Exception:                                        # noqa: BLE001
         return None
-    if k is None:
+    if k is None or _k_as_matrix(k) is not None:
         return None
     try:
         float(k)
@@ -6830,6 +6972,20 @@ def _k_not_one_number(side_dir: Path):
     if isinstance(k, dict):
         return "an object with keys " + ", ".join(str(q) for q in list(k)[:4]) + (" ..." if len(k) > 4 else "")
     return f"the text {str(k)[:40]!r}"
+
+
+def _f_src_in_script(side_dir: Path) -> bool:
+    """True when a participant script of the side defines F_SRC, the source function the served
+    wrappers carry beside the config keys."""
+    for q in sorted(Path(side_dir).glob("participant*.py")):
+        if _is_backup(q):
+            continue
+        try:
+            if re.search(r"^def F_SRC\s*\(", q.read_text(errors="ignore"), re.M):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _box_fill(side_dir: Path, box: list, field=None, since=None) -> dict:
@@ -7080,6 +7236,55 @@ def data_compatibility_findings(work: Path) -> list[dict]:
     return out
 
 
+class _Decided(Exception):
+    """The discrete check has decided a side; the weak identity is not asked."""
+
+
+def _op_text(op: dict) -> str:
+    """The equation a side's config states, as its findings name it."""
+    return ((f"-div(K grad u)" if op.get("k_tensor") else f"-div({op['k']:g} grad u)")
+            + (f" + {op['reaction']:g} u" if op["reaction"] else "")
+            + " = f" + (f" with K = {_k_text(op['k'])}" if op.get("k_tensor") else ""))
+
+
+def _discrete_verdict(op: dict, since=None, gaps=(), level=None):
+    """pde_consistency.check_levels_discrete on a side's own dumps (the levels that fill its box,
+    one level when `level` is given), as a dict; None when there is nothing to judge."""
+    raw = {lv: rows for lv, rows in _dump_raw_levels(op["dir"], op.get("field"), since).items()
+           if lv not in gaps and (level is None or lv == level)}
+    if not raw:
+        return None
+    try:
+        from .pde_consistency import check_levels_discrete
+        return check_levels_discrete(raw, op["source"], op["k"], op["box"], reaction=op["reaction"]).as_dict()
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def level_equation_findings(work: Path, dirs=None, since=None) -> list[dict]:
+    """The sides whose field of this level its own discrete system condemns: A u one factor
+    other than one times the load of the source its config states (pde_consistency.
+    _one_factor_condemns). Blocking findings, for the level's own verdict in couple(); a side
+    this cannot judge is left to equation_findings, which says why."""
+    want = {Path(d).resolve() for d in dirs} if dirs else None
+    out = []
+    for side, op in sorted(_side_operators(work).items()):
+        if op.get("missing") or op.get("scalar_na") or "box" not in op:
+            continue
+        if want is not None and Path(op["dir"]).resolve() not in want:
+            continue
+        try:
+            if _transient_marks(op["dir"]) or _k_differs_by_leg(op["dir"]):
+                continue
+            gaps = _box_fill(op["dir"], op["box"], op.get("field"), since)
+        except Exception:                                    # noqa: BLE001
+            continue
+        disc = _discrete_verdict(op, since, gaps)
+        if disc and str(disc.get("verdict")) == "INCONSISTENT":
+            out.append(_verdict_finding(side, "equation", _op_text(op), disc, None, op["dir"].name))
+    return out
+
+
 def equation_findings(work: Path, since=None) -> list[dict]:
     """Does each side's delivered field satisfy the equation that side states?
 
@@ -7098,8 +7303,14 @@ def equation_findings(work: Path, since=None) -> list[dict]:
     operator is told which key is missing rather than guessed at.
     """
     out: list[dict] = []
+    _EQS = "the steady scalar equation -div(k grad u) + c u = f and the elastic momentum equation only"
     for side, op in sorted(_side_operators(work).items()):
-        if op.get("scalar_na"):
+        if op.get("fluid"):
+            out.append({"sequence": f"equation check side {side}", "values": [], "priority": 26,
+                        "informational": True, "finding": _not_judged_as_fluid(
+                            f"SIDE {side}'S FIELD WAS NOT CHECKED AGAINST ITS OWN EQUATION", op["fluid"], _EQS)})
+            continue
+        if op.get("scalar_na") or op.get("dsmc"):
             continue
         if op.get("three_d"):
             out.append({"sequence": f"equation check side {side}", "values": [], "priority": 26,
@@ -7132,12 +7343,14 @@ def equation_findings(work: Path, since=None) -> list[dict]:
                     f"coefficient stated another way or one that varies by region."
                     if _kd else
                     f"SIDE {side}'S FIELD WAS NOT CHECKED AGAINST ITS OWN EQUATION: "
-                    f"its ./config.json does not state {', '.join(op['missing'])}. "
-                    f"State there the subdomain box (x0, x1, y0, y1), the coefficient "
+                    f"its ./config.json does not state {', '.join(op['missing'])}."
+                    + (" Its script's F_SRC is not read by this check." if _f_src_in_script(op["dir"])
+                       and any(m.startswith("source_expr") for m in op["missing"]) else "")
+                    + f" State there the subdomain box (x0, x1, y0, y1), the coefficient "
                     f"k, the reaction (0 when there is none) and source_expr -- the "
-                    f"numbers your code SOLVES with. The NGSolve, scikit-fem, FEniCSx and "
+                    f"numbers your code SOLVES with. The NGSolve, scikit-fem, FEniCSx, deal.II and "
                     f"Kratos-Neumann heat contracts read the box, k and source_expr from "
-                    f"that file, and the NGSolve one the reaction too; a side that keeps them "
+                    f"that file, and the NGSolve and deal.II ones the reaction too; a side that keeps them "
                     f"as constants in its code must state the same numbers there. With them "
                     f"this audit checks the delivered field against the equation you "
                     f"implemented, which is the one check that separates a field converging "
@@ -7169,7 +7382,13 @@ def equation_findings(work: Path, since=None) -> list[dict]:
         # never computed. Measured on the side's own nodes, and said with the numbers.
         _gaps = _box_fill(op["dir"], op["box"], op.get("field"), since)
         dumps = {lv: rows for lv, rows in dumps.items() if lv not in _gaps}
-        if _gaps and len(dumps) < 2:
+        # EACH LEVEL'S OWN DISCRETE SYSTEM IS JUDGED FROM THE FIRST LEVEL, and a load off by one
+        # factor decides (pde_consistency._one_factor_condemns). Measured: a side whose load left
+        # out its test function read A u = 3.87 times the load at level 1, and the level read
+        # VERIFIED because this check waited for more levels.
+        _disc = _discrete_verdict(op, since, _gaps)
+        _factor = bool(_disc) and str(_disc.get("verdict")) == "INCONSISTENT"
+        if _gaps and len(dumps) < 2 and not _factor:
             _lv = min(_gaps)
             _g = _gaps[_lv]
             _sp = _g["span"]
@@ -7185,7 +7404,7 @@ def equation_findings(work: Path, since=None) -> list[dict]:
                     f"so it does not judge a side whose mesh is another shape (a box with "
                     f"cells removed, joined boxes), nor a box stated wrong.")})
             continue
-        if not sets and len(dumps) < 2:
+        if not sets and len(dumps) < 2 and not _factor:
             _nf = nonfinite_field_findings(work, dirs=[op["dir"]], since=since, scan=False)
             _files = list(op["dir"].glob("field_level*.csv"))
             _have = len(_files)
@@ -7219,7 +7438,9 @@ def equation_findings(work: Path, since=None) -> list[dict]:
                        f"interpolates them to the midpoints, where its quadrature is exact."))})
             continue
         try:
-            from .pde_consistency import check_levels, check_levels_discrete
+            from .pde_consistency import check_levels
+            if _factor:
+                raise _Decided()
             # A CONSTANT K ACTS THROUGH ITS SYMMETRIC PART: div(K grad u) = sum K_ij d_i d_j u.
             # The weak identity refuses a K it is not handed symmetric, so it gets that part.
             _kw = op["k"]
@@ -7234,27 +7455,21 @@ def equation_findings(work: Path, since=None) -> list[dict]:
             # A TENSOR SIDE IS ALSO JUDGED ON ITS OWN DISCRETE SYSTEM (pde_consistency.
             # check_levels_discrete): round-off there confirms it; anything else is said with
             # the numbers and the weak identity decides.
-            if op.get("k_tensor"):
-                _raw = {lv: rows for lv, rows in
-                        _dump_raw_levels(op["dir"], op.get("field"), since).items() if lv not in _gaps}
-                if _raw:
-                    _disc = check_levels_discrete(_raw, op["source"], op["k"], op["box"],
-                                                  reaction=op["reaction"]).as_dict()
-                    if _disc.get("verdict") == "CONSISTENT":
-                        dres = _disc
-                    elif dres and str(dres.get("verdict")) != "CONSISTENT":
-                        dres["explanation"] = (str(dres.get("explanation") or "") + " The discrete "
-                                               "check: " + str(_disc.get("explanation") or ""))
+            if op.get("k_tensor") and _disc:
+                if _disc.get("verdict") == "CONSISTENT":
+                    dres = _disc
+                elif dres and str(dres.get("verdict")) != "CONSISTENT":
+                    dres["explanation"] = (str(dres.get("explanation") or "") + " The discrete "
+                                           "check: " + str(_disc.get("explanation") or ""))
+        except _Decided:
+            dres, vres = _disc, None
         except Exception as exc:                              # noqa: BLE001
             out.append({"sequence": f"equation check side {side}", "values": [],
                         "priority": 26, "informational": True,
                         "finding": (f"SIDE {side}'S EQUATION CHECK COULD NOT RUN: "
                                     f"{type(exc).__name__}: {exc}")})
             continue
-        op_txt = ((f"-div(K grad u)" if op.get("k_tensor") else f"-div({op['k']:g} grad u)")
-                  + (f" + {op['reaction']:g} u" if op["reaction"] else "")
-                  + " = f" + (f" with K = {_k_text(op['k'])}" if op.get("k_tensor") else ""))
-        out.append(_timed_verdict(side, "equation", op_txt, dres, vres, op["dir"], work))
+        out.append(_timed_verdict(side, "equation", _op_text(op), dres, vres, op["dir"], work))
         if _gaps and out[-1].get("finding"):
             out[-1]["finding"] += (
                 f" Not judged: the mesh dump(s) of level(s) "
@@ -7284,7 +7499,7 @@ def equation_findings(work: Path, since=None) -> list[dict]:
             pass
 
     for side, op in sorted(_side_operators(work).items()):
-        if not op.get("three_d"):
+        if not op.get("three_d") and not op.get("fluid"):
             out.extend(_momentum_findings(work, side, op, since))
     # A SIDE WITH NO config.json WAS PASSED OVER IN SILENCE. couple_levels hands
     # each level its keys through the environment and writes no file, so a side
@@ -7293,6 +7508,12 @@ def equation_findings(work: Path, since=None) -> list[dict]:
     stated = set(_side_operators(work))
     for d in _side_dirs(work):
         if d.name in stated or not (d / "exports.json").is_file():
+            continue
+        _fl = _fluid_side(d)
+        if _fl:
+            out.append({"sequence": f"equation check side {d.name}", "values": [], "priority": 26,
+                        "informational": True, "finding": _not_judged_as_fluid(
+                            f"SIDE {d.name}'S FIELD WAS NOT CHECKED AGAINST ITS OWN EQUATION", _fl, _EQS)})
             continue
         if _dumps_are_3d(d):
             out.append({"sequence": f"equation check side {d.name}", "values": [], "priority": 26,
@@ -7319,7 +7540,7 @@ def equation_findings(work: Path, since=None) -> list[dict]:
                 f"audit had nothing to judge the field against. State there the subdomain box "
                 f"(x0, x1, y0, y1) and the equation's data -- k, reaction and source_expr for a "
                 f"scalar side; lam and mu (or E and nu) with source_ux and source_uy for an "
-                f"elastic one. The NGSolve, scikit-fem, FEniCSx and Kratos-Neumann heat "
+                f"elastic one. The NGSolve, scikit-fem, FEniCSx, deal.II and Kratos-Neumann heat "
                 f"contracts read the box, k and source_expr from that file; the scikit-fem, "
                 f"FEniCSx, NGSolve and DUNE elastic contracts read the box and those elastic "
                 f"keys. Data typed only into the code cannot be checked. The check judges "
@@ -7522,13 +7743,45 @@ def coupled_ladder(work: Path, converged_now: bool = False) -> dict | None:
                 (f"{q.relative_to(work)} carries {n} of the {m} served lines of the contract it is closest "
                  f"to ({n / m:.0%})" if m else f"{q.relative_to(work)} carries no served line")
                 for q, n, m in unserved[:2])
+            # THE CONTRACT EACH FILE IS CLOSEST TO, WITH THE CALL THAT WRITES IT, AND EVERY PHYSICS
+            # WORD. Measured on a fluid-structure round: this brief named one word, 'thermoelastic';
+            # two cells then called the writer with 'fsi', got the scalar heat contract over their
+            # fluid file, and one wrote down that no fluid-structure contract exists.
+            try:
+                from .participant_lint import _side_roles                        # noqa: PLC0415
+                from .coupling_knowledge import resolve_participant              # noqa: PLC0415
+            except Exception:                                   # noqa: BLE001
+                _side_roles = resolve_participant = None
+            _calls = []
+            for q, _n, _m in unserved[:2]:
+                try:
+                    # the role the write checks read off the file: its own code, then the role whose
+                    # own lines it carries (the handshake helpers every contract shares tell none apart)
+                    _roles = _side_roles(q.read_text(errors="ignore")) if _side_roles else []
+                except OSError:
+                    _roles = []
+                if len(_roles) != 1:
+                    continue                     # no one contract stands out: none is named
+                _code, _role = _roles[0]
+                _word = "" if _role == "base" else _role
+                if resolve_participant is None or resolve_participant(_code, _word)[0] is None:
+                    continue
+                _calls.append(f"{q.relative_to(work)} is closest to the served {_code} contract"
+                              + (f" (variant '{_word}')" if _word else "")
+                              + f": write_participant_contract(solver='{_code}'"
+                              + (f", variant='{_word}'" if _word else "")
+                              + ", path=<absolute path of a NEW file beside it>) writes that contract")
             return step(1, f"RESTORE THE SERVED CONTRACT IN {who}: {share}. A copy of the served contract "
                            f"carries all of them; one written by hand or rewritten does not (measured: such "
                            f"scripts put zeros in every interface load, or coupled as unresponsive, and "
                            f"reported the code could not do it).",
-                        f"For {who}: call knowledge(topic='coupling', solver=<that code>) (add "
-                        "physics='thermoelastic' when the interface carries temperature and displacement "
-                        "together), copy the served CONTRACT for this side's role into the file UNCHANGED, and "
+                        f"For {who}: " + ("; ".join(_calls) + ". Otherwise call " if _calls else "call ")
+                        + "knowledge(topic='coupling', solver=<that code>) with the word for what the "
+                        "interface carries (physics='thermoelastic' for temperature and displacement together, "
+                        "physics='elasticity' for a displacement, physics='transient' for a time-dependent "
+                        "problem, physics='3d' for a three-dimensional domain, physics='fsi' for a fluid beside "
+                        "a structure; none for a steady scalar one), copy the served CONTRACT for this side's "
+                        "role into the file UNCHANGED, and "
                         "move only your mesh, deck/form, material, source and solve into its marked hole(s); keep "
                         "every served line, including the EXPORT SELF-CHECK block. Then write ./config.json for "
                         "level 1 and a synthetic ./imports.json whose values and normal_fluxes are NOT "
@@ -8161,11 +8414,13 @@ def audit(work_dir: str, claimed_order: float | None = None,
         # the per-level field slot that collided. So do the identity /
         # sampling / continuity checks — each reads its own files, none of
         # them the collided per-level field slot.
-        findings = findings + interface_sign_findings(work)
-        findings = findings + deliverable_flux_vs_export_findings(work)
-        findings = findings + outer_boundary_findings(work)
-        findings = findings + unparsed_level_files_findings(work)
-        findings = findings + solver_stopped_findings(work)
+        # GUARDED HERE AS IN THE NORMAL BRANCH: called directly, one check that raised on a malformed
+        # interface or log file ended audit() before the ambiguity finding and every later check.
+        findings.extend(_guarded("interface_sign_findings", interface_sign_findings, work))
+        findings.extend(_guarded("deliverable_flux_vs_export_findings", deliverable_flux_vs_export_findings, work))
+        findings.extend(_guarded("outer_boundary_findings", outer_boundary_findings, work))
+        findings.extend(_guarded("unparsed_level_files_findings", unparsed_level_files_findings, work))
+        findings.extend(_guarded("solver_stopped_findings", solver_stopped_findings, work))
         findings.extend(_guarded("interface_continuity_findings", interface_continuity_findings, work))
         findings.extend(_guarded("identical_solution_levels_findings", identical_solution_levels_findings, work))
         findings.extend(_guarded("wrong_level_run_log_findings", wrong_level_run_log_findings, work))
@@ -8208,14 +8463,9 @@ def audit(work_dir: str, claimed_order: float | None = None,
             if _key in _uniform_seen:
                 continue                 # the same column read through another file family
             _uniform_seen.add(_key)
-            findings.append({"sequence": label, "values": seq, "priority": 6,
-                             "finding": (
-                f"UNIFORM FIELD: {_f} on {_tag} holds ONE value ({_mag:.3e}) at "
-                f"every probe point of the finest level. That is not a solution "
-                f"but a constant -- a solve that no Dirichlet condition reached "
-                f"(uniform, and usually astronomical), or a column filled from one "
-                f"number. Nothing computed from this column is evidence; find the "
-                f"run that produced it before anything else.")})
+            _uf = _uniform_finding(work, label, seq, _mag_src, _f, _tag, _mag)
+            if _uf:
+                findings.append(_uf)
             continue
         if label.startswith("magnitude_") and seq and seq[0] < 1e-8:
             _nz = _near_zero_finding(work, label, seq, _mag_src)

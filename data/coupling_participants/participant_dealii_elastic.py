@@ -41,8 +41,8 @@ X0, X1    = 0.0, 0.55
 Y0, Y1    = 0.0, 0.4
 IFACE_AXIS = "x"          # the interface is the line x = IFACE_X ("x") or y = IFACE_X ("y")
 IFACE_X   = 0.55
-E_MOD     = 1000.0        # Young's modulus
-NU        = 0.3           # Poisson ratio (PLANE STRAIN)
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio (PLANE STRAIN)
 
 
 def B_SRC(x, y):
@@ -76,7 +76,7 @@ def U_OUTER(x, y):
 # are held too, False if they are traction free. The script refuses to run
 # until you set it, and the program checks your hole 4 against it.
 FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
-NX, NY    = 24, 16
+NX, NY    = 46, 26
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction
 DEAL_II_DIR = ""          # the deal.II build or install tree discover(query='list') names;

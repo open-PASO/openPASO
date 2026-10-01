@@ -172,9 +172,11 @@ def _describe_exit(rc: int) -> str:
         return f"the program exited with return code {rc}"
     what = ("a crash inside your program, not an install fault. This deal.II may be a Release "
             "build that asserts nothing: an FEValues accessor whose update flag was not requested, "
-            "or an unsized index vector, crashes with no message. Add "
+            "an unsized index vector, or a SparseMatrix copy-constructed from a filled one (it is left "
+            "empty) crashes with no message. Add "
             "target_compile_definitions(<target> PRIVATE DEBUG) after deal_ii_setup_target and "
-            "run again: deal.II then names a missing flag itself"
+            "run again: deal.II's header checks then name a missing flag, while the empty matrix and "
+            "the unsized vector, whose checks are compiled into its library, crash with no message even then"
             if name in ("SIGSEGV", "SIGBUS", "SIGFPE", "SIGABRT", "SIGILL") else "")
     return f"the program was KILLED BY {name} (return code {rc})" + (f": {what}." if what else ".")
 

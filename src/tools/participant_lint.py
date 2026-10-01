@@ -86,14 +86,63 @@ _DOLFINX_BCS_LIST_FIX = (
     "iterable (assemble_matrix, apply_lifting) or object of type 'DirichletBC' has no len() (set_bc); "
     "and bcs=[[bc] for bc in bcs], a list per condition, raises Mismatch in size between a and bcs "
     "once there are two conditions")
+# THE VALUE HAS THE SHAPE OF THE SPACE IT HOLDS, and a block of a mixed space takes a Function WITH the
+# sub-space. Measured on a fluid-structure round: this text said a boundary value is a plain scalar
+# and that a Function with a space raises -- true on a scalar space only -- and it answered 16 errors of
+# fluid sides whose velocity block needed exactly that Function with W.sub(0).
 _DOLFINX_BC_VALUE_FIX = (
-    "dirichletbc takes (value, dofs, V) for a number or a fem.Constant -- default_scalar_type(0.0) or "
-    "fem.Constant(mesh, default_scalar_type(0.0)) -- and (g, dofs) for a fem.Function g on V, the "
-    "dofs being the int32 array locate_dofs_topological or locate_dofs_geometrical returns. Measured "
-    "on this install: a one-entry array np.array([0.0]) raises Rank mismatch between Constant and "
-    "function space; a Python list raises Boundary condition value must have a dtype attribute; and a "
-    "number or a Constant without V, a Function with V, or int64 dofs raise incompatible function "
-    "arguments")
+    "dirichletbc's value has the shape of the space it holds. A scalar space: (default_scalar_type(0.0), "
+    "dofs, V), or (g, dofs) for a fem.Function g on V. A vector space: (np.zeros(gdim, "
+    "dtype=default_scalar_type), dofs, V), or (g, dofs) -- a plain number there raises Rank mismatch "
+    "between Constant and function space, and so does np.array([0.0]) on a scalar space. One block of a "
+    "MIXED space takes a Function and the sub-space: V0, _ = W.sub(0).collapse(); g = "
+    "fem.Function(V0); dofs = fem.locate_dofs_topological((W.sub(0), V0), fdim, facets), a pair of "
+    "arrays; fem.dirichletbc(g, dofs, W.sub(0)) -- a constant there raises 'Constant size is not equal "
+    "to the block size', even a zero. The dofs are what locate_dofs_topological or "
+    "locate_dofs_geometrical returns. Measured on this install: a Python list raises Boundary "
+    "condition value must have a dtype attribute; and a number or a Constant without V, a Function "
+    "with V on a plain space, a Function without W.sub(0) or with dofs located on V0 alone on a mixed "
+    "one, or int64 dofs raise incompatible function arguments")
+# Each measured on this install (dolfinx 0.10), the wrong call in the fenics interpreter printing the
+# quoted error and the named call running; the fluid sides of one fluid-structure round died on each.
+_DOLFINX_TABULATE_MIXED_FIX = (
+    "a mixed space has no coordinates of its own: tabulate the collapsed sub-space, V0, _ = "
+    "W.sub(0).collapse(); V0.tabulate_dof_coordinates() (one row per node of V0), or a P1 space of "
+    "its own on the same mesh")
+_DOLFINX_ZERO_FORM_FIX = (
+    "UFL folds 0 * v, and 0.0 times any expression, to its Zero, which carries no domain, so "
+    "`* ufl.dx` raises at once; a plain number alone, 1.0 * ufl.dx, has no mesh either. Make the "
+    "number a constant on the mesh: ufl.inner(fem.Constant(mesh, np.zeros(gdim)), v) * ufl.dx for a "
+    "vector test function v, fem.Constant(mesh, default_scalar_type(0.0)) * v * ufl.dx for a scalar "
+    "one; both compile")
+_DOLFINX_NONLINEAR_FIX = (
+    "dolfinx.fem.petsc has no NewtonSolver. Its nonlinear solve is NonlinearProblem(F, w, bcs=bcs, "
+    "petsc_options_prefix='<name>', petsc_options={'snes_type': 'newtonls', ...}); problem.solve() "
+    "fills w, and it RETURNS when Newton did not converge too (measured: reason -5 at the iteration "
+    "cap) -- read problem.solver.getConvergedReason() (> 0 converged) and "
+    "problem.solver.getIterationNumber(), or set 'snes_error_if_not_converged': True")
+_DOLFINX_MOVE_FIX = (
+    "dolfinx.mesh has no move. The node coordinates are msh.geometry.x, an (n, 3) array the forms "
+    "assembled afterwards read: for a displacement d on the mesh's own P1 vector space, "
+    "fem.functionspace(msh, ('Lagrange', 1, (gdim,))), msh.geometry.x[:, :gdim] += "
+    "d.x.array.reshape(-1, gdim). Measured in serial on create_rectangle triangle meshes, where that "
+    "space's dof order equalled the node order; compare V1.tabulate_dof_coordinates()[:, :gdim] with "
+    "msh.geometry.x[:, :gdim] before relying on it")
+# MEASURED ON THIS INSTALL: locate_dofs_topological(W.sub(0).collapse(), fdim, facets) stops in
+# dolfinx/fem/bcs.py, `_V = [space._cpp_object for space in V]`, on the dof array of the pair. The
+# '_cpp_object' answer for an uncompiled form named the wrong cause twice on a fluid-structure round.
+_DOLFINX_COLLAPSE_PAIR_FIX = (
+    "W.sub(i).collapse() returns a PAIR, (the collapsed space, its dofs in W), and "
+    "locate_dofs_topological / locate_dofs_geometrical read every entry of a tuple as a space, so "
+    "the dof array has no _cpp_object. Unpack it: V0, _ = W.sub(0).collapse(); for a block of the mixed "
+    "space pass the two spaces, fem.locate_dofs_topological((W.sub(0), V0), fdim, facets), and its "
+    "condition is fem.dirichletbc(g, dofs, W.sub(0)) with g a fem.Function on V0")
+_DOLFINX_SCALAR_FIX = (
+    "assemble_scalar is dolfinx.fem.assemble_scalar(fem.form(...)); dolfinx.fem.petsc has none")
+_DOLFINX_UFL_CONSTANT_FIX = (
+    "ufl.Constant(mesh, ...) takes a domain and a SHAPE and holds no number: an array given there is "
+    "read as the shape, and the form fails on it. A constant in a form is fem.Constant(mesh, value) -- "
+    "np.zeros(gdim) for a vector, default_scalar_type(0.0) for a scalar")
 _DOLFINX_FORM_COMPILED_FIX = (
     "dolfinx.fem.petsc.assemble_matrix, assemble_vector and apply_lifting take the compiled form "
     "fem.form(a); LinearProblem takes the UFL forms and compiles them itself. Measured on this "
@@ -288,6 +337,24 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
     ("ngsolve", r"\.vec\.vec\b",
      "AttributeError: 'BaseVector' object has no attribute 'vec'",
      "a LinearForm's vector is f.vec and it is already the BaseVector"),
+    # BOUNDARY NAMES ARE JOINED WITH |, AS ONE REGULAR EXPRESSION. Measured on this install (NGSolve
+    # 6.2.2604): H1(mesh, dirichlet="bottom,right,top") holds 0 of 79 dofs and says nothing, while
+    # "bottom|right|top" holds 24; a side built so solved a singular system to a uniform, huge field.
+    ("ngsolve", r"""\bdirichlet\s*=\s*f?["'][^"'\n]*,[^"'\n]*["']""",
+     "no error, and no dof held there: boundary names joined with commas match no boundary (measured: "
+     "0 of 79 dofs held, against 24 with |)",
+     "several boundary names are joined with |, as one regular expression: dirichlet='bottom|right|top'; "
+     "mesh.GetBoundaries() lists the names the mesh carries"),
+    # .data IS LOWERCASE. Measured: reading vec.Data raises, and vec.Data = ... sets a Python attribute
+    # and leaves the vector as it was, with no error.
+    ("ngsolve", r"\.Data\b",
+     "AttributeError: 'ngsolve.la.BaseVector' object has no attribute 'Data' -- or, for vec.Data = ..., "
+     "no error and the vector left as it was",
+     "a BaseVector is assigned through lowercase .data: vec.data = <expression>"),
+    # A BitArray HAS NO Count (measured: AttributeError); NumSet() counts its set bits.
+    ("ngsolve", r"\.Count\s*\(\s*\)",
+     "AttributeError: 'pyngcore.pyngcore.BitArray' object has no attribute 'Count'",
+     "a BitArray counts its set bits with NumSet(), and len() gives its size"),
     ("ngsolve", r"\.vec\s*\[[^]]*FreeDofs",
      "TypeError: __getitem__(): incompatible function arguments (a BitArray is not an index)",
      "take numbers out with v.FV().NumPy() or np.array(v), and assign through v.data"),
@@ -315,8 +382,9 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "fem.locate_dofs_topological(V, fdim, facets) or fem.locate_dofs_geometrical(V, marker)"),
     ("fenics", r"ufl\.Constant\s*\(\s*[-\d.]",
      "AttributeError: 'float' object has no attribute 'ufl_domain'",
-     "ufl.Constant takes a DOMAIN, not a value: a boundary value is a plain scalar "
-     "(default_scalar_type(0.0)) and a constant inside a form is fem.Constant(mesh, value)"),
+     "ufl.Constant takes a DOMAIN, not a value: a boundary value has the shape of its space "
+     "(default_scalar_type(0.0) on a scalar space, np.zeros(gdim) on a vector one, a fem.Function on "
+     "a block of a mixed one) and a constant inside a form is fem.Constant(mesh, value)"),
     ("fenics", r"ufl\.FiniteElement\s*\(",
      "AttributeError: module 'ufl' has no attribute 'FiniteElement'",
      "fem.functionspace(mesh, ('Lagrange', 1)), or basix.ufl.element(...)"),
@@ -644,6 +712,20 @@ _NETGEN_2D = (
 # DUNE-fem fix (space.size), because the needle "has no attribute 'dim'" is every code's. Which code
 # failed is read from the traceback (findings_from_output); an empty key is any code's.
 # (codes, what the run prints, the call that works)
+# SPARTA's file and surface rules, each measured on this install with a placeholder deck
+# (tests/test_a_failed_sparta_deck_is_told_the_measured_fix.py).
+_SPARTA_SURF_FILE = ("a surf file's FIRST LINE IS ALWAYS SKIPPED, so a header written there is lost. The "
+                     "header lines '<N> points' and '<M> lines' come after it, then the line 'Points', one "
+                     "skipped line and N rows 'id x y', then the line 'Lines', one skipped line and M rows "
+                     "'id p1 p2', each section's rows with no blank line between them")
+_SPARTA_FLOW_SIDE = ("SPARTA puts the gas on the side a line's normal N = (0,0,1) x (p2 - p1) points to: "
+                     "walking from p1 to p2, the gas is on your left.")
+_SPARTA_BOX_FACE = ("compute surf, fix ave/surf and dump surf tally only the elements read_surf made, and a "
+                    "box face is not one. A face's flux is `compute <ID> boundary <mix> etot` through `fix "
+                    "<F> ave/time 1 <N> <N> c_<ID>[1] mode vector`, read as f_<F>[face] with xlo=1 xhi=2 "
+                    "ylo=3 yhi=4; a face takes one wall temperature, so a wall with a value per element is "
+                    "read_surf lines")
+
 _ERROR_FIXES: tuple = (
     # THE LARGEST SINGLE UNGATED FAILURE IN THE RECORDED SET: 271 occurrences
     # across 120 cells. Three spellings of one mistake -- a Python function or
@@ -883,6 +965,11 @@ _ERROR_FIXES: tuple = (
     # arguments 5; the bcs size mismatch 3; a form divided or multiplied by a number 3; petsc_vec,
     # 'Grad'.ufl and connectivity indexed twice each; createKSP, petsc_mat and get_connectivity
     # once). Each wrong call and each named call was run on this install (dolfinx 0.10).
+    # (the pair from collapse() handed over as a space: its frame is locate_dofs_*, its object an
+    # ndarray -- answered first, and the uncompiled-form answer below then stays silent on it)
+    (("fenics",), re.compile(r"in locate_dofs_(?:topological|geometrical)\b[^\n]*\n(?:[^\n]*\n){0,4}?[^\n]*?"
+                             r"(?P<said>'numpy\.ndarray' object has no attribute '_cpp_object')"),
+     "FEniCSx: " + _DOLFINX_COLLAPSE_PAIR_FIX),
     (("fenics",), "has no attribute '_cpp_object'", "FEniCSx: " + _DOLFINX_FORM_COMPILED_FIX),
     (("fenics",), "'Form' object has no attribute 'function_spaces'", "FEniCSx: " + _DOLFINX_FORM_COMPILED_FIX),
     (("fenics",), "'Form' object is not iterable", "FEniCSx: " + _DOLFINX_BCS_LIST_FIX),
@@ -900,6 +987,18 @@ _ERROR_FIXES: tuple = (
     (("fenics",), "Rank mismatch between Constant and function space", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
     (("fenics",), "Boundary condition value must have a dtype attribute", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
     (("fenics",), "Invoked with types: dolfinx.cpp.fem.DirichletBC", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
+    (("fenics",), "Constant size is not equal to the block size", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
+    (("fenics",), "Cannot tabulate coordinates for a mixed FunctionSpace", "FEniCSx: " + _DOLFINX_TABULATE_MIXED_FIX),
+    (("fenics",), "This integral is missing an integration domain", "FEniCSx: " + _DOLFINX_ZERO_FORM_FIX),
+    (("fenics",), "cannot import name 'NewtonSolver' from 'dolfinx.fem.petsc'", "FEniCSx: " + _DOLFINX_NONLINEAR_FIX),
+    (("fenics",), "module 'dolfinx.fem.petsc' has no attribute 'NewtonSolver'", "FEniCSx: " + _DOLFINX_NONLINEAR_FIX),
+    (("fenics",), "module 'dolfinx.mesh' has no attribute 'move'", "FEniCSx: " + _DOLFINX_MOVE_FIX),
+    (("fenics",), "cannot import name 'assemble_scalar' from 'dolfinx.fem.petsc'", "FEniCSx: " + _DOLFINX_SCALAR_FIX),
+    (("fenics",), "module 'dolfinx.fem.petsc' has no attribute 'assemble_scalar'", "FEniCSx: " + _DOLFINX_SCALAR_FIX),
+    # raised inside ufl's own operators when a ufl.Constant was given an array: its frame is ufl's
+    (("fenics",), re.compile(r'ufl/\w+\.py", line \d+, in \w+[^\n]*\n(?:[^\n]*\n){0,4}?[^\n]*?'
+                             r'(?P<said>operands could not be broadcast together with shapes[^\n]*)'),
+     "FEniCSx: " + _DOLFINX_UFL_CONSTANT_FIX),
     (("fenics",), "'petsc4py.PETSc.Vec' object has no attribute 'petsc_vec'",
      "FEniCSx: dolfinx.fem.petsc.assemble_vector returns the PETSc Vec itself -- use it as it is; "
      "petsc_vec belongs to a Function's vector, uh.x.petsc_vec (measured on this install)"),
@@ -968,23 +1067,36 @@ _ERROR_FIXES: tuple = (
      "NGSolve: Sym takes a matrix, so build the strain from the gradient -- Sym(Grad(u)), not Sym(u)"),
     (("ngsolve",), "cannot import name 'Div' from 'ngsolve'",
      "NGSolve: the divergence is lowercase div(u); inside a stress it is Trace(Sym(Grad(u)))"),
+    (("ngsolve",), "object has no attribute 'Data'",
+     "NGSolve: a BaseVector is assigned through lowercase .data, vec.data = <expression>; vec.Data = ... "
+     "raises nothing and leaves the vector as it was (measured)"),
+    (("ngsolve",), "BitArray' object has no attribute 'Count'",
+     "NGSolve: a BitArray counts its set bits with NumSet(), and len() gives its size"),
     (("ngsolve",), "BaseVector' object has no attribute 'vec'",
      "NGSolve: a LinearForm's vector IS f.vec; assign through .data and read numbers with FV().NumPy()"),
     (("ngsolve",), "must not have TrialFunction",
      "NGSolve: a LinearForm carries only the test function; every term with the trial function belongs "
      "in the BilinearForm"),
+    # MEASURED ON THIS INSTALL: a 2-D structure deck with SOLID QUAD4 elements stops 4C with exactly
+    # this line; three cells of a fluid-structure round wrote SOLID for a plane-strain wall.
+    (("fourc",), re.compile(r"(?P<said>Element 'SOLID' does not seem to know cell type '(?:quad|tri)\d+')"),
+     "4C: SOLID takes 3-D cells only (HEX8, HEX20, HEX27, TET4, TET10, WEDGE6, PYRAMID5, ...); a 2-D structure "
+     "is WALL, e.g. `<id> WALL QUAD4 <4 nodes> MAT 1 KINEM linear EAS none THICK 1.0 STRESS_STRAIN "
+     "plane_strain GP 2 2` (run on this install; the grammar, `4C -p`, also lists WALL QUAD8, QUAD9, TRI3, "
+     "TRI6), with MAT_Struct_StVenantKirchhoff for linear elasticity"),
     (("fenics",), "has no attribute 'subset_dofs'",
      "FEniCSx: fem.locate_dofs_topological(V, fdim, facets) or fem.locate_dofs_geometrical(V, marker)"),
     (("fenics",), "'float' object has no attribute 'ufl_domain'",
-     "FEniCSx: ufl.Constant takes a DOMAIN, not a value -- use a plain scalar for a boundary value, "
-     "or fem.Constant(mesh, value) inside a form"),
+     "FEniCSx: ufl.Constant takes a DOMAIN, not a value -- a boundary value has the shape of its space "
+     "(a number on a scalar space, np.zeros(gdim) on a vector one, a fem.Function on a block of a mixed "
+     "one), and a constant inside a form is fem.Constant(mesh, value)"),
     (("fenics",), "has no attribute 'FiniteElement'",
      "FEniCSx: build spaces with fem.functionspace(mesh, ('Lagrange', 1))"),
     (("fenics",), "has no attribute 'VectorFunctionSpace'",
      "FEniCSx: fem.functionspace(mesh, ('Lagrange', 1, (mesh.geometry.dim,)))"),
     (("fenics",), "missing 1 required keyword-only argument: 'petsc_options_prefix'",
-     "FEniCSx: LinearProblem requires petsc_options_prefix='<any name>' on this install (measured "
-     "exactly this message)"),
+     "FEniCSx: LinearProblem and NonlinearProblem both require petsc_options_prefix='<any name>' on "
+     "this install (measured exactly this message from each)"),
     # `'LinearProblem' object has no attribute '_solver'` is not in this table: it is
     # LinearProblem.__del__ tidying up after a failed constructor, and findings_from_output names the
     # constructor's own error instead (see _del_echo_finding).
@@ -1079,12 +1191,66 @@ _ERROR_FIXES: tuple = (
      "NGSolve: one call that raises this, measured: `dirichlet` given as a Python LIST of "
      "names. It takes ONE string, the boundary names joined by | -- "
      "H1(mesh, order=2, dirichlet='left|top|cylinder')"),
+    # ── SPARTA: THE DETERMINISTIC MESSAGES OF A DSMC DECK. Measured on a coupled round: 101
+    # SPARTA runs over about twenty distinct messages, and no run check answered one. Each entry
+    # below was reproduced on this install (SPARTA 24 Sep 2025) by a placeholder deck that differs
+    # from a running one in that one place (tests/test_a_failed_sparta_deck_is_told_the_measured_fix.py).
+    (("sparta",), "Incorrect line format in custom attribute file",
+     "SPARTA: the file `custom surf create <name> float 0 file <file> M <names>` reads holds comment "
+     "or blank lines, then ONE count line 'N M' (N value lines follow, M values on each, M the number "
+     "of names after the file name), then N lines 'id v1 .. vM' with no blank line between them; a "
+     "file of bare values, or of 'id value' lines with no count line, stops here"),
+    (("sparta",), "Cannot use custom surf command before surfaces are defined",
+     "SPARTA: `custom surf` sets a value per surface element, so it comes after the read_surf that "
+     "makes the elements"),
+    (("sparta",), "Surf file does not contain lines", "SPARTA: " + _SPARTA_SURF_FILE),
+    (("sparta",), "Read_surf file has no points keyword", "SPARTA: " + _SPARTA_SURF_FILE),
+    (("sparta",), "Surf_modify surface group is not defined",
+     "SPARTA: surf_modify names a surface group that does not exist. A group comes from `read_surf "
+     "<file> group <name>` or `group <name> surf id <lo>:<hi>` before it, and `all` is every element"),
+    (("sparta",), re.compile(r"\d+ surface elements not assigned to a collision model"),
+     "SPARTA: every surface element needs a wall model: `surf_collide <sc-ID> <style> ...`, then "
+     "`surf_modify <group or all> collide <sc-ID>` covering all of them"),
+    (("sparta",), "Box boundary not assigned a surf_collide ID",
+     "SPARTA: a box face set to s by `boundary` is a surface, and `bound_modify <face> collide "
+     "<sc-ID>` (face xlo, xhi, ylo or yhi) must name its wall model. In `boundary`, r is SPECULAR "
+     "reflection, s a surface, o outflow, p periodic"),
+    (("sparta",), re.compile(r"Illegal boundary command \(\.\./domain\.cpp:\d+\)"),
+     "SPARTA: `boundary` takes three entries x y z, in 2-D with z = p; each is one letter for both "
+     "faces or two letters for the lower and upper face, from o outflow, p periodic, r specular, s "
+     "surface (needs bound_modify), a axisymmetric (lower y face only). On this install line 150 is a "
+     "wrong count of entries and line 165 an unknown letter"),
+    (("sparta",), "Using read_surf particle none when particles exist",
+     "SPARTA: read_surf came after create_particles; read_surf and the surface commands go before "
+     "create_particles"),
+    (("sparta",), "Cannot use compute surf when surfs do not exist", "SPARTA: " + _SPARTA_BOX_FACE),
+    (("sparta",), "Cell type mis-match when marking on self",
+     "SPARTA: one cause measured on this install: a second read_surf after a first whose lines face "
+     "away from the gas stops here, and with the first file's lines facing the gas both reads pass. "
+     + _SPARTA_FLOW_SIDE + " The first read's '<a> <b> <c> = cells outside/inside/overlapping surfs' "
+     "line with a = 0 shows a file whose lines face away"),
+    (("sparta",), "Stats fix does not compute scalar",
+     "SPARTA: a per-surf or per-grid fix cannot go into stats_style; reduce it first, `compute <R> "
+     "reduce sum f_<fix>`, and print c_<R>"),
+    (("sparta",), "Dump surf and fix not computed at compatible times",
+     "SPARTA: a dump of a fix writes only on steps where the fix has a value, so the dump's N must be "
+     "a multiple of the fix's Nfreq"),
+    (("sparta",), re.compile(r"^[ \t]*0 \d+ \d+ = cells outside/inside/overlapping surfs", re.M),
+     "SPARTA: read_surf reported 0 cells outside the surfaces: every grid cell is inside a body, "
+     "there is no gas, create_particles makes 0 particles and the run still exits 0. "
+     + _SPARTA_FLOW_SIDE + " Swap p1 and p2 of each line whose gas is on its right"),
+    (("sparta",), "Created 0 particles",
+     "SPARTA: create_particles made none, and the run goes on with an empty domain. Two causes "
+     "measured on this install: no `global nrho <n> fnum <F>` before create_particles (SPARTA then "
+     "uses nrho = 1, fnum = 1), and no grid cell on the flow side of any surface line (read_surf's "
+     "line '<a> <b> <c> = cells outside/inside/overlapping surfs' then has a = 0)"),
 )
 
 
 # Needles every code can print. They answer only a failure whose code the traceback shows; with no
 # code in sight they would name one at a guess.
 _NEEDS_THE_CODE = frozenset({
+    "This integral is missing an integration domain",     # UFL's, printed for FEniCSx and DUNE-fem
     "has no attribute 'dim'", "has no attribute 'converged'",
     "'numpy.ndarray' object has no attribute 'grad'", "Input array has wrong size.",
     "'>=' not supported between instances of 'property' and 'int'",
@@ -1217,17 +1383,31 @@ def findings_from_output(output: str, command: str = "") -> list:
     if _CRASH.search(text) and (_dealii_build or re.search(r"deal\.?ii", text, re.I)):
         # THE BUILD THE WRAPPER NAMES DECIDES THE ADVICE. Measured: a cell whose DEBUG line was already
         # on was told again to turn it on, after deal.II had printed its assertion.
-        if "This build has DEBUG on" in text:
+        # DEBUG REACHES DEAL.II'S HEADERS, NOT ITS LIBRARY. Measured on this install: a SparseMatrix
+        # copy-constructed from a filled one is left empty, and the library call that uses it crashes
+        # with no message with DEBUG on (the copy constructor's check is compiled into libdeal_II). The
+        # old text told one cell 8 times that deal.II had "checked its own assertions" there.
+        if "This build has DEBUG on" in text and "An error occurred in line" in text:
             out.append("the program was KILLED BY SIGSEGV: a crash inside it, not an install fault. DEBUG is on "
-                       "in this build, so deal.II checked its own assertions; one that failed prints 'An error "
-                       "occurred in line' on the stderr above, and an index vector handed unsized to "
-                       "get_dof_indices crashes with or without DEBUG. Measured on this install.")
+                       "in this build, which turns on the checks in deal.II's headers, and the one that failed "
+                       "printed 'An error occurred in line' on the stderr above. Measured on this install.")
+        elif "This build has DEBUG on" in text:
+            out.append("the program was KILLED BY SIGSEGV: a crash inside it, not an install fault. DEBUG is on "
+                       "in this build and no deal.II check printed: DEBUG turns on the checks in deal.II's headers, "
+                       "not the ones compiled into its library, and these crash with no message either way -- a "
+                       "SparseMatrix copy-constructed from a filled one (SparseMatrix<double> A(system_matrix) "
+                       "leaves A empty), copy_from into a SparseMatrix never built on a pattern, and an index "
+                       "vector handed unsized to get_dof_indices. A copy is built on the pattern, "
+                       "SparseMatrix<double> A(sparsity), then filled with A.copy_from(system_matrix). Measured "
+                       "on this install.")
         else:
             out.append("the program was KILLED BY SIGSEGV: a crash inside it, not an install fault. A Release "
-                       "deal.II asserts nothing -- an FEValues accessor whose update flag was not requested, or an "
-                       "index vector handed unsized to get_dof_indices, crashes with no message; "
-                       "target_compile_definitions(<target> PRIVATE DEBUG) after deal_ii_setup_target makes deal.II "
-                       "name a missing flag. Measured on this install.")
+                       "deal.II asserts nothing -- an FEValues accessor whose update flag was not requested, an "
+                       "index vector handed unsized to get_dof_indices, or a SparseMatrix copy-constructed from a "
+                       "filled one (it is left empty) crashes with no message; "
+                       "target_compile_definitions(<target> PRIVATE DEBUG) after deal_ii_setup_target turns on "
+                       "deal.II's header checks, which name a missing flag but not the empty matrix or the "
+                       "unsized vector. Measured on this install.")
     # A KRATOS CRASH, OR ONE WHOSE CODE THE OUTPUT DOES NOT NAME, IS ANSWERED TOO (see _KRATOS_CRASH).
     elif _CRASH.search(text):
         _seen = text + "\n" + (command if isinstance(command, str) else "")
@@ -1250,6 +1430,16 @@ def findings_from_output(output: str, command: str = "") -> list:
                    f"again: deal.II then stops at the bad write and names the index, as in 'Index 8 is not in "
                    f"the half-open range [0,8)' (an 8 x 8 matrix written at column 8). Measured on this "
                    f"install.")
+    # A SparseMatrix WITH NO PATTERN, NAMED BY A HEADER CHECK. With DEBUG on, a call compiled from
+    # deal.II's headers on such a matrix stops with this install's words: "An error occurred in line
+    # <1810> of file <.../lac/sparse_matrix.h>" and "The violated condition was: cols != nullptr"
+    # (measured on a copy-constructed matrix; one cell escaped its copy loop only when this fired).
+    if re.search(r"of file <[^>\n]*lac/sparse_matrix\.h>", text) and "cols != nullptr" in text:
+        out.append("deal.II stopped on `cols != nullptr` in lac/sparse_matrix.h: that SparseMatrix has no "
+                   "sparsity pattern. SparseMatrix<double> A(system_matrix) does not copy (deal.II leaves A "
+                   "empty), and a matrix declared with no pattern has none until reinit(sparsity). A copy is "
+                   "built on the pattern, SparseMatrix<double> A(sparsity), then filled with "
+                   "A.copy_from(system_matrix). Measured on this install.")
     # A COMPILE THAT READ THE SYSTEM PACKAGE IS NAMED AS SUCH (measured: two cells built against
     # /usr 9.1.1 and never linked).
     if "/usr/include/deal.II/" in _first_cxx or re.search(r"deal\.II-9\.1\.1 installation found at /usr", text):
@@ -1272,7 +1462,8 @@ def findings_from_output(output: str, command: str = "") -> list:
             _m = needle.search(text)
             if not _m:
                 continue
-            said = " ".join(_m.group(0).split())
+            # a pattern that must see a frame as well quotes only its message, the group `said`
+            said = " ".join((_m.groupdict().get("said") or _m.group(0)).split())
             said = said if len(said) <= 120 else said[:117] + "..."
         elif keys == ("dealii",) and _first_cxx:
             if needle not in _first_cxx:
@@ -1526,6 +1717,9 @@ def cxx_findings(text: str, name: str = "") -> list:
                        f"A matrix and its right-hand side take the constraints through condense(matrix, rhs) "
                        f"before the solve.")
             break
+    _copy = _sparse_matrix_copy_finding(body)
+    if _copy:
+        out.append(_copy)
     flag_vars = {m.group(1): set(re.findall(r"update_\w+", m.group(2)))
                  for m in re.finditer(r"UpdateFlags\s+(\w+)\s*=\s*([^;]+);", body)}
     for m in re.finditer(r"FE(?:Face|Subface)?Values\s*<[^>]*>\s+(\w+)\s*\((.*?)\)\s*;", body, re.S):
@@ -1552,6 +1746,49 @@ def cxx_findings(text: str, name: str = "") -> list:
                        f"sizing it: SIGSEGV, in Release and in Debug alike (measured). Declare it "
                        f"std::vector<types::global_dof_index> {v}(fe.n_dofs_per_cell()).")
     return out
+
+
+# A SparseMatrix THAT IS NOT A COPY. Measured on this install (deal.II 9.8.0-pre, its library built
+# Release), one small program per spelling, with DEBUG defined in the program and without:
+# SparseMatrix<double> A(system_matrix) leaves A empty (A.empty() is 1), since the check that refuses a
+# filled argument is compiled into the library, which DEBUG in the program does not reach; the first
+# library call that uses A (apply_boundary_values, condense, SparseDirectUMFPACK::initialize) then ends
+# the program with SIGSEGV and no message, with DEBUG on as with it off. copy_from into a matrix never
+# built on a pattern does the same, and A = system_matrix leaves A as it was (all zero on its pattern).
+# On a coupled round one cell crashed 13 times so (8 with DEBUG on) and gave up; three others lost
+# minutes to it.
+_SPARSE_COPY = ("build the copy on the pattern, SparseMatrix<double> {a}(sparsity) (or give it "
+                "{a}.reinit(sparsity)), then fill it with {a}.copy_from({b})")
+
+
+def _sparse_matrix_copy_finding(body: str) -> str:
+    """The first SparseMatrix of `body` (a deal.II program, comments cut) that is meant as a copy and
+    is not one; '' when there is none."""
+    decl, said = {}, {}                        # name -> its initializer ('' when none), as written
+    for m in re.finditer(r"\bSparseMatrix\s*<[^;<>]*>\s+(\w+)\s*(?:\(([^;()]*)\)|\{([^;{}]*)\}|=\s*([^;]+))?\s*;",
+                         body):
+        decl.setdefault(m.group(1), (m.group(2) or m.group(3) or m.group(4) or "").strip())
+        said.setdefault(m.group(1), " ".join(m.group(0).split()))
+    how = lambda a, b: _SPARSE_COPY.format(a=a, b=b)                           # noqa: E731
+    silent = ("the library call that uses it (apply_boundary_values, condense, a direct solver's "
+              "initialize) ends the program with SIGSEGV and no message, with DEBUG on or off (measured: "
+              "the check is compiled into the library, which DEBUG in this file does not reach)")
+    for a, init in decl.items():
+        if init in decl and init != a:
+            return (f"`{said[a]}` does not copy {init}: deal.II leaves {a} empty, and {silent}. To copy, "
+                    f"{how(a, init)}.")
+    for m in re.finditer(r"(?<![\w.>])(\w+)\s*\.\s*copy_from\s*\(\s*(\w+)\s*\)", body):
+        a, b = m.group(1), m.group(2)
+        if b in decl and decl.get(a) == "" and not re.search(rf"\b{re.escape(a)}\s*\.\s*reinit\s*\(", body):
+            return (f"`{a}.copy_from({b})` fills a SparseMatrix declared with no sparsity pattern (`{said[a]}`) "
+                    f"and never given one: it ends the program with SIGSEGV and no message, with DEBUG on or "
+                    f"off (measured). To copy, {how(a, b)}.")
+    for m in re.finditer(r"(?<![\w.>:])(\w+)\s*=\s*(\w+)\s*;", body):
+        a, b = m.group(1), m.group(2)
+        if a in decl and b in decl and a != b:
+            return (f"`{a} = {b}` does not copy a SparseMatrix: deal.II leaves {a} as it was, with no message, "
+                    f"with DEBUG on or off (measured: all zero on its pattern). To copy, {how(a, b)}.")
+    return ""
 
 
 def _hole_name_findings(text: str) -> list:
@@ -2107,11 +2344,29 @@ def _contracts_by_role() -> dict:
         others = set().union(*[v for (k, r), v in lines.items() if k == key and r != role])
         carried = tuple(name for name, served, _has in _SERVED_CHECKS
                         if served.search(t) and (name != "per-level dump" or key in _DUMP_NAMED_FOR))
-        funcs = _served_functions(t)
+        # A FUNCTION THAT HOLDS A HOLE IS NOT A SERVED BLOCK: its body is partly the author's, and a
+        # fill may reshape it (measured: a fluid side was told 37 times it lost "the function main()",
+        # the function the served fluid contract puts its holes in). Its served stops are judged
+        # one by one instead.
+        _rows = t.splitlines()
+        funcs = tuple(f for f in _served_functions(t)
+                      if not any(_HOLE_BANNER in _rows[k] for k in range(f[1], min(f[2] + 1, len(_rows)))))
         out[(key, role)] = (lines[(key, role)], frozenset(lines[(key, role)] - others), carried,
                             tuple(_guards_of(t, inside=[(r0, r1) for _n, r0, r1, _s in funcs])),
                             tuple((n, s) for n, _r0, _r1, s in funcs), _served_branches(t), t)
     return out
+
+
+_HOLE_BANNER = "THE SOLVE ITSELF IS YOURS AND IS NOT SERVED HERE"
+# The roles whose contract exchanges one scalar (a temperature and its flux), and the words of a side
+# that exchanges a traction or a displacement instead.
+_SCALAR_ROLES = frozenset({"base", "neumann", "transient", "3d"})
+_VECTOR_EXCHANGE = re.compile(r"traction|displacement", re.I)
+
+
+def _code_only(text: str) -> str:
+    """The text without its comments (a word in a comment exchanges nothing)."""
+    return "\n".join(ln.split("#", 1)[0] for ln in (text or "").splitlines())
 
 
 def _served_branches(text: str) -> tuple:
@@ -2222,6 +2477,15 @@ def missing_export_selfcheck(content: str) -> str:
         return ""                      # equivalent protection under another name
     if not _EXPORTS_WRITE.search(content):
         return ""                      # not a participant; nothing to say
+    # A DSMC WRAPPER'S BLOCK IS NOT THE FINITE-ELEMENT ONE. Measured on a coupled round: a SPARTA
+    # file that had lost its block was told about a Neumann side's load and a negated partner flux,
+    # neither of which a DSMC side has.
+    if re.search(r"\bsurf_collide\b|\bread_surf\b|\bspa_(?:serial|mpi)\b", content):
+        return ("this script writes exports.json but carries no EXPORT SELF-CHECK. The served SPARTA "
+                "contract has one, and it is the block that stops the two exports of a DSMC side that "
+                "look fine and are worthless: a non-finite etot, and an etot that is exactly zero on "
+                "every element (no particle collision was tallied there). Copy the block back from the "
+                "served contract -- it reads only what you have already computed.")
     return (
         "this script writes exports.json but carries no EXPORT SELF-CHECK. The "
         "served contract has one, and it is the block that stops the three "
@@ -3277,7 +3541,10 @@ _SERVED_MARK = "DOES NOT SERVE THIS"
 _SERVED_SIGNS = (_SERVED_MARK, "EXPORT SELF-CHECK")
 
 
-_HOLE_RE = re.compile(r"# ── SOLVE ─ [^\n]*?DOES NOT SERVE THIS ─ begin.*?DOES NOT SERVE THIS ─ end", re.S)
+# A hole, and a contract's HOLE NAMES IN WORDS block, which the serving door moves into the list the
+# contract ends with: neither is a line a served copy carries where the file has it.
+_HOLE_RE = re.compile(r"# ── SOLVE ─ [^\n]*?DOES NOT SERVE THIS ─ begin.*?DOES NOT SERVE THIS ─ end"
+                      r"|# ── HOLE NAMES IN WORDS ─ begin.*?# ── HOLE NAMES IN WORDS ─ end", re.S)
 
 
 @functools.lru_cache(maxsize=1)
@@ -3691,6 +3958,10 @@ def served_guard_removed(content: str, near=None) -> str:
     template = _template_of(content)
     if template is None:
         return ""
+    # A file that exchanges a traction or a displacement is not held to a contract that exchanges
+    # neither (a heat contract a fluid side was built on): its stops are that contract's, not its own.
+    if _VECTOR_EXCHANGE.search(_code_only(content)) and not _VECTOR_EXCHANGE.search(_code_only(template)):
+        return ""
     guards = _guards_of(template)
     if not guards:
         return ""
@@ -3771,6 +4042,13 @@ def served_blocks_lost(content: str, near=None) -> str:
     if len(roles) != 1 or len(table.get(roles[0], ())) < 5:
         return ""
     code, role = roles[0]
+    # A SIDE THAT EXCHANGES A TRACTION OR A DISPLACEMENT IS NOT JUDGED AGAINST A HEAT CONTRACT.
+    # Measured on a fluid-structure round: a fluid side built on the scalar heat contract a writer had
+    # handed it was told 30 times to restore that contract's stops -- among them the "flux is the
+    # partner's array negated" stop, which the fluid-structure contract says does not belong there --
+    # and pointed to the scalar writer. Its own contract is another; this stays silent.
+    if role in _SCALAR_ROLES and _VECTOR_EXCHANGE.search(_code_only(content)):
+        return ""
     _lines, _own, _carried, stops, funcs, branches, served_text = table[(code, role)]
     side = _stated_side(content)
     body_lines = content.splitlines()
@@ -3813,12 +4091,87 @@ def served_blocks_lost(content: str, near=None) -> str:
     call = (f" write_participant_contract(solver='{code}'"
             + (f", variant='{role}'" if role != "base" else "")
             + ", path=<another file>) writes that contract beside this one to copy from."
-            if role == "base" or role in _DOOR_ROLES else "")
+            if role == "base" or role in _DOOR_ROLES or role.startswith("fsi_") else "")
     return (f"LOST SERVED BLOCKS: this file is written from {where} (it carries {kept} of the "
             f"{len(blocks)} served blocks that contract has for {'the ' + side if side else 'either'} "
             f"side) and no longer carries {len(lost)}: {'; '.join(lost[:6])}"
             f"{'; ...' if len(lost) > 6 else ''}. They are served code, not part of the holes: copy "
             f"each back from the contract and fill only its holes, in place.{call}")
+
+
+# ── a deal.II program written in place of the served one ──
+#
+# MEASURED on a steady coupled round: two cells wrote the deal.II program whole in place of the served
+# dealii_side.cc (13 to 15 thousand characters). One kept none of the served stops, and the 11 minutes
+# it then spent on "huge values" went to the defect its lost SOLVE stop names; the other ran its own
+# program without them. Nothing was said at the write: hand_written_beside_a_served_side and
+# served_blocks_lost read Python participants only. This names, at the write, each served stop (a
+# fail("LABEL: ...") call of the served program) and each console line the wrapper reads that the
+# written program no longer carries, read from the served program itself, never from a fixed list.
+_SERVED_STOP = re.compile(r'\bfail\s*\(\s*(?:std::string\s*\(\s*)?"([A-Z][A-Z_ ]*[A-Z]):')
+_SERVED_LINES = {"dealii_side.cc": (("NDOF = ", '"NDOF = <n>"'), ('"VOLUME_SOURCE[ "]', '"VOLUME_SOURCE on|off"')),
+                 "dealii_side_transient.cc": (("NDOF = ", '"NDOF = <n>"'), ('"SOURCE[ "]', '"SOURCE on|off"'))}
+
+
+def _program_served_as(name: str, near=None):
+    """The served deal.II program a written .cc stands in for: its own name when it is one, else the
+    name a participant script beside it builds (DEALII_SRC); None for any other file (a probe)."""
+    if name in _SERVED_LINES:
+        return name
+    if near is None or not name:
+        return None
+    try:
+        scripts = sorted(Path(near).parent.glob("*.py"))
+    except OSError:
+        return None
+    for q in scripts:
+        try:
+            t = q.read_text(errors="ignore")
+        except OSError:
+            continue
+        m = re.search(r"""^DEALII_SRC\s*=\s*["']([^"']+)["']""", t, re.M)
+        if m and Path(m.group(1)).name == name:
+            return "dealii_side_transient.cc" if re.search(r"^N_STEPS\s*=", t, re.M) else "dealii_side.cc"
+    return None
+
+
+def served_program_checks_lost(content: str, name: str = "", near=None) -> str:
+    """'' unless this .cc is the program a served deal.II wrapper builds and lacks served stops or
+    the console lines the wrapper reads. A stop demoted to a print is lost too: only a fail(...)
+    call stops the run."""
+    if not isinstance(content, str) or ("#include <deal.II/" not in content and "dealii::" not in content):
+        return ""
+    name = Path(name).name if name else ""
+    program = _program_served_as(name, near)
+    if program is None:
+        return ""
+    try:
+        from .coupling_knowledge import served_program                          # noqa: PLC0415
+        served, err = served_program(program)
+    except Exception:                                                            # noqa: BLE001
+        return ""
+    if err or not served:
+        return ""
+    from collections import Counter                                              # noqa: PLC0415
+    body = re.sub(r"//[^\n]*|/\*.*?\*/", "", content, flags=re.S)
+    want, have = Counter(_SERVED_STOP.findall(served)), Counter(_SERVED_STOP.findall(body))
+    lost = [lab if k == 1 else f"{lab} ({'twice' if k == 2 else f'{k} times'})" if not have[lab]
+            else f"{lab} ({k - have[lab]} of {k})" for lab, k in want.items() if have[lab] < k]
+    gone = [said for pat, said in _SERVED_LINES[program] if re.search(pat, served) and not re.search(pat, body)]
+    if not lost and not gone:
+        return ""
+    kept = sum(min(have[lab], k) for lab, k in want.items())
+    var = ", variant='transient'" if program == "dealii_side_transient.cc" else ""
+    return (f"SERVED CHECKS LOST: {name} is the program the served deal.II wrapper builds, and it carries "
+            f"{kept} of the {sum(want.values())} stops of the served {program}"
+            + (f"; it no longer carries these: {_named(lost)}" if lost else "")
+            + (f"{'; nor' if lost else '; it lacks'} the console line{'s' if len(gone) > 1 else ''} "
+               f"{_named(gone)} the wrapper reads" if gone else "")
+            + ". They are served code, not part of the five holes: each stops a run whose field would be "
+              "wrong (measured: a program rewritten whole lost every stop, and its next 11 minutes went to "
+              "the defect the lost SOLVE stop names). Copy them back from the served program, which "
+              f"write_participant_contract(solver='dealii'{var}, path='<a new folder>/participant_copy.py') "
+              "writes into that folder, and keep your own code in its holes.")
 
 
 def _solvers_asked_about(near=None):

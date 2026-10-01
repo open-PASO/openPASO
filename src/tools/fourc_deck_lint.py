@@ -88,6 +88,18 @@ def _material_specs(dump: str) -> dict:
     return specs
 
 
+# A MATERIAL A DECK REACHES FOR BY WHAT IT DOES, and the one this binary has that does it. The closest
+# names by spelling were no help: for MAT_Struct_LinearElastic they named PlasticGTN, SuperElastSMA and
+# PlasticLinElast (three cells of a fluid-structure round). Measured on this install: a plane-strain
+# WALL QUAD4 block with MAT_Struct_StVenantKirchhoff and KINEM linear under an edge traction
+# reproduced the plane-strain Hooke solution to 2e-16.
+_MATERIAL_MEANT = (
+    (r"lin(?:ear)?_?elast|hooke",
+     "MAT_Struct_StVenantKirchhoff (YOUNG, NUE, DENS) with KINEM linear on the element is linear elasticity "
+     "(measured on this install: it reproduced the plane-strain Hooke solution to 2e-16)"),
+)
+
+
 def material_defects(text: str, mats: dict) -> list[str]:
     """The deck's MATERIALS entries against the binary's material grammar: an unknown material name (with
     the closest known), a missing required parameter, a parameter the material does not have."""
@@ -110,9 +122,12 @@ def material_defects(text: str, mats: dict) -> list[str]:
             if km and len(ln) - len(ln.lstrip()) == ind + 2:
                 keys.append(km.group(1))
         if name not in mats:
+            meant = next((what for pat, what in _MATERIAL_MEANT if re.search(pat, name, re.I)
+                          and what.split()[0] in mats), "")
             close = difflib.get_close_matches(name, sorted(mats), n=3, cutoff=0.6)
             out.append(f"material '{name}' is not in the binary's grammar (`4C -p`)"
-                       + (f"; closest known: {', '.join(close)}" if close else ""))
+                       + (f"; {meant}" if meant else
+                          f"; closest known: {', '.join(close)}" if close else ""))
             continue
         spec = mats[name]
         missing = [p for p, s in spec.items() if s["required"] and p not in keys]
@@ -340,9 +355,7 @@ def lint_deck(text: str, cfg: dict | None = None) -> list[str]:
             missing = sorted({x for x in re.findall(r"\bE:\s*(\d+)", b) if (kind, x) not in topo}, key=int)
             if missing:
                 why.append(f"{head} names E id(s) {', '.join(missing[:6])} that no *-NODE TOPOLOGY section defines" + _E_IS_A_DESIGN_ID)
-    if re.search(r"FUNCT\d+:", text) and re.search(r"\bFUNCT:\s*\[\s*0(\s*,\s*0)*\s*\]", text) \
-            and not re.search(r"\bFUNCT:\s*\[[^\]]*[1-9]", text):
-        why.append("FUNCT blocks are defined but no condition references one (FUNCT: [0,...] everywhere): the sources never reach the load")
+    why += _functions_no_entry_lists(text)
     why += _degenerate_elements(text)
     why += _lines_without_an_element_edge(text)
     why += _unquoted_table_rows(text)
@@ -358,6 +371,38 @@ def lint_deck(text: str, cfg: dict | None = None) -> list[str]:
     why += _double_star_in_functions(text)
     why += _missing_runtime_output(text)
     return why
+
+
+# A FUNCTn THAT NO ENTRY LISTS IS EVALUATED NOWHERE. Measured on this install: a deck with an unused
+# FUNCT1 ran normally and gave the same displacement as one without it. On a fluid-structure round a 4C
+# side built the imported traction into FUNCT1 and FUNCT2 and loaded its edge with a constant VAL and
+# FUNCT [0, 0]; the lint said nothing, because some FUNCT list elsewhere was not all zeros. Each
+# function is judged on its own: listed by any key that names a function (FUNCT: [..], *FUNCNO, ...)
+# or by a legacy `FUNCT <n>` line; any such mention counts, so an unparsed reference is never accused.
+_FUNC_KEY = re.compile(r"^[ \t]*(?:-[ \t]*)?([A-Za-z_]*FUNC[A-Za-z_]*)[ \t]*:[ \t]*(.*)$", re.M)
+
+
+def _functions_no_entry_lists(text: str) -> list[str]:
+    defined = sorted({int(n) for n in re.findall(r"^FUNCT(\d+):[ \t]*$", text, re.M)})
+    if not defined:
+        return []
+    used: set = set()
+    for key, val in _FUNC_KEY.findall(text):
+        if key.upper().startswith(("SYMBOLIC", "VARFUNCTION")) or "FUNCTION_OF" in key.upper():
+            continue                                    # a definition, not a reference
+        used |= {int(x) for x in re.findall(r"(?<![\w.])\d+(?![\w.])", val)}
+    for m in re.finditer(r"\bFUNCT((?:[ \t]+\d+)+)", text):
+        used |= {int(x) for x in m.group(1).split()}
+    lost = [n for n in defined if n not in used]
+    if not lost:
+        return []
+    names = ", ".join(f"FUNCT{n}" for n in lost)
+    return [f"{names} {'is' if len(lost) == 1 else 'are'} defined and no entry lists "
+            f"{'it' if len(lost) == 1 else 'them'} (no FUNCT: [..] or *FUNCNO names "
+            f"{', '.join(str(n) for n in lost)}): 4C evaluates {'it' if len(lost) == 1 else 'them'} "
+            f"nowhere and the run finishes normally, so a load or source built there is not applied "
+            f"(measured on this install: a deck with a function no entry listed gave the same field as one "
+            f"without it). Name the function in the FUNCT: [..] entry of the condition that should carry it"]
 
 
 def _missing_runtime_output(text: str) -> list[str]:

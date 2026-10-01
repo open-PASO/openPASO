@@ -616,7 +616,9 @@ int main(int argc, char **argv)
       row_max = std::max(row_max, row);
       if (held(i) && off == 0)
         fail("SOLVE: a held row of system_matrix has no off-diagonal entries left: the boundary values went "
-             "into system_matrix itself; apply them to a copy");
+             "into system_matrix itself. Apply them to a copy: a SparseMatrix<double> built on `sparsity` (or "
+             "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
+             "from system_matrix is left empty, and a library call on it crashes with no message");
       if (held(i))
         kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
       else

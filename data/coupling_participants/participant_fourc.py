@@ -63,7 +63,7 @@ def F_SRC(x, y):
     approximation of it.
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the NON-interface x-boundary
+T_OUTER   = 335.0         # Dirichlet value on the NON-interface x-boundary
 # WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY, NOT THIS FILE'S.
 #
 # This line used to read `FULL_OUTER_DIRICHLET = False` with a comment calling
@@ -84,7 +84,7 @@ if FULL_OUTER_DIRICHLET is None:
              "are held at T_OUTER (True) or natural (False), from your problem "
              "statement. A default here would be choosing your boundary "
              "condition for you.")
-NX, NY    = 24, 16        # this subdomain's OWN QUAD4 mesh
+NX, NY    = 46, 26        # this subdomain's OWN QUAD4 mesh
 T_INIT    = 310.0         # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 FOURC_BIN = "4C"          # the 4C binary path `discover(query='list')` prints

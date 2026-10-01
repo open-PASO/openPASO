@@ -1000,11 +1000,27 @@ def _extra_script_checks(written: Path, content: str) -> str:
     # amount of coupling iterations recovers the lost order. The consistent
     # (residual) recovery and the 3-point one-sided quadratic are both
     # second order (they agree to 2.7% rel-RMS at h=1/8, measured).
-    if (_re.search(r"argmin", content)
-            and _re.search(
-                r"\(\s*\w+(?:\[[^\]]+\])?\s*-\s*\w+\[[^\]]+\]\s*\)"
-                r"\s*/\s*(?:0\.\d+|h\b|dx\b|\w*spacing\w*)", content)
-            and _re.search(r"q_?n?\s*=|flux", content, _re.I)):
+    # THE TWO OPERANDS ARE FIELD VALUES PICKED BY A NEAREST-NODE INDEX, AND THE QUOTIENT IS A FLUX.
+    # Measured on a fluid-structure round: three loose patterns matched one fluid script 54 times --
+    # a parabolic inflow profile `(h - x[1]) / h`, an argmin that mapped the partner's displacements,
+    # and `v, q = ufl.TestFunctions(W)` read as a flux called q -- and it recovered no flux at all.
+    # So: one operand indexed by a name an argmin made (or by argmin itself), neither operand the
+    # coordinate array, and the quotient assigned (or appended) to a flux or derivative name.
+    _picked = set(_re.findall(r"^[ \t]*(\w+)[ \t]*=[^\n]*\bargmin\b", content, _re.M))
+    _two_point = False
+    for _m in _re.finditer(
+            r"^[ \t]*(?P<lhs>\w+)(?:\[[^\]\n]*\])?[ \t]*(?:=(?!=)|\.append\()[^\n]*?"
+            r"\(\s*(?P<a>\w+)(?:\[(?P<ia>[^\]\n]+)\])?\s*-\s*(?P<b>\w+)\[(?P<ib>[^\]\n]+)\]\s*\)"
+            r"\s*/\s*(?:0\.\d+|h\b|dx\b|\w*spacing\w*)", content, _re.M):
+        _subs = " ".join(filter(None, (_m.group("ia"), _m.group("ib"))))
+        _by_argmin = "argmin" in _subs or any(_re.search(rf"\b{_re.escape(_n)}\b", _subs) for _n in _picked)
+        _coords = {_m.group("a"), _m.group("b")} & {"x", "X", "xs", "coords", "coordinates", "points", "pts"}
+        _fluxy = _re.fullmatch(r"q\w*|\w*flux\w*|d\w*d[xyzn]\w*|\w*grad\w*|\w*deriv\w*|\w*trac\w*",
+                               _m.group("lhs"), _re.I)
+        if _by_argmin and not _coords and _fluxy:
+            _two_point = True
+            break
+    if _two_point:
         out.append(
             "  * THIS SCRIPT RECOVERS THE INTERFACE FLUX BY A TWO-POINT "
             "DIFFERENCE OVER NEAREST-NODE LOOKUPS. That recovery is first "
@@ -1424,11 +1440,14 @@ def _participant_write_check(written: Path, content: str) -> str:
         # A deal.II PROGRAM AND ITS CMakeLists ARE JUDGED TOO (measured: a missing update flag and
         # a find_package without HINTS each cost a cell its deal.II side).
         try:
-            from tools.participant_lint import cxx_findings   # noqa: PLC0415
+            from tools.participant_lint import cxx_findings, served_program_checks_lost   # noqa: PLC0415
             _cx = cxx_findings(content, written.name)
+            # A PROGRAM WRITTEN IN PLACE OF THE SERVED ONE IS JUDGED FOR THE STOPS IT LOST (measured: a
+            # rewrite kept none of the served stops, and nothing said so at the write).
+            _lost = served_program_checks_lost(content, written.name, near=written)
         except Exception:                                # noqa: BLE001
             return ""
-        return "".join(f"\n[write check] {written.name}: {f}" for f in _cx[:3])
+        return "".join(f"\n[write check] {written.name}: {f}" for f in ([_lost] if _lost else []) + _cx[:3])
     if not written.name.lower().endswith(".py"):
         return ""
     try:

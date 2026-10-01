@@ -58,9 +58,9 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 PARTNER    = "thermal"    # the thermal participant's `name` in couple(...)
 X0, X1     = 0.0, 2.0     # the body (BOTH participants use the same body)
 Y0, Y1     = 0.0, 0.5
-NX, NY     = 32, 8        # this participant's OWN mesh; need not match the partner
+NX, NY     = 34, 8        # this participant's OWN mesh; need not match the partner
 E_MOD      = 2.1e11       # Young's modulus, Pa
-NU         = 0.3          # Poisson ratio
+NU         = 0.29         # Poisson ratio
 BETA       = 6.3e7        # thermal stress modulus (3*lam+2*mu)*alpha, Pa/K
 THETA_INIT = 10.0         # iteration-1 fallback for the imported theta = T-T_ref, K
 # ─────────────────────────────────────────────────────────────────────────

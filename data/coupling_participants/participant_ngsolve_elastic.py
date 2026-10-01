@@ -55,8 +55,8 @@ IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the lin
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.55          # WHERE that line sits: equal to X0 or X1 for axis "x",
                           # to Y0 or Y1 for axis "y"
-E_MOD     = 1000.0        # Young's modulus
-NU        = 0.3           # Poisson ratio (PLANE STRAIN)
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
 # (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
@@ -95,7 +95,7 @@ def B_SRC(x, y):
     function.
     """
     return np.zeros_like(x), np.zeros_like(y)
-NX, NY    = 24, 16        # this subdomain's own mesh (netgen maxh derived below)
+NX, NY    = 46, 26        # this subdomain's own mesh (netgen maxh derived below)
 
 # ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
 #    next to this script overrides the mesh knobs and names the level. The dumps

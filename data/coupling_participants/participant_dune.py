@@ -56,8 +56,8 @@ def F_SRC(x, y):
         return -K * (6.0 * x * y**2 + 2.0 * x**3)
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0
-NX, NY    = 24, 16
+T_OUTER   = 335.0
+NX, NY    = 46, 26
 T_INIT    = 310.0
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 # ─────────────────────────────────────────────────────────────────────────

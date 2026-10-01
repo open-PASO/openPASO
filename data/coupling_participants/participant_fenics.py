@@ -7,7 +7,8 @@ exports.json LAST.
 Physics: steady conduction  -div(K grad T) = F_SRC  on one 2-D subdomain:
 the mesh your solve builds (a box, a box with cells removed, joined boxes).
 K may vary by region, the interface may bend (IFACE_SEGMENTS), and which
-outer edges are held at T_OUTER is your solve's choice.
+outer edges are held at T_OUTER is your solve's choice; FULL_OUTER_DIRICHLET
+states it for the checks that judge your field.
 """
 import json
 import os
@@ -78,8 +79,12 @@ def F_SRC(x, y):
     source, quadrature error O(h^2), the order of the discretisation.
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the outer edges your solve holds (outer_dofs)
-NX, NY    = 24, 16        # this subdomain's OWN mesh; need not match the partner
+T_OUTER   = 335.0         # Dirichlet value on the outer edges your solve holds (outer_dofs)
+FULL_OUTER_DIRICHLET = None  # True: the two edges the interface ends on are held at T_OUTER
+                          # too; False: they are natural (zero flux), only the edge opposite the
+                          # interface is held. From your problem statement: the audit judges
+                          # your field's outer edges against it, and None judges all of them.
+NX, NY    = 46, 26        # this subdomain's OWN mesh; need not match the partner
 T_INIT    = 310.0         # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 # ─────────────────────────────────────────────────────────────────────────
@@ -98,8 +103,9 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
 
-# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). x0, x1, y0, y1, k, outer and source_expr
-#    (a string in x and y, `^` allowed) in config.json replace the constants above, written AS
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). x0, x1, y0, y1, k, outer, full_outer_dirichlet
+#    (true or false) and source_expr (a string in x and y, `^` allowed) in config.json replace the
+#    constants above, written AS
 #    THE TASK WRITES THEM. A key it does not state leaves its constant as it is; the audit's
 #    equation check reads the same keys. What these keys cannot state: k is ONE number for the
 #    whole side, and this contract reads no key for a k that differs by region. A side with
@@ -133,6 +139,9 @@ for _nm, _key in (("K", "k"), ("T_OUTER", "outer")):
             print(f"NOTE: config.json's {_key} is not one number, so {_nm} above stands."
                   + (" This contract reads no k that differs by region: build it in your solve "
                      "and state no k in config.json." if _key == "k" else ""))
+if isinstance(_cfg_all.get("full_outer_dirichlet"), bool):
+    FULL_OUTER_DIRICHLET = _cfg_all["full_outer_dirichlet"]
+    _FROM_CFG.append("full_outer_dirichlet")
 if _cfg_all.get("source_expr") is not None:
     _f_cfg = _expr_fn(_cfg_all["source_expr"])
     def F_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
@@ -438,13 +447,27 @@ _chk_r = np.abs(np.asarray(_chk_Au.array, float) - _chk_bb)[_chk_free]
 _chk_sc = max(float(np.abs(_chk_bb).max(initial=0.0)),
               float(_chk_rows.max(initial=0.0)) * float(np.abs(uh.x.array).max(initial=0.0)))
 if _chk_r.size and _chk_sc > 0 and _chk_r.max() > 1e-4 * _chk_sc:
+    # A NEUMANN SIDE THAT SOLVED BEFORE ITS FLUX TERM WAS ADDED SOLVES L_vol, and this says so when
+    # it measures it. Measured on a coupled round: a worker solved in hole 1, the stop said only
+    # that uh does not solve the system, and the run read it as a check that was "too strict".
+    _chk_why = ""
+    if SIDE == "neumann":
+        _chk_bv = _fp.assemble_vector(fem.form(L_vol))
+        _chk_bv.ghostUpdate()
+        _chk_rv = np.abs(np.asarray(_chk_Au.array, float)
+                         - np.asarray(_chk_bv.array, float)[:_chk_n])[_chk_free]
+        if _chk_rv.max(initial=0.0) <= 1e-4 * _chk_sc:
+            _chk_why = (f" On this Neumann side uh solves A u = b_vol, the system WITHOUT the "
+                        f"interface flux (r = A u - b_vol reaches only {_chk_rv.max(initial=0.0):.2e} "
+                        f"there): the solve used L_vol, not L -- a solve placed before the served "
+                        f"block that adds g v ds_if to L (hole 1) does exactly this.")
     sys.exit(f"SOLVE SELF-CHECK: on the dofs that no dirichletbc in bcs holds ({_chk_r.size} of "
              f"them), r = A u - b reaches {_chk_r.max():.2e}, {_chk_r.max() / _chk_sc:.1e} of the system "
              f"scale {_chk_sc:.2e} (the larger of |b| and |A| |u|), and more than 1e-4 of it on "
              f"{int((_chk_r > 1e-4 * _chk_sc).sum())} of those dofs. A and b are this side's a and L "
              f"assembled with no boundary condition; a direct solve of that system leaves about "
              f"1e-16 of the scale there. The field in uh does not solve that system, so nothing "
-             f"was exported.")
+             f"was exported." + _chk_why)
 # ── DID THE PARTNER'S TRACE ENTER THE SOLVE? (served) ─ keep this block. On the
 #    Dirichlet side the partner's values must be in the solution at the interface's
 #    own dofs (read from the mesh, never through the list the values were written
@@ -618,6 +641,31 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
                         f"at the {_chk_on.size} of those that no outer value holds, r = A u - b_vol "
                         f"is at most {_chk_ri[_chk_on].max(initial=0.0):.2e}, so there A u equals "
                         f"the volume load b_vol."))
+# THE APPLIED FLUX MUST COME BACK, NOT ONLY BE NONZERO. On the free interface rows the recovery
+# r = A u - b_vol returns the applied flux's own load, int g phi_i ds, whatever the solver. Measured
+# on a coupled round: a side whose Krylov solve ignored the imported flux left r at 2.1e-3 of it,
+# which passed the ~0 bar above, while its SOLVE SELF-CHECK share (6.0e-5) sat under that check's
+# bar, because the held temperature sets that scale and a missing interface load is of size q h.
+if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0:
+    _chk_gv = _fp.assemble_vector(fem.form(g * w_ * ds_if))
+    _chk_gv.ghostUpdate()
+    _chk_ids = np.asarray(iface_dofs, int)[np.where(~suspect)[0]]
+    _chk_want = np.asarray(_chk_gv.array, float)[_chk_ids]
+    _chk_got = np.asarray(r.array, float)[_chk_ids]
+    _chk_top = float(np.abs(_chk_want).max(initial=0.0))
+    _chk_gap = float(np.abs(_chk_got - _chk_want).max(initial=0.0))
+    if _chk_top > 0 and _chk_gap > 0.5 * _chk_top:
+        _chk_share = float(np.dot(_chk_got, _chk_want) / np.dot(_chk_want, _chk_want))
+        raise SystemExit(
+            f"EXPORT SELF-CHECK: the flux this side applied did not come back from its own system. "
+            f"On the {_chk_ids.size} interface dofs no outer value holds, r = A u - b_vol carries "
+            f"{_chk_share:.1e} of the applied flux's load int g phi_i ds (largest gap {_chk_gap:.2e} "
+            f"against {_chk_top:.2e}); where the flux entered the solve the two agree to the "
+            f"solver's tolerance. "
+            + ("r is ~0 there, so uh solves the system without the flux term: the solve used "
+               "L_vol, not L -- a solve placed before the served block that adds g v ds_if to L "
+               "(hole 1) does exactly this." if abs(_chk_share) < 0.1 else
+               "The load the solve used differs from L on the interface."))
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied flux can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \

@@ -184,7 +184,7 @@ def F_SRC(x, y, z):
     """
     return np.zeros_like(x)
 
-T_INIT     = 300.0           # iteration-1 fallback interface temperature
+T_INIT     = 295.0           # iteration-1 fallback interface temperature
 Q_INIT     = 0.0             # iteration-1 fallback interface flux density
 
 

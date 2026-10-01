@@ -148,5 +148,22 @@ def test_a_claude_code_run_refuses_the_main_conversations_filing(tmp_path):
     (entry,) = settings["hooks"]["PreToolUse"]
     assert entry["matcher"] == "mcp__openpaso__submit_critic_review"
     assert entry["hooks"][0]["command"].endswith("critic_hook.py")
+    # the command survives a path with a space (Copilot on the org PR)
+    import shlex
+    from unittest import mock
+    with mock.patch.object(sys, "executable", "/opt/my python/bin/python3"):
+        cmd = claude_code._hook_settings({"openpaso": {}})["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert shlex.split(cmd)[0] == "/opt/my python/bin/python3" and shlex.split(cmd)[1].endswith("critic_hook.py")
     src = Path(claude_code.__file__).read_text()
     assert '"--settings", str(settings_path)' in src
+
+
+def test_an_encoded_looking_start_does_not_spare_a_value_from_the_scrubber():
+    """Copilot on the org PR: only the first 64 characters were checked."""
+    from pathlib import Path as _P
+    from webui.privacy import scrub
+    home = str(_P.home())
+    leaked = scrub({"data": "A" * 64 + f" {home}/secret"})
+    assert home not in leaked["data"], leaked
+    frames = "QUJD" * 100
+    assert scrub({"frames": frames}) == {"frames": frames}, "real encoded data is left as it is"

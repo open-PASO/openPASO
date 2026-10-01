@@ -83,7 +83,7 @@ def F_SRC(x, y):
     """
     return 0.0 * x
 
-T_OUTER   = 300.0         # Dirichlet value on the NON-interface x-boundary
+T_OUTER   = 295.0         # Dirichlet value on the NON-interface x-boundary
 # WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY, NOT THIS FILE'S:
 # a default here once chose a boundary condition for problems it never saw, and
 # a field obeying the wrong condition converges cleanly with nothing to show it.
@@ -95,7 +95,7 @@ if FULL_OUTER_DIRICHLET is None:
              "are held at T_OUTER (True) or natural (False), from your problem "
              "statement. A default here would be choosing your boundary "
              "condition for you.")
-NX, NY    = 20, 16        # this subdomain's OWN mesh; need not match the partner
+NX, NY    = 46, 26        # this subdomain's OWN mesh; need not match the partner
 Q_INIT    = 0.0           # iteration-1 fallback interface flux density
 
 

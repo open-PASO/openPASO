@@ -70,7 +70,7 @@ from skfem.helpers import dot, grad
 PARTNER   = "mech"        # the structural participant's `name` in couple(...)
 X0, X1    = 0.0, 2.0      # the body (BOTH participants use the same body)
 Y0, Y1    = 0.0, 0.5
-NX, NY    = 40, 10        # this participant's OWN mesh; need not match the partner
+NX, NY    = 38, 14        # this participant's OWN mesh; need not match the partner
 K_COND    = 52.0          # thermal conductivity k, W/(m K)
 RHO_C     = 3.297e6       # volumetric heat capacity rho*c, J/(m^3 K)
 DT        = 1.0e4         # the time step of the single implicit step, s
