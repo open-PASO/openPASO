@@ -2,10 +2,8 @@
 
 Plane-strain linear elasticity  -div(sigma(u)) = b  on ONE rectangular
 subdomain of a domain split by a straight interface at x = IFACE_X (or
-y = IFACE_X when IFACE_AXIS is "y"), with the
-body force b given by B_SRC in the edit block. Like the
-other *_elastic participants (and unlike the scalar ones), the exchanged
-interface state is a VECTOR on BOTH channels:
+y = IFACE_X when IFACE_AXIS is "y"), the body force b given by B_SRC in the
+edit block. The exchanged interface state is a VECTOR on BOTH channels:
 
     values        = displacement       u = (u_x, u_y)   at the interface nodes
     normal_fluxes = interface traction export            (SIGN CONVENTION below)
@@ -14,311 +12,66 @@ CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1), writes
 exports.json LAST.
 
-FEBio HAS NO SCRIPTING API: it is XML-in / logfile-out. This module is a
-WRAPPER that each coupling iteration (1) reads imports.json, (2) writes a
-complete FEBio 4.0 .feb deck with the imported interface data baked in PER
-NODE, (3) runs `febio4 -i deck.feb`, (4) parses the ASCII <logfile>, (5) writes
-exports.json.
+FEBio HAS NO SCRIPTING API: it is XML-in / logfile-out. Each coupling
+iteration this wrapper (1) reads imports.json, (2) writes a complete FEBio 4.0
+.feb deck with the imported interface data baked in PER NODE, (3) runs
+`febio4 -i deck.feb`, (4) parses the ASCII <logfile>, (5) writes exports.json.
 
 PLANE STRAIN IN A 3-D CODE. FEBio solves 3-D solids only, so the subdomain is
 meshed as ONE layer of hex8 elements of thickness ZTHICK with u_z = 0 on every
-node. That is plane strain exactly, not approximately: the solution is
-z-invariant, so the two z-layers of nodes carry identical (u_x, u_y) and the
-slab collapses onto the 2-D interface line the other participants speak. The
-exported points are therefore the DISTINCT y values of the interface, with
-2-D coordinates [IFACE_X, y] — the same list the *_elastic siblings export.
+node: plane strain exactly. The two z-layers of nodes carry identical
+(u_x, u_y), so the exported points are the distinct interface nodes, with 2-D
+coordinates, the list the other *_elastic contracts export.
 
-SIGN CONVENTION — the thing a vector coupling gets wrong silently.
-`normal_fluxes` is exported as
+SIGN CONVENTION. `normal_fluxes` is exported as
 
-    q_out = -(sigma . n_own)                       n_own = S * e_x
+    q_out = -(sigma . n_own)                       n_own = S * e_AX
 
-the SAME convention the shipped scalar participants use for heat
-(q_out = -k dT/dn_own) and the one participant_fenics_elastic.py and
-participant_skfem_elastic.py use. Two consequences, both load-bearing:
+(the convention of every shipped contract, q_out = -k dT/dn_own for heat). The
+two sides' exports cancel componentwise, and the NEUMANN side applies the
+partner's numbers UNCHANGED: the natural boundary term of the weak form is
++(sigma . n_own) . v = +q_out_partner . v. Exporting sigma . n_own instead flips
+the load the Neumann side applies; the iteration still converges, to the wrong
+answer.
 
-  * the two sides' exports CANCEL componentwise, because n_own is anti-parallel
-    across the interface — that is what makes the interface balance check a
-    conservation statement rather than an accident;
-  * the NEUMANN side applies the partner's numbers UNCHANGED, because the
-    natural boundary term of the elasticity weak form is
-    +(sigma . n_own) . v = +q_out_partner . v.
+THE TRACTION EXPORT IS THE CONSISTENT (REACTION) TRACTION, PER NODE: not a
+domain average and not an element-stress projection, which are first order at
+best on the boundary. From a(u,v) - (b,v) = -int_Gamma q_out . v ds it follows
+for every basis function phi_i on the interface that
 
-Exporting the raw traction (sigma . n_own) instead flips the sign the Neumann
-side applies; the iteration still converges, to the wrong answer.
+    q_i = -R_i / w_i,     R = A u_h - b (UNCONSTRAINED),   w_i = int_Gamma phi_i ds.
 
-THE TRACTION EXPORT IS PER NODE, AND IT IS THE REACTION — NOT A DOMAIN AVERAGE
-AND NOT A STRESS PROJECTION.
+On the Dirichlet side FEBio's node log "Rx", "Ry" is that residual at the
+PRESCRIBED dofs, except that a <nodal_load> never reaches it there: the body
+force's consistent nodal load is subtracted by hand, the same array the deck
+carries. The two z-layers of one interface node are summed in both numerator
+and denominator. The two interface CORNERS lie on the outer boundary too, so
+they take their nearest interior neighbour's value. The Neumann side cannot use
+the reaction (FEBio reports Rx = Ry = 0 at free dofs): it exports -Fc/w, the
+consistent nodal force it built from the partner's traction and wrote into the
+deck, and prints the element-stress traction beside it as an independent
+second opinion.
 
-The scalar participant_febio.py exports
-    q_out = np.full(len(iface_nodes), -mean(element sx) * S)
-i.e. ONE domain-averaged sigma_xx broadcast onto every interface point. For its
-own 1-D bar that is the exact answer (sigma_xx really is constant there). For
-any problem whose interface traction VARIES ALONG THE INTERFACE — a
-shear-modulus jump, a non-uniform load, anything two-dimensional — it is not
-even first-order accurate: the exported profile is flat, so its error does not
-shrink when the mesh is refined, and the Neumann partner is handed a boundary
-condition that is simply wrong at both ends of the interface. MEASURED on the
-manufactured two-material problem below, whose interface traction is
-t_x = K*y (exactly linear in y): the domain-average export sits at the midpoint
-value, its relative L2 error along the interface is 45.4% / 45.0% / 44.8% /
-44.8% on the four refinement levels — CONVERGENCE ORDER 0.01, 0.00, 0.00 — and
-its worst pointwise relative error is 50.0% on every mesh. Refining does not
-help, because the error is not a discretisation error.
+LOADS ARE CONSISTENT NODAL FORCES. The partner's traction (Neumann side) enters
+as F_i = int_Gamma t_h . phi_i ds (the quad4 surface mass matrix of the
+interface faces), and B_SRC as F_i = int_Omega b . phi_i dV (3x3x3 Gauss on each
+hex8), both applied as <nodal_load type="nodal_force"> through vec3 NodeData
+maps. b is a force per unit VOLUME; ZTHICK cancels.
 
-What is exported instead is the variationally consistent (reaction) traction,
-the same recovery every other participant in this corpus uses. From
+WHAT IS APPROXIMATED.
+  * FEBio has no small-strain material: `isotropic elastic` is
+    St.Venant-Kirchhoff, linear elasticity only as |grad u| -> 0. Large
+    displacements make this a finite-strain side.
+  * The recovered traction has a floor near 1e-7 relative (round-off below it,
+    the finite-strain term above): with FEBio as the DIRICHLET side, do not ask
+    `couple` for a residual tolerance below about 1e-7.
+  * hex8 is trilinear (Q1 in the plane), not the P1 of other contracts; both
+    are O(h^2).
+  * LINSOLVE is "skyline": a build without pardiso fails on FEBio's default.
 
-    a(u,v) - (f,v) = int_dOmega (sigma(u) . n) . v ds = -int_Gamma q_out . v ds
-
-(the second equality is this file's sign convention, q_out = -(sigma . n_own))
-it follows that for every vector basis function phi_i on the interface
-
-    int_Gamma q_out . phi_i ds = -r_i,    r = A u_h - b
-
-with r the UNCONSTRAINED residual — assembled with no boundary condition
-applied and with the constrained rows NOT zeroed, because on the Dirichlet side
-those rows ARE the reaction. FEBio exposes exactly that vector: the node log
-variables "Rx","Ry","Rz" return FESolidSolver2::m_Fr at PRESCRIBED dofs, and
-m_Fr is accumulated in FEResidualVector::Assemble as -(sum of the assembled
-element vectors) = F_internal - F_external = (A u_h - b)_i. So
-
-    q_i = -R_i / w_i,      w_i = int_Gamma phi_i ds
-
-with w_i the interface nodal weight, computed here in closed form from the
-quad4 interface faces (2x2 Gauss on a bilinear face is exact for a planar
-quad). The two z-layers of one interface y are summed in BOTH numerator and
-denominator, which is the correct collapse of the slab: q = -(R_bot+R_top) /
-(w_bot+w_top).
-
-Why not the element stresses. FEBio can log element sx/sxy, and averaging those
-onto the interface is the obvious FEBio-shaped alternative. It is a stress
-recovered from the GRADIENT of a trilinear solution and evaluated ON a
-boundary, which is only O(h) accurate there (the superconvergence points are
-interior, and the boundary trace is exactly what the coupling reads). Both
-routes were run and measured AT MID-INTERFACE, away from the end effects
-discussed below, on the four meshes:
-
-    reaction        (Dirichlet side, and STILL this file's export)
-                                                  1.5e-5 1.3e-5 2.8e-6 4.4e-7
-    element stress  (the RETIRED Neumann export)  6.2e-3 3.1e-3 1.6e-3 7.8e-4
-
-The element-stress route is order 1.00 flat (0.98, 1.01, 1.00) at that point.
-The reaction route drops away much faster (0.23, 2.23, 2.68 — it is running
-into this build's own arithmetic floor, see below, so the last figures are a
-floor and not an order) and is ~1800x more accurate on the finest mesh. The
-recovery, not the physics and not the partner, sets the answer.
-
-READ THE SECOND ROW'S LABEL. The Neumann branch NO LONGER EXPORTS the element
-stress; it exports -Fc/w, the consistent nodal force it built and wrote into
-the deck, and merely PRINTS the element-stress traction as a second opinion
-with its discrepancy. The 6.2e-3 row above is therefore a measurement of a
-route this file retired, kept here because it is still the argument for not
-going back to it. Order 1.00 is what it gets at a single mid-interface point;
-the max norm over interior interface nodes is worse — see the note at the
-Neumann export, where it measured 1.638 / 1.440 / 1.500 on 8/16/32, order 0.19
-then -0.06, i.e. non-convergent. Both figures are from the original runs and
-neither has been re-measured here.
-
-MEASURED, ON A MANUFACTURED TWO-MATERIAL PROBLEM. Unit square split at x = 0.5,
-plane strain, a 3x SHEAR-MODULUS JUMP across the interface (mu 400 -> 1200 at
-equal lam = 600), exact solution u_x = (a + b x) y, u_y = c x^2 + p x + q per
-subdomain — zero body force, and an interface traction t_x = K y that VARIES
-LINEARLY ALONG THE INTERFACE, t_y = const. Dirichlet-Neumann against
-participant_skfem_elastic.py (P1 triangles) through
-core.coupling_driver.run_coupling with Aitken relaxation; four uniformly
-refined meshes 8x8 / 16x16 / 32x32 / 64x64 per subdomain; relative L2 errors:
-
-  FEBio = Dirichlet side (it EXPORTS the traction)
-    u, over the whole coupled domain   6.212e-4 1.536e-4 3.866e-5 9.756e-6
-                                       ORDER 2.02  1.99  1.99
-    t, along the interface             6.572e-2 2.329e-2 8.240e-3 2.914e-3
-                                       ORDER 1.50  1.50  1.50
-  FEBio = Neumann side (it APPLIES the traction)
-    u, over the whole coupled domain   6.070e-4 1.476e-4 3.663e-5 9.167e-6
-                                       ORDER 2.04  2.01  2.00
-    t, exported by the skfem partner   ORDER 1.50  1.50  1.50
-
-DISPLACEMENT IS ORDER 2. THE TRACTION IS ORDER 1.5, AND IT IS NOT THE RECOVERY.
-The traction error is a TWO-NODE BOUNDARY LAYER at the two points where the
-interface meets the outer Dirichlet boundary: an O(h) amplitude over an O(h)
-width integrates to O(h^1.5) in L2 whatever happens in between. Away from it
-the exported traction is 1.5e-5 / 1.3e-5 / 2.8e-6 / 4.4e-7 relative at
-mid-interface — better than order 2, down to this build's floor. Handed the
-EXACT interface displacement instead of a partner's (same participant, run
-alone), the recovery reproduces the exact traction at EVERY interface node to
-3.0e-7 / 3.2e-7 / 3.3e-7 / 3.9e-7 relative: exact to the floor, with no
-h-dependence at all. Running FEBio on BOTH sides gives the same 1.50, so the
-layer is not the P1 partner either. Of the two layer nodes, the interface
-CORNER is O(h) BY CONSTRUCTION — it is the nearest-interior copy the siblings
-also use, measured 12.0% / 6.0% / 3.0% / 1.5%, i.e. exactly h.
-
-CONSERVATION, MEASURED THREE WAYS ON THE SAME RUNS.
-  * The consistent nodal load this file bakes into the deck reproduces
-    int_Gamma q_partner . phi_i ds over the loaded nodes to 3.8e-16 / 1.7e-16 /
-    3.3e-16 / 5.3e-16 relative. The exchange itself is exact.
-  * The NET interface force carried by the exported traction matches the exact
-    analytic net force to 3.0e-4 / 1.1e-4 / 3.4e-5 / 9.1e-6 (order 1.42 ->
-    1.89, heading for 2).
-  * WITHDRAWN. This bullet used to report that the two sides' independently
-    recovered tractions cancel in the resultant to 6.7e-2 / 3.3e-2 / 1.6e-2 /
-    8.2e-3 (order 1.0) against a scikit-fem partner, and to 1.2e-2 / 5.7e-3 /
-    2.8e-3 / 1.4e-3 with FEBio on the Neumann side, and it explained the
-    residual imbalance as the first-order recovery on the far side. BOTH
-    configurations are gone. The first was measured against a
-    participant_skfem_elastic.py whose export was then the O(h) stress
-    projection; it now exports the consistent reaction. The second was measured
-    against THIS file's retired element-stress Neumann export; it now exports
-    -Fc/w. The numbers therefore no longer describe anything this corpus ships
-    and are not restated as if they did. They have NOT been re-measured, and no
-    replacement figure is offered here.
-
-THE NEUMANN SIDE APPLIES CONSISTENT NODAL FORCES, NOT A SURFACE-LOAD MAP.
-FEBio's <surface_load type="traction"> reads its vec3 from a SurfaceData map,
-and that map is PER FACE, not per face node: FEBioMeshDataSection creates the
-FESurfaceMap with the default FMT_MULT storage and FESurfaceMap::setValue
-writes the one parsed vector into all m_maxFaceNodes slots of the facet. A
-profile that varies along the interface is therefore applied piecewise constant
-— an O(h) representation of the boundary data. (That is read off the source,
-NOT measured here: the surface-load route was never run, so treat the O(h) as
-the standard argument rather than as a number from this test.) What this file
-does instead is exactly what `L += inner(g, v) * ds` does in the
-FEniCSx/scikit-fem siblings, evaluated here in closed form:
-
-    F_i = int_Gamma t_h . phi_i ds = sum_j M_ij t_j ,
-    M = the quad4 surface mass matrix of the interface faces,
-
-with t_h the bilinear interpolant of the partner's NODAL traction samples. The
-result is applied as <nodal_load type="nodal_force"> through a vec3 NodeData
-map. Same variational statement, no interpolation loss, and it is a standard
-FEBio load.
-
-THE BODY FORCE GOES IN THE SAME WAY, AND NOT AS <body_load>. B_SRC in the edit
-block is a NumPy function of (x, y) — the same contract the FEniCSx and
-scikit-fem siblings use — and it is integrated HERE,
-
-    F_i = int_Omega b . phi_i dV,     3x3x3 Gauss on each hex8,
-
-then applied over ALL nodes through the same vec3 NodeData map machinery, as a
-SECOND <nodal_load>. On the Neumann side the interface entry is left exactly as
-it was: FEBio adds every model load into the same residual, so the partner's
-numbers still reach the solver UNCHANGED, which is what the coupling contract
-says. Why not the deck's own body load:
-
-  * it cannot take a polynomial. FEBio 4 registers "const" and "non-const" as
-    FEBio-2 loads obsolete since 3.0, and the current "body force"
-    (FEGenericBodyForce) carries ONE vec3 `force` parameter. Replacing a
-    polynomial source by a constant is not an approximation of the problem, it
-    is a different problem. The parameter does accept a math STRING, but then
-    the source has to be written twice in two languages, and everything a
-    NumPy callable can do that a math string cannot — a table, a np.where, an
-    interpolant — is lost;
-  * and it would not mean what it says. FEElasticSolidDomain::BodyForce sets
-    the integrand to -H[a] * density * f * J0 and assembles it the way INTERNAL
-    forces are assembled, so the deck number is multiplied by the material
-    density AND enters with the opposite sign: <force>f</force> applies a
-    physical body force of MINUS f. Measured, not inferred — the two routes
-    agree only after the deck value is negated;
-  * nothing is given up by integrating here: the rule above is exact through
-    degree 5 per direction, and the statement is the same `inner(b, v) * dx`
-    the siblings assemble.
-
-b is a force per unit VOLUME, the same number the 2-D siblings take. The slab's
-volume integral, its stiffness and its interface load each carry one factor of
-ZTHICK, so it cancels and the solution stays thickness-independent.
-
-AND THE DIRICHLET SIDE MUST TAKE IT BACK OUT OF THE REACTION. m_Fr, the vector
-behind the Rx/Ry log data, is accumulated ONLY in
-FEResidualVector::Assemble(en, elm, fe) — the ELEMENT path — so internal forces
-and element-based loads land in it. A nodal load does not go through that path:
-FENodalLoad::LoadVector calls the scalar FEResidualVector::Assemble(node, dof,
-f), which adds to m_R when the equation number is >= 0 and otherwise DROPS f
-(it only hands it to the rigid solver). At a prescribed dof m_Fr is therefore
-F_int alone, while the reaction identity needs r = A u_h - b with the FULL b.
-The traction export below subtracts the body-force entries by hand — the same
-array that was written into the deck, so nothing is approximated. Omitting that
-correction leaves an error of b_i / w_i ~ |b| h / 2, i.e. O(h), on a quantity
-that is otherwise second order.
-
-That is read off the source, and then MEASURED both ways. The assembly path
-first: one constant load applied once as this file's <nodal_load> and once as
-FEBio's own <body_load> gives displacements identical to 1e-15 absolute
-(1.7e-12 relative) — so the consistent vector below IS the load FEBio would
-have integrated itself — and reactions differing by exactly the consistent body
-load, to 5e-15 on values of 5.5e-4. Then the export, on the manufactured
-solution u_x = K x y (y - 1), u_y = 0, whose trace on all three OUTER faces is
-identically zero (UDX = UDY = 0 represents it exactly) and whose source
-b = (-2 mu K x, -(mu + lam) K (2y - 1)) is a genuine polynomial. Exported
-traction against the closed-form -(sigma . n_own), the exact interface
-displacement handed in through imports.json, meshes 8/16/32/64, relative L2
-over the interface minus its two corners:
-
-    correction ON    2.51e-2  6.39e-3  1.61e-3  4.06e-4   ORDER 1.97 1.99 1.99
-    correction OFF   5.61e-2  3.32e-2  1.80e-2  9.40e-3   ORDER 0.76 0.88 0.94
-
-Second order with it, first order without it, and 23x worse on the finest mesh.
-With a CONSTANT source instead (quadratic manufactured u, where the Q1 solution
-is nodally exact) the corrected export sits at the finite-strain floor
-discussed below — 6.3e-6 relative on all four meshes, no h-dependence — while
-the uncorrected one runs 9.75e-2 4.84e-2 2.41e-2 1.20e-2, order 1.01 1.01 1.00.
-
-WHAT IS APPROXIMATED, HONESTLY.
-
-  * FEBio has no small-strain material. `isotropic elastic` is
-    St.Venant-Kirchhoff: Cauchy stress (1/J) F (lam tr(E) I + 2 mu E) F^T with E
-    the Green-Lagrange strain. It is linear elasticity only as |grad u| -> 0,
-    with a relative error O(|grad u|). If your displacements are LARGE this
-    participant is solving finite strain, which may be what you want — but then
-    it is no longer the same equation the linear siblings solve, and the
-    coupling is only consistent if the partner is also finite-strain.
-  * THERE IS AN ACCURACY FLOOR IN THE RECOVERED TRACTION, and it is a
-    U-shaped function of the displacement amplitude, so it cannot be made
-    arbitrarily small. Above it sits the O(|grad u|) nonlinearity just
-    described; below it sits roundoff, because the finite-strain kinematics
-    forms F from CURRENT nodal positions X + u with X = O(1), so |grad u|
-    carries an absolute roundoff ~1e-16 and therefore a relative one
-    ~1e-16/|grad u|. Measured at 32x32 with |grad u| = 2.8e-6 / 2.8e-7 /
-    2.8e-8 / 2.8e-9: 3.3e-6 / 3.3e-7 / 5.0e-7 / 5.4e-6 relative error in the
-    recovered traction — a minimum of ~3e-7 around |grad u| ~ 3e-7 (the exact
-    minimum was not bracketed further). Consequences:
-    scale your problem so |grad u| lands near that minimum, and do not ask the
-    `couple` driver for a residual tolerance below ~1e-7 when FEBio is the
-    DIRICHLET side — there the noisy reaction IS the exported quantity the
-    driver's residual is measured on. Measured: at tol=1e-8 the driver reported
-    NOT CONVERGED on the two finest meshes, residual stalled at 3.2e-8 and
-    4.8e-8; at tol=1e-7 the same four runs converge in 37/39/41/43 Aitken
-    iterations and every error above is unchanged to four digits. The stall is
-    arithmetic, not an unsettled interface — but the driver is right to refuse
-    to certify it, so ask for a tolerance the solver can actually reach. With
-    FEBio only on the NEUMANN side, tol=1e-8 converged on all four meshes.
-  * hex8 is TRILINEAR. In-plane that is Q1, not the P1 of the scikit-fem/FEniCSx
-    siblings, so the two sides of a coupling have different (both O(h^2))
-    discretisation errors. That is normal for a partitioned coupling and is not
-    an inconsistency.
-  * This build of FEBio has NO pardiso (NumCore registers it only under
-    #ifdef PARDISO, and FENewtonSolver's default type is the string "pardiso"
-    regardless). LINSOLVE below is therefore set to "skyline", which this build
-    always has. Leaving it unset works only where pardiso was compiled in.
-  * The Neumann side cannot use the reaction: FEBio reports Rx = Ry = 0 at
-    free dofs. What it exports instead is -Fc/w, the CONSISTENT NODAL FORCE
-    this wrapper built from the partner's traction and wrote into the deck,
-    divided by the same interface weight the Dirichlet branch uses. That is a
-    measurement of what entered the load vector — a wrong facet set, a wrong
-    Jacobian or a wrong surface mass matrix all move it — but it is NOT a
-    measurement of the discretised solution: it never passes through FEBio's
-    solver, so it cannot see a fault inside FEBio's own load path, and it is
-    close to an echo of the partner's array in everything except the assembly.
-    The interface balance check against a Dirichlet partner is therefore
-    weaker on this pairing, and the element stress is kept as the genuinely
-    independent second opinion — PRINTED with its discrepancy, not exported,
-    because it does not converge in the max norm over interior interface nodes
-    (see the note at that code).
-
-RELAXATION IS NOT PER COMPONENT. The driver applies ONE theta to the whole
-interface state and the optimal theta is set by the WORST component, so
-subdomains of the same length and Poisson ratio (proportional
-Steklov-Poincare operators) are the well-behaved case; anything else wants
-`accelerator="aitken"`.
+RELAXATION IS NOT PER COMPONENT: the driver applies one theta to the whole
+interface state; subdomains of unequal length or Poisson ratio want
+accelerator="aitken".
 """
 import json
 import os
@@ -343,17 +96,10 @@ IFACE_X   = 0.5           # the shared interface: X0/X1 for axis "x", Y0/Y1 for 
 E_MOD     = 1040.0        # Young's modulus
 NU        = 0.3           # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a QUADRATIC polynomial in (x, y):
+# (its outer face and the two faces the interface ends on), a quadratic in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*x*x + UDX[4]*x*y + UDX[5]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*x*x + UDY[4]*x*y + UDY[5]*y*y
-# (a strict superset of the 4-term form the FEniCSx/scikit-fem siblings ship:
-#  their (c0, c1, c2, c3) is this file's (UD[0], UD[1], UD[2], UD[5]). The x*x
-#  and x*y terms are what a two-material solution with a traction that VARIES
-#  along the interface needs — with only the 4-term form and no body force the
-#  exact solution is affine and the interface traction is constant, which is
-#  the one case the broken domain-average export gets right.)
-# The two subdomains must agree at the two interface corners, or the coupled
-# problem is not the un-split one.
+# The two subdomains must agree at the two interface corners.
 UDX = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 UDY = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
@@ -374,9 +120,11 @@ def B_SRC(x, y):
                 np.zeros_like(x))
 
     Write it exactly as you would for the FEniCSx or scikit-fem sibling, in the
-    same units. It does NOT become a <body_load>, which could not carry a
-    polynomial anyway: this file integrates B_SRC against the element shape
-    functions and applies the consistent nodal force vector (see the header).
+    same units. It does NOT become a <body_load>: this file integrates B_SRC
+    against the element shape functions and applies the consistent nodal force
+    vector (see the header). (A <body_load type="body force"> with a math
+    expression also runs on this build, per unit mass; this contract does not
+    use it.)
     """
     return np.zeros_like(x), np.zeros_like(y)
 NX, NY    = 16, 16        # this subdomain's OWN mesh; need not match the partner
@@ -878,8 +626,8 @@ U = np.array([[0.5 * (ulog[nb][c] + ulog[nt][c]) for c in (0, 1)]
               for (nb, nt) in mesh.iface_pair], float)
 
 if SIDE == "dirichlet":
-    # THE CONSISTENT (REACTION) TRACTION — see the header. Rx/Ry are m_Fr at
-    # PRESCRIBED dofs, which is exactly r = A u_h - b there.
+    # THE CONSISTENT (REACTION) TRACTION (header): the node log's Rx, Ry are
+    # r = A u_h - b at the PRESCRIBED dofs.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     rlog = parse_log(LOG_R, 2)
     if not rlog:
@@ -891,11 +639,8 @@ if SIDE == "dirichlet":
     R = np.array([[rlog[nb][c] + rlog[nt][c] for c in (0, 1)]
                   for (nb, nt) in mesh.iface_pair], float)
     W = np.array([w[nb] + w[nt] for (nb, nt) in mesh.iface_pair], float)
-    # r = A u_h - b, and b INCLUDES THE BODY FORCE. FEBio's Rx/Ry give m_Fr,
-    # which a <nodal_load> never reaches at a prescribed dof (see the header),
-    # so what came out of the log is A u_h alone and the consistent body load
-    # has to come off here. It is the same array that went into the deck — an
-    # exact bookkeeping correction, not a model of one.
+    # b INCLUDES THE BODY FORCE, and a <nodal_load> never reaches Rx, Ry at a
+    # prescribed dof: its consistent load, the array the deck carries, comes off here.
     if f_bd is not None:
         R -= np.array([[f_bd[nb][c] + f_bd[nt][c] for c in (0, 1)]
                        for (nb, nt) in mesh.iface_pair], float)
@@ -914,37 +659,12 @@ if SIDE == "dirichlet":
             if j not in good:
                 Q[j] = Q[good[np.argmin(np.abs(good - j))]]
 else:
-    # NEUMANN SIDE: TWO tractions, and they answer two different questions.
-    #
-    # FEBio reports Rx = Ry = 0 on these dofs — they are free — so the
-    # Dirichlet branch's route is closed here. This branch used to answer that
-    # with the element-stress recovery alone, and it rejected the alternative
-    # for a reason that is half right and worth keeping: an ECHO of the
-    # imported array would be algebraically the exact consistent traction of
-    # this side, and worthless as evidence, because it never passes through the
-    # discretisation. It would make the interface balance check an identity —
-    # ~1e-16 on any coupling including a broken one — and that check is the one
-    # thing that separates an interface-mechanism mutation (self-converges at
-    # ~1.85, looks correct) from a correct run.
-    #
-    # WHAT IS EXPORTED IS NOT THAT ECHO. `Fc` is the consistent nodal force
-    # vector this participant BUILT and wrote into the deck,
-    #     Fc_i = int_Gamma t_h . phi_i ds = sum_j M_ij t_j
-    # with M the quad4 surface mass matrix of the interface faces it actually
-    # meshed. Dividing by the same weight w_i the Dirichlet branch uses gives
-    # -Fc_i/w_i, and a wrong facet set, a wrong Jacobian or a wrong mass matrix
-    # all move it. It is the same status as summing a condition's own
-    # right-hand side: a measurement of what entered the load vector, not a
-    # copy of what arrived in imports.json.
-    #
-    # THE HONEST LIMIT. For the codes that assemble in-process the residual
-    # A u - b_vol passes through the SOLVER too, so it also catches an error in
-    # applying the load. Here it does not: the export is built from the same
-    # array the deck was written from, so it cannot see a fault inside FEBio's
-    # own load path. That path is pinned separately — the header measures this
-    # file's <nodal_load> against FEBio's own <body_load> and gets displacements
-    # identical to 1e-15 absolute — and the element-stress recovery below stays
-    # as a genuinely independent second opinion, printed with its discrepancy.
+    # NEUMANN SIDE. FEBio reports Rx = Ry = 0 on these free dofs, so the export
+    # is -Fc_i / w_i: Fc the consistent nodal force this side BUILT from the
+    # partner's traction with its own interface faces and wrote into the deck,
+    # w the same weights as the Dirichlet branch. A wrong facet set, Jacobian or
+    # mass matrix moves it; a fault inside FEBio's own load path does not, and
+    # the element-stress traction below is the independent second opinion.
     w = mesh.iface_weights()
     Fq = np.array([[Fc[nb][c] + Fc[nt][c] for c in (0, 1)]
                    for (nb, nt) in mesh.iface_pair], float)
@@ -962,17 +682,10 @@ else:
             if jj not in good:
                 Q[jj] = Q[good[np.argmin(np.abs(good - jj))]]
 
-    # THE INDEPENDENT SECOND OPINION, AND WHAT IT IS WORTH. This side's OWN
-    # stress field, from FEBio's element sx/sxy averaged onto the interface
-    # nodes. It owes nothing to the partner's numbers, which is what makes the
-    # comparison below non-circular — but it is COARSE. This file used to call
-    # it O(h) and export it; measured against a known imposed traction
-    # t = (2 + 3 sin 4y, 1 - 2 cos 3y) on 8/16/32 meshes it gives max errors
-    # 1.638, 1.440, 1.500 — order 0.19 then -0.06, i.e. it does not converge in
-    # this norm at all, the same shape as the projected boundary gradient the
-    # FEniCSx sibling retired. So it is a gross-error detector and nothing
-    # finer: expect a discrepancy of tens of percent on a correct run, and read
-    # a discrepancy of ORDER ONE as a real fault.
+    # THE INDEPENDENT SECOND OPINION: this side's own element stresses averaged
+    # onto the interface nodes. It owes nothing to the partner's numbers, and it
+    # is coarse (it does not converge in the max norm): tens of percent from the
+    # export is normal on a correct run, a discrepancy of order one is a fault.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     elog = parse_log(LOG_E, 2)
     if not elog:
@@ -1064,9 +777,10 @@ except NameError:
           f"node data, so there is no node count to report. Your task's "
           f"execution log needs `NDOF = <integer>` on a line of its own.")
 
-# ── EXPORT SELF-CHECK ─ keep this block. It stops three exports that look fine
+# ── EXPORT SELF-CHECK ─ keep this block. It stops four exports that look fine
 #    and are worthless: non-finite values, an imported load that never entered the
-#    system, and the partner's traction negated instead of recovered.
+#    system, the partner's traction negated instead of recovered, and a Dirichlet
+#    side that exports exactly 0.0 where its own data make a reaction.
 _chk_vals = np.asarray(U, float).ravel()
 _chk_flux = np.asarray(Q, float).ravel()
 if not (np.isfinite(_chk_vals).all() and np.isfinite(_chk_flux).all()):
@@ -1088,10 +802,28 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied load can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \
-        and np.array_equal(_chk_flux, -_chk_qin):
+        and np.any(_chk_flux) and np.array_equal(_chk_flux, -_chk_qin):
     raise SystemExit("EXPORT SELF-CHECK: the exported traction is the partner's "
                      "array negated, bit for bit: a copy, not a recovery from "
                      "this side's own assembled system")
+# (Dirichlet role: a traction of exactly 0.0 at every interface point is what a
+#  side free of stress exports -- no body force, and a displacement handed in
+#  that is one rigid motion. With either, the reaction is not zero.)
+_chk_rigid = 0.0              # how far the displacement handed in is from one rigid motion
+for _d in _chk_imp.values():
+    _u, _p = np.asarray(_d.get("values") or [], float), np.asarray(_d.get("coordinates") or [], float)
+    if _u.ndim == 2 and _u.shape[1] == 2 and _p.shape == _u.shape and len(_u) > 2 and np.any(_u):
+        _m = np.zeros((2 * len(_u), 3))
+        _m[0::2, 0], _m[1::2, 1], _m[0::2, 2], _m[1::2, 2] = 1.0, 1.0, -_p[:, 1], _p[:, 0]
+        _fit = _m @ np.linalg.lstsq(_m, _u.ravel(), rcond=None)[0] - _u.ravel()
+        _chk_rigid = max(_chk_rigid, float(np.abs(_fit).max() / np.abs(_u).max()))
+_chk_body = f_bd is not None
+if SIDE == "dirichlet" and _chk_flux.size and not np.any(_chk_flux) and (_chk_body or _chk_rigid > 1e-9):
+    raise SystemExit("EXPORT SELF-CHECK: the exported traction is exactly 0.0 at every interface "
+                     "point, while " + ("this side carries a body force" if _chk_body else
+                                        f"the displacement it was handed is not one rigid motion (it "
+                                        f"differs from the nearest one by {_chk_rigid:.1e} of its size)")
+                     + ": a reaction recovered from this side's assembled system is not zero there")
 
 Path("exports.json").write_text(json.dumps({
     "field_name": "displacement",

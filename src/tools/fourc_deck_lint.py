@@ -266,8 +266,9 @@ def python_stop_lines(log_text: str) -> str:
     return " | ".join(tail[-3:])
 
 
-def lint_deck(text: str) -> list[str]:
-    """Deck defects measured on worker decks (each one made 4C stop or solve the wrong problem)."""
+def lint_deck(text: str, cfg: dict | None = None) -> list[str]:
+    """Deck defects measured on worker decks (each one made 4C stop or solve the wrong problem). `cfg` is
+    the config.json beside the deck when the caller has it: its `iface` names a box side's interface."""
     why: list[str] = []
     why += _yaml_parse_error(text)
     secs = re.findall(r"^([A-Z][A-Z0-9 _/.:-]*?):\s*$", text, re.M)
@@ -351,6 +352,7 @@ def lint_deck(text: str) -> list[str]:
     why += _two_conditions_on_one_entity(text)
     why += _coupvariable_in_the_wrong_section(text)
     why += _flux_calc_off_the_interface(text)
+    why += _box_side_facts(text, cfg)
     why += _bad_hex8_slabs(text)
     why += _interior_lines(text)
     why += _double_star_in_functions(text)
@@ -643,6 +645,232 @@ def _flux_calc_off_the_interface(text: str) -> list[str]:
             f"DLINE-NODE TOPOLOGY"]
 
 
+_BC_HEAD = re.compile(r"DESIGN (POINT|LINE) (?:TRANSPORT )?(DIRICH|NEUMANN) CONDITIONS")
+_BOX_EDGES = {"left": (0, 0), "right": (0, 1), "bottom": (1, 0), "top": (1, 1)}   # (fixed axis, low or high end)
+
+
+def _box_side(text: str, cfg: dict | None = None) -> dict | None:
+    """The 2-D box side a Scalar_Transport deck states, or None when the deck is not one.
+
+    The box is the deck's own: the extent of its NODE COORDS, which its 2-D elements must tile exactly (their
+    areas add up to the box's; an L-shape or a hole does not). The interface is the config's `iface` (left,
+    right, bottom or top: what the participant reads), else the deck's own statement -- the one edge its SCATRA
+    FLUX CALC line runs along, else the one edge whose nodes between its ends hold all its POINT entries. Judged
+    only for a coupling side: a config naming `iface`, or a deck with a SCATRA FLUX CALC line and POINT
+    DIRICH/NEUMANN entries (the route a side takes its imports by). DIRICH and TRANSPORT DIRICH both count: a
+    Scalar_Transport run applies either (measured on this binary: a left edge held at 2.0 through each)."""
+    if "Scalar_Transport" not in text:
+        return None
+    xyz = {}
+    for n, x, y, z in re.findall(r'"NODE\s+(\d+)\s+COORD\s+(\S+)\s+(\S+)\s+(\S+)"', text):
+        try:
+            xyz[int(n)] = (float(x), float(y), float(z))
+        except ValueError:
+            continue
+    if len(xyz) < 4:
+        return None
+    xs, ys, zs = zip(*xyz.values())
+    lo, hi = (min(xs), min(ys)), (max(xs), max(ys))
+    span = max(hi[0] - lo[0], hi[1] - lo[1])
+    if min(hi[0] - lo[0], hi[1] - lo[1]) <= 0 or max(zs) - min(zs) > 1e-9 * span:
+        return None
+    area = 0.0
+    for kind, ids in re.findall(r'"\s*\d+\s+\w+\s+(QUAD4|QUAD8|QUAD9|TRI3|TRI6)\s+((?:\d+\s+)+)', text):
+        cn = [int(i) for i in ids.split()][:4 if kind.startswith("QUAD") else 3]
+        if any(i not in xyz for i in cn):
+            return None
+        p = [xyz[i] for i in cn]
+        area += abs(0.5 * sum(p[k][0] * p[(k + 1) % len(p)][1] - p[(k + 1) % len(p)][0] * p[k][1] for k in range(len(p))))
+    box = (hi[0] - lo[0]) * (hi[1] - lo[1])
+    if abs(area - box) > 1e-6 * box:
+        return None
+    tol = 1e-9 * span
+    on = {}
+    for e, (a, end) in _BOX_EDGES.items():
+        v = (lo, hi)[end][a]
+        on[e] = sorted((n for n, c in xyz.items() if abs(c[a] - v) <= tol), key=lambda n, a=a: xyz[n][1 - a])
+        if len(on[e]) < 2:
+            return None
+    topo: dict = {}
+    for n, kind, e in re.findall(r'"NODE\s+(\d+)\s+(DNODE|DLINE)\s+(\d+)"', text):
+        topo.setdefault((kind, int(e)), set()).add(int(n))
+    conds = []
+    for b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", text, flags=re.M):
+        head = b.split(":", 1)[0].strip()
+        m = _BC_HEAD.fullmatch(head)
+        if not m and head != "SCATRA FLUX CALC LINE CONDITIONS":
+            continue
+        geo, kind = (m.group(1), m.group(2)) if m else ("LINE", "FLUX")
+        for entry in re.split(r"^\s*-\s", b, flags=re.M)[1:]:
+            e = re.search(r"\bE:\s*(\d+)", entry)
+            sw = re.search(r"ONOFF:\s*\[([^\]]*)\]", entry)
+            if not e or (sw and "1" not in [x.strip() for x in sw.group(1).split(",")]):
+                continue                           # no id, or switched off: it holds and loads nothing
+            val = re.search(r"VAL:\s*\[([^\]]*)\]", entry)
+            fn = re.search(r"FUNCT:\s*\[([^\]]*)\]", entry)
+            conds.append({"geo": geo, "kind": kind, "e": int(e.group(1)),
+                          "val": val.group(1).split(",")[0].strip() if val else "",
+                          "const": not fn or fn.group(1).split(",")[0].strip() in ("0", ""),
+                          "nodes": topo.get(("DNODE" if geo == "POINT" else "DLINE", int(e.group(1))), set())})
+    mids = {e: set(ns[1:-1]) for e, ns in on.items()}
+    points = set().union(*[c["nodes"] for c in conds if c["geo"] == "POINT"])
+    flux = set().union(*[c["nodes"] for c in conds if c["kind"] == "FLUX"])
+    iface = str((cfg or {}).get("iface") or "").strip().lower()
+    said = f"config iface = {iface}"
+    if iface not in on:
+        if not (flux and points):
+            return None
+        iface, said = "", ""
+        along = [e for e, ns in on.items() if any(a in flux and b in flux for a, b in zip(ns, ns[1:]))]
+        held_at = [e for e in on if len(points & mids[e]) >= 2 and points <= set(on[e])]
+        if len(along) == 1:
+            iface, said = along[0], f"the edge the SCATRA FLUX CALC line runs along, {along[0]}"
+        elif len(held_at) == 1:
+            iface, said = held_at[0], f"the edge its POINT entries sit on, {held_at[0]}"
+    return {"xyz": xyz, "lo": lo, "hi": hi, "on": on, "mids": mids, "conds": conds, "flux": flux,
+            "iface": iface, "said": said}
+
+
+def _edge_at(side: dict, e: str) -> str:
+    a, end = _BOX_EDGES[e]
+    return f"{'xy'[a]} = {(side['lo'], side['hi'])[end][a]:g}"
+
+
+def _stretches(side: dict, e: str, miss: set) -> str:
+    """The runs of `miss` along edge e, in the deck's own coordinates ('y = 0.2 .. 0.4; y = 0.7')."""
+    a = 1 - _BOX_EDGES[e][0]
+    runs, cur = [], []
+    for n in side["on"][e]:
+        if n in miss:
+            cur.append(n)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return "; ".join(f"{'xy'[a]} = {side['xyz'][r[0]][a]:g}" + (f" .. {side['xyz'][r[-1]][a]:g}" if len(r) > 1 else "")
+                     for r in runs[:3]) + ("; ..." if len(runs) > 3 else "")
+
+
+def _box_side_facts(text: str, cfg: dict | None = None) -> list[str]:
+    """What the conditions of a 2-D box side reach, counted from the deck (see _box_side).
+
+    MEASURED on two recorded coupled decks that finished normally and coupled on with no word for half an
+    hour: one held its interface at the constant outer value (one DLINE on the interface and on the opposite
+    edge, under one DESIGN LINE DIRICH and the flux-calc condition), and one left part of a held outer edge
+    free (its DLINE stopped short of the edge's far end). The flux-calc rule above stays silent below three
+    POINT DIRICH nodes, and nothing else looked. The facts, each stated only where the deck states enough: an
+    edge the conditions reach in part (a free interface corner on a held edge among them); a line on separate
+    stretches of the boundary, or with nodes inside the box (measured: outer lines built from consecutive node
+    ids took a row for a column); an interface (or, with none stated, a flux-calc line) held at one constant;
+    POINT entries that reach part of the interface."""
+    side = _box_side(text, cfg)
+    if side is None:
+        return []
+    on, mids, conds, iface = side["on"], side["mids"], side["conds"], side["iface"]
+    on_set = {e: set(ns) for e, ns in on.items()}
+    bc = [c for c in conds if c["kind"] != "FLUX"]
+    covered = set().union(*[c["nodes"] for c in bc])
+    out = []
+    for e in on:
+        if e == iface or not covered & mids[e]:
+            continue                        # the interface is counted below; an edge with no condition is natural
+        miss = [n for n in on[e] if n not in covered]
+        if not miss:
+            continue
+        by = [f"{c['geo']} {c['kind']} E {c['e']} on {len(c['nodes'] & on_set[e])}" for c in bc if c["nodes"] & on_set[e]]
+        k = len(on[e]) - len(miss)
+        out.append(f"BOX EDGE {e} ({_edge_at(side, e)}): DIRICH/NEUMANN conditions reach {k} of its {len(on[e])} "
+                   f"nodes ({', '.join(by[:4])}{', ...' if len(by) > 4 else ''}) and the other {len(miss)} "
+                   f"carr{'ies' if len(miss) == 1 else 'y'} none ({_stretches(side, e, set(miss))}). 4C leaves a "
+                   f"boundary node without a condition natural (zero flux), so this edge is held or loaded on {k} "
+                   f"nodes and natural on {len(miss)}. A DLINE "
+                   f"lists every node of its edge, both ends included")
+    # a line on separate stretches of the boundary: the segments of the boundary loop inside it, in runs
+    loop = on["bottom"] + on["right"][1:] + on["top"][::-1][1:] + on["left"][::-1][1:-1]
+    seg_edge = [next((e for e in on if loop[i] in on_set[e] and loop[(i + 1) % len(loop)] in on_set[e]), "")
+                for i in range(len(loop))]
+    named: dict = {}
+    for c in conds:
+        if c["geo"] == "LINE":
+            named.setdefault(c["e"], []).append(c)
+    boundary = set().union(*on_set.values())
+    inside_only: list = []                  # (DLINE, its nodes inside the box, all its nodes, condition families)
+    for d, cs in sorted(named.items()):
+        ns = cs[0]["nodes"]
+        inner = len([n for n in ns if n in side["xyz"] and n not in boundary])   # off every edge of the box
+        inside = [loop[i] in ns and loop[(i + 1) % len(loop)] in ns for i in range(len(loop))]
+        runs, cur = [], []
+        if any(inside) and not all(inside):
+            first = inside.index(False)
+            for k in range(1, len(loop) + 1):
+                i = (first + k) % len(loop)
+                if inside[i]:
+                    cur.append(i)
+                elif cur:
+                    runs.append(cur)
+                    cur = []
+            if cur:
+                runs.append(cur)
+        edges = [sorted({seg_edge[i] for i in r}, key=list(on).index) for r in runs]
+        split = len(runs) >= 2 and (any(c["kind"] == "FLUX" for c in cs)
+                                    or (iface and any(iface in es for es in edges) and any(set(es) - {iface} for es in edges)))
+        names = ", ".join(dict.fromkeys("SCATRA FLUX CALC" if c["kind"] == "FLUX" else f"DESIGN {c['geo']} {c['kind']}"
+                                        for c in cs))
+        if not split:
+            if inner:
+                inside_only.append((d, inner, len(ns), names))
+            continue                        # two held outer edges on one line: one value on both is allowed
+        where = " and ".join(f"the {' and '.join(es)} edge{'s' if len(es) > 1 else ''} at "
+                             f"{', '.join(_edge_at(side, e) for e in es)} ({len(r) + 1} nodes)" for es, r in zip(edges, runs))
+        out.append(f"SEPARATE STRETCHES: DLINE {d} lies on {len(runs)} separate stretches of the box boundary, {where}"
+                   + (f", and {inner} of its nodes lie inside the box, off every edge" if inner else "")
+                   + f". Every condition filed on it ({names}, E {d}) acts on all of them"
+                   + (f"; the interface is the {iface} edge" if iface else "")
+                   + ". A line meant for one edge lists the nodes of that edge only")
+    if inside_only:                         # one finding for them all: a numbering slip repeats per line
+        one = len(inside_only) == 1
+        out.append(f"LINE INSIDE THE BOX: DLINE {', '.join(str(d) for d, *_ in inside_only[:8])}"
+                   f"{', ...' if len(inside_only) > 8 else ''} {'has' if one else 'have'} "
+                   f"{sum(i for _, i, _, _ in inside_only)} of {'its' if one else 'their'} "
+                   f"{sum(n for _, _, n, _ in inside_only)} nodes inside the box, off every edge, and every condition "
+                   f"filed on {'it' if one else 'them'} ({', '.join(dict.fromkeys(nm for *_, nm in inside_only))}) acts "
+                   f"there" + (f"; the interface is the {iface} edge" if iface else "")
+                   + ". A line meant for one edge lists the nodes of that edge only")
+    # the interface -- or, with none stated, the flux-calc line -- held at one constant
+    pdir = set().union(*[c["nodes"] for c in conds if c["geo"] == "POINT" and c["kind"] == "DIRICH"])
+    if iface:
+        target, label = mids[iface], f"the interface ({side['said']}, {_edge_at(side, iface)})"
+    else:
+        target = side["flux"] & set().union(*mids.values())
+        label = ("the SCATRA FLUX CALC line DLINE "
+                 + ", ".join(str(c["e"]) for c in conds if c["kind"] == "FLUX"))
+    held_const = False
+    for c in conds:
+        held = (c["nodes"] & target) - pdir if c["geo"] == "LINE" and c["kind"] == "DIRICH" and c["const"] else set()
+        if held:
+            held_const = True
+            out.append(f"HELD AT ONE VALUE: {label} is held at the one value VAL [{c['val']}] (FUNCT 0) by DESIGN "
+                       f"LINE DIRICH E {c['e']} on {len(held)} of its {len(target)} nodes between the box corners, and "
+                       f"no POINT DIRICH overrides them there: those nodes carry {c['val']} whatever the partner sends. "
+                       f"A Dirichlet side holds each interior interface node at its own imported value (one DESIGN "
+                       f"POINT DIRICH each); a Neumann side holds none of them and loads them")
+            break
+    # POINT entries that reach part of the interface
+    if iface and not held_const:
+        pts = [c for c in conds if c["geo"] == "POINT" and c["nodes"] & mids[iface]]
+        reach = set().union(*[c["nodes"] for c in pts]) & mids[iface]
+        if 0 < len(reach) < len(mids[iface]):
+            miss = mids[iface] - reach
+            what = "no condition" if not miss & covered else "no POINT entry"
+            out.append(f"INTERFACE POINT VALUES: POINT {'/'.join(sorted({c['kind'] for c in pts}))} entries reach "
+                       f"{len(reach)} of the {len(mids[iface])} nodes between the ends of the interface "
+                       f"({side['said']}, {_edge_at(side, iface)}); the other {len(miss)} "
+                       f"({_stretches(side, iface, miss)}) carry {what}. Each interior interface node takes the "
+                       f"partner's datum through a POINT entry of its own")
+    return out
+
+
 def _yaml_parse_error(text: str) -> list[str]:
     """The deck as YAML: 4C's reader is a YAML parser, and a structural slip (an entry's keys indented
     unevenly, a bare token where a mapping was open) stops it with 'ERROR: parse error <line>:<col>'
@@ -910,7 +1138,7 @@ def side_dir_report(side: Path) -> dict:
             txt = dk.read_text(errors="ignore")
         except OSError:
             continue
-        why = lint_deck(txt) + unknown_sections(txt, valid, elements) + material_defects(txt, g.get("materials", {}))
+        why = lint_deck(txt, cfg) + unknown_sections(txt, valid, elements) + material_defects(txt, g.get("materials", {}))
         if why:
             defects[dk.name] = why
     return {"finished": finished, "monitors": monitors, "errors": errors, "defects": defects,

@@ -61,7 +61,7 @@ DUNE-FEM SPECIFICS that this file exists to get right:
     all y) reading produces an interface of the right length whose every number
     is wrong, so the layout is ASSERTED at run time below rather than assumed.
   * `structuredGrid` gives a cube grid, i.e. Q1 elements here. The interface
-    nodes are the y-line of nodes at x = IFACE_X.
+    nodes are the line of nodes at x = IFACE_X (y = IFACE_X for axis "y").
   * DUNE compiles the UFL forms with a C++ JIT on first use. The first run of a
     new form takes tens of seconds to minutes; that is NOT a hang. Every form
     below is therefore built ONCE and kept fixed across coupling iterations —
@@ -102,7 +102,7 @@ IFACE_X   = 0.55          # the shared interface: X0/X1 for axis "x", Y0/Y1 for 
 E_MOD     = 1000.0        # Young's modulus
 NU        = 0.3           # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 # The two subdomains must agree at the two interface corners, or the coupled
@@ -301,25 +301,26 @@ if not (np.allclose(mark[0::2], 1.0) and np.allclose(mark[1::2], 2.0)):
     sys.exit("dune-fem vector dof layout is not the expected interleaved "
              "node*2+component; the interface export would be scrambled")
 xd, yd = xy[0::2], xy[1::2]                # per-NODE coordinates
+pa, pl = (xd, yd) if AX == 0 else (yd, xd) # across the interface, and along it
 
-iface_n = np.where(np.abs(xd - IFACE_X) < TOL)[0]
+iface_n = np.where(np.abs(pa - IFACE_X) < TOL)[0]
 if len(iface_n) == 0:
-    sys.exit(f"no interface dofs at x={IFACE_X}: this subdomain spans "
-             f"[{X0},{X1}], so nothing is shared with the partner")
-iface_n = iface_n[np.argsort(yd[iface_n])]              # constant order, always
-y_if = yd[iface_n]
-outer_n = np.where((np.abs(xd - OUTER_X) < TOL) |
-                   (np.abs(yd - Y0) < TOL) | (np.abs(yd - Y1) < TOL))[0]
+    sys.exit(f"no interface dofs at {'xy'[AX]}={IFACE_X}: this subdomain spans "
+             f"[{LO},{HI}] in {'xy'[AX]}, so nothing is shared with the partner")
+iface_n = iface_n[np.argsort(pl[iface_n])]              # constant order, always
+y_if = pl[iface_n]
+outer_n = np.where((np.abs(pa - OUTER_X) < TOL) |
+                   (np.abs(pl - ALO) < TOL) | (np.abs(pl - AHI) < TOL))[0]
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES.
-# (IFACE_X, Y0) and (IFACE_X, Y1) sit on a y-face, which carries a prescribed
-# displacement in the un-split problem, so they stay Dirichlet in BOTH
-# subproblems. Handing them to the interface leaves them unconstrained on the
-# Neumann side: that subproblem is still well posed, still converges, and lands
-# a few percent off — measured on the sibling participants, 4.7% in the
+# The two ends of the interface sit on the faces it ends on, which carry a
+# prescribed displacement in the un-split problem, so they stay Dirichlet in
+# BOTH subproblems. Handing them to the interface leaves them unconstrained on
+# the Neumann side: that subproblem is still well posed, still converges, and
+# lands a few percent off — measured on the sibling participants, 4.7% in the
 # interface displacement and 28% in the interface traction, on a coupling whose
 # residual reached 1e-10 and whose flux balanced. They are still EXPORTED; they
 # are just not interface-imposed.
-corner = (np.abs(y_if - Y0) < TOL) | (np.abs(y_if - Y1) < TOL)
+corner = (np.abs(y_if - ALO) < TOL) | (np.abs(y_if - AHI) < TOL)
 iface_bc_n = iface_n[~corner]
 
 u, v = TrialFunction(space), TestFunction(space)
@@ -362,10 +363,10 @@ b_vol = dot(bfun, v) * dx
 b = b_vol
 
 # ── boundary indicators ───────────────────────────────────────────────────
-on_outer = conditional(lt(abs(x[0] - OUTER_X), EPS), 1,
-                       conditional(lt(abs(x[1] - Y0), EPS), 1,
-                                   conditional(lt(abs(x[1] - Y1), EPS), 1, 0)))
-on_iface = conditional(lt(abs(x[0] - IFACE_X), EPS), 1, 0)
+on_outer = conditional(lt(abs(x[AX] - OUTER_X), EPS), 1,
+                       conditional(lt(abs(x[AL] - ALO), EPS), 1,
+                                   conditional(lt(abs(x[AL] - AHI), EPS), 1, 0)))
+on_iface = conditional(lt(abs(x[AX] - IFACE_X), EPS), 1, 0)
 
 # ONE Dirichlet carrier for BOTH the outer data and the imported interface
 # displacement. Its dofs change every iteration; the FORM never does.

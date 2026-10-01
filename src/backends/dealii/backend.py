@@ -159,6 +159,51 @@ def resolve_dealii_root(candidate: Path) -> Optional[Path]:
     return unreadable
 
 
+def _describe_exit(rc: int) -> str:
+    """The program's return code in words; a signal is named, and a crash is
+    said to be the program's (measured: code 139 / -11 is a segfault inside it)."""
+    import signal as _signal
+    sig = -rc if rc < 0 else (rc - 128 if rc > 128 else 0)
+    try:
+        name = _signal.Signals(sig).name if sig else ""
+    except ValueError:
+        name = ""
+    if not name:
+        return f"the program exited with return code {rc}"
+    what = ("a crash inside your program, not an install fault. This deal.II may be a Release "
+            "build that asserts nothing: an FEValues accessor whose update flag was not requested, "
+            "or an unsized index vector, crashes with no message. Add "
+            "target_compile_definitions(<target> PRIVATE DEBUG) after deal_ii_setup_target and "
+            "run again: deal.II then names a missing flag itself"
+            if name in ("SIGSEGV", "SIGBUS", "SIGFPE", "SIGABRT", "SIGILL") else "")
+    return f"the program was KILLED BY {name} (return code {rc})" + (f": {what}." if what else ".")
+
+
+def build_tree_note() -> str:
+    """One line naming the deal.II tree to build against on this install, and a
+    system package that is not it; '' when there is no tree to name."""
+    try:
+        root = _find_dealii()
+    except DealiiRootOverrideError as exc:
+        return str(exc)
+    if root is None:
+        return ""
+    verdict, detail = verify_dealii_install(root)
+    note = (f"{detail.split(' (')[0]} at {root}" if verdict else f"deal.II at {root}") + \
+        f": build against THIS tree, DEAL_II_DIR={root}"
+    sys_cfg = Path("/usr/include/deal.II/base/config.h")
+    try:
+        sys_ver = next((ln.split('"')[1] for ln in sys_cfg.read_text().splitlines()
+                        if "DEAL_II_PACKAGE_VERSION" in ln and '"' in ln), "")
+    except OSError:
+        sys_ver = ""
+    if sys_ver and Path(root).resolve() != Path("/usr"):
+        note += (f". The system package at /usr (deal.II {sys_ver}) is NOT the one to build "
+                 f"against: a compile that reads /usr/include/deal.II found that package, or ran "
+                 f"without deal_ii_setup_target")
+    return note
+
+
 def _find_dealii() -> Optional[Path]:
     """Locate a deal.II installation root.
 
@@ -838,7 +883,12 @@ class DealiiBackend(SolverBackend):
             job.return_code = proc.returncode
             job.status = "completed" if proc.returncode == 0 else "failed"
             if proc.returncode != 0:
-                job.error = stderr.decode(errors="replace")[-2000:]
+                # THE RETURN CODE AND THE SIGNAL, ALWAYS. This deal.II is a Release build
+                # and asserts nothing: an FEValues accessor whose update flag was not
+                # requested segfaults with an empty stderr, and a bare "failed" read as
+                # an install fault (measured: a run gave up 0.4 min after one).
+                job.error = (_describe_exit(proc.returncode) + "\n"
+                             + stderr.decode(errors="replace")[-2000:]).strip()
             (work_dir / "stdout.log").write_text(stdout.decode(errors="replace"))
             (work_dir / "stderr.log").write_text(stderr.decode(errors="replace"))
         except asyncio.TimeoutError:

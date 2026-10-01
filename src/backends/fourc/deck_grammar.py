@@ -463,7 +463,8 @@ in one call.
     - "NODE 7 DVOL 1"
     - "NODE 8 DVOL 1"
 
-  Run it as `stdbuf -oL -eL <4C> deck.4C.yaml out`; it leaves out-vtk-files/
+  Run it as `stdbuf -oL -eL <4C> deck.4C.yaml out` from INSIDE your participant
+  script (couple() and the critic review take that script, never the binary); it leaves out-vtk-files/
   (structure-*.vtu with the displacement, thermo-*.vtu with the temperature)
   and one out-<id>_monitor_dbc.yaml per monitored point condition with the
   reaction force. The thermal DIRICH entries write no reaction, so a

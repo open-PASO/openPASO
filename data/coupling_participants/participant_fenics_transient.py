@@ -191,10 +191,10 @@ the recovery looks like a 1.5-order scheme. Copying a neighbour into them does
 not fix it either; that value is O(h) at the end too.
   The mechanism is NOT established, and one measurement says it is not the
   obvious one. The obvious candidate is the half-width support at an end node
-  making -r_i/w_i a one-sided average, but the SAME recovery in
-  heat_iface_dealii_transient.cc, on the SAME manufactured problem, is 2.00 at
-  the end nodes as well as inside — the difference there is Q1 quadrilaterals
-  against these P1 triangles. So this is a property of the corner
+  making -r_i/w_i a one-sided average, but the SAME recovery on Q1
+  quadrilaterals (measured with deal.II on the SAME manufactured problem) is
+  2.00 at the end nodes as well as inside — the difference there is Q1
+  quadrilaterals against these P1 triangles. So this is a property of the corner
   discretisation, not of the reaction formula. Treat the end nodes as suspect,
   and measure rather than assume on your own mesh.
   (The shipped corner guard is a DIFFERENT thing: it replaces interface nodes
@@ -305,8 +305,6 @@ Q_GUESS   = 0.0           # iteration-1 fallback interface flux. There is no
                           # iteration-1 trace is that value held constant.
 # ─────────────────────────────────────────────────────────────────────────
 
-DT = (T_END - T_START) / N_STEPS
-TIMES = T_START + DT * np.arange(N_STEPS + 1)      # t^0 ... t^N
 OUTER_X = X0 if IFACE_X == X1 else X1
 S = 1.0 if IFACE_X > OUTER_X else -1.0     # outward normal at interface = S*e_x
 
@@ -373,7 +371,8 @@ def sample_trace(imp, key, fallback, y):
                  f"levels, this participant's window has N_STEPS={N_STEPS}. The "
                  f"exchange carries no time axis, so a trace of the WRONG "
                  f"LENGTH is the only symptom a mismatched window shows. Give "
-                 f"both participants the same T_START/T_END/N_STEPS/THETA.")
+                 f"both participants the same T_START/T_END/N_STEPS/THETA, and "
+                 f"the same n_steps in config.json when a level sets it.")
     o = np.argsort(ys)
     return np.column_stack([np.interp(y, ys[o], vs[o, n])
                             for n in range(N_STEPS)])
@@ -381,10 +380,12 @@ def sample_trace(imp, key, fallback, y):
 
 imp = read_imports()
 
-# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
-#    next to this script overrides the mesh knobs and names the level. The dumps
-#    at the foot of this file carry that level in their NAME, so a mesh study
-#    leaves one file per level instead of the fine mesh overwriting the coarse.
+# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..,
+#    "n_steps": ..} next to this script overrides the mesh knobs and the number of
+#    time steps, and names the level. A study that refines dt with h sets n_steps
+#    per level, on BOTH sides. The dumps at the foot of this file carry that level
+#    in their NAME, so a mesh study leaves one file per level instead of the fine
+#    mesh overwriting the coarse.
 LEVEL = 1
 if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
     try:
@@ -393,8 +394,11 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
+        N_STEPS = int(_cfg.get("n_steps", N_STEPS))
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
+DT = (T_END - T_START) / N_STEPS                   # after the level rule: n_steps sets it
+TIMES = T_START + DT * np.arange(N_STEPS + 1)      # t^0 ... t^N
 
 # MAKE THIS CODE SPEAK, BEFORE THE SOLVE RUNS. It is silent by default, and a
 # per-level run log carrying no line the solver itself emitted cannot
@@ -482,6 +486,33 @@ tags_if = dmesh.meshtags(domain, fdim, np.sort(facets_if),
 ds_if = ufl.Measure("ds", domain=domain, subdomain_data=tags_if)(7)
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
+# ── THE INTERFACE DOFS ARE THE INTERFACE NODES' OWN (served) ─ keep this block.
+#    Every served line below applies the trace, reads the flux and writes the
+#    values THROUGH iface_dofs, so a list naming other dofs exports their values
+#    under the interface's coordinates -- and a check reading the same list
+#    agrees with it. The nodes are read from the mesh here, never from the list.
+_TOL_IF = 1e-9 * max(X1 - X0, Y1 - Y0)
+_xy_all = uh.function_space.tabulate_dof_coordinates()
+_line = np.where(np.abs(_xy_all[:, 0] - IFACE_X) <= _TOL_IF)[0]
+_ids = np.asarray(iface_dofs).astype(int).ravel()
+_yv = np.asarray(y_if, float).ravel()
+_bad = [k for k, d in enumerate(_ids)
+        if k >= _yv.size or not (0 <= d < len(_xy_all))
+        or abs(_xy_all[d, 0] - IFACE_X) > _TOL_IF or abs(_xy_all[d, 1] - _yv[k]) > _TOL_IF]
+_missed = len(set(_line.tolist()) - set(_ids.tolist()))
+if _bad or _missed or len(_ids) != _yv.size:
+    _k = _bad[0] if _bad else None
+    sys.exit(
+        f"INTERFACE DOFS: iface_dofs[k] must be the dof on the interface line at y_if[k], one "
+        f"per node; iface_dofs has {len(_ids)} entries for {_yv.size} nodes"
+        + (f", and {len(_bad)} of them are not (the first: iface_dofs[{_k}] = {_ids[_k]}"
+           + (f", a dof at ({_xy_all[_ids[_k], 0]:g}, {_xy_all[_ids[_k], 1]:g})"
+              if 0 <= _ids[_k] < len(_xy_all) else ", no dof of this space")
+           + ")" if _bad else "")
+        + (f"; {_missed} of the {len(_line)} dofs on the interface line have no entry"
+           if _missed else "")
+        + ". Take them from V.tabulate_dof_coordinates() of the space the solution lives in.")
+
 if SIDE == "dirichlet":
     # The trace this side IMPOSES: partner temperature at t^1 ... t^N.
     imp_trace = sample_trace(imp, "values",
@@ -506,6 +537,10 @@ ksp = PETSc.KSP().create(domain.comm)
 ksp.setOperators(A)
 ksp.setType("preonly")
 ksp.getPC().setType("lu")
+
+# ── initial condition ─────────────────────────────────────────────────────
+u_n.interpolate(lambda X: T_INITIAL(X[0], X[1]))
+f_old.interpolate(lambda X: F_SRC(X[0], X[1], TIMES[0]))
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 # THE SAME OPERATOR ASSEMBLED WITH NO BOUNDARY CONDITION, plus the nodal
@@ -530,15 +565,30 @@ good = np.where(~suspect)[0]
 fixup = [(i, good[np.argmin(np.abs(good - i))])
          for i in np.where(suspect)[0]] if len(good) else []
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
-# ── initial condition ─────────────────────────────────────────────────────
-u_n.interpolate(lambda X: T_INITIAL(X[0], X[1]))
-f_old.interpolate(lambda X: F_SRC(X[0], X[1], TIMES[0]))
+# ── THE STEP'S CHECKS, SET UP ONCE (served) ─ keep this block. Both read the
+#    mesh's own dofs, never the lists the solve writes through.
+_msh = uh.function_space.mesh
+_msh.topology.create_connectivity(_msh.topology.dim - 1, _msh.topology.dim)
+_bdry = fem.locate_dofs_topological(uh.function_space, _msh.topology.dim - 1,
+                                    dmesh.exterior_facet_indices(_msh.topology))
+_inside = np.setdiff1d(np.arange(len(_xy_all)), _bdry)      # the dofs off every boundary
+_A_inf = A_free.norm(PETSc.NormType.NORM_INFINITY)          # the largest row sum of |A_free|
+_held = _line[(np.abs(_xy_all[_line, 1] - Y0) > _TOL_IF) & (np.abs(_xy_all[_line, 1] - Y1) > _TOL_IF)]
+_held_want = (sample_trace(imp, "values", T_INITIAL(_xy_all[_held, 0], _xy_all[_held, 1]),
+                           _xy_all[_held, 1]) if SIDE == "dirichlet" else None)
+
 T_out = np.zeros((len(iface_dofs), N_STEPS))
 Q_out = np.zeros((len(iface_dofs), N_STEPS))
 
 # ── the march. ONE run = the WHOLE window (waveform) ──────────────────────
 for n in range(N_STEPS):
+    # ONE STEP, t^n -> t^(n+1). The hole below is this step's solve and the body
+    # of this loop: write it at this indentation. Apply column n of imp_trace (the
+    # partner's datum for the step) as SIDE says, solve for uh at t^(n+1), keep
+    # b_vol (the step's load WITHOUT the interface term, assembled with no lifting
+    # and no set_bc, so the constrained rows keep their reaction), and move the
+    # old-step state on to t^(n+1). The lines after it are served.
+# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     t_new = TIMES[n + 1]
     f_new.interpolate(lambda X: F_SRC(X[0], X[1], t_new))
     g_out.x.array[outer_dofs] = T_OUTER(xy[outer_dofs, 0], xy[outer_dofs, 1],
@@ -561,6 +611,9 @@ for n in range(N_STEPS):
     _fp.set_bc(b, bcs)
     ksp.solve(b, uh.x.petsc_vec)
     uh.x.scatter_forward()
+    u_n.x.array[:] = uh.x.array
+    f_old.x.array[:] = f_new.x.array
+    b.destroy()
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
     # Outward normal flux density q = -(K grad T).n on the interface, THETA-
@@ -662,17 +715,41 @@ for n in range(N_STEPS):
     q[ok] = -r.array[iface_dofs][ok] / wi[ok]
     for i, j in fixup:
         q[i] = q[j]
+
+    # ── THE STEP ANSWERS FOR ITS OWN SYSTEM (served) ─ keep this block. Off every
+    #    boundary a solved step leaves r = A_free u^(n+1) - b_vol at round-off, on
+    #    either side: the interface term and the boundary conditions act on
+    #    boundary rows only.
+    _r_in = np.abs(r.array[_inside])
+    _scale = max(float(np.abs(b_vol.array).max()), _A_inf * float(np.abs(uh.x.array).max()))
+    if _r_in.size and _scale > 0 and _r_in.max() > 1e-6 * _scale:
+        sys.exit(f"SOLVE SELF-CHECK: step {n + 1} of {N_STEPS}: off the boundary, "
+                 f"r = A_free u - b_vol reaches {_r_in.max():.2e} against a system scale of "
+                 f"{_scale:.2e} ({int((_r_in > 1e-6 * _scale).sum())} of {_r_in.size} dofs); "
+                 f"a solved step leaves round-off there, so the step's uh does not solve the "
+                 f"system that A_free and b_vol describe. Three ways measured to get here: b "
+                 f"assembled without _fp.apply_lifting before _fp.set_bc; a preconditioner "
+                 f"applied once in place of a solve (ksp 'preonly' with pc 'jacobi'); and a "
+                 f"Krylov solve left at PETSc's default rtol of 1e-5 (ksp.setTolerances("
+                 f"rtol=1e-10), or 'preonly' with 'lu', solves it). Nothing was exported.")
+    # ── THE PARTNER'S TRACE IS HELD (served, Dirichlet side) ─ keep this block.
+    #    A Dirichlet side whose solve frees the interface returns its own answer
+    #    there, and the coupling converges to two fields that disagree. The two
+    #    end nodes are left out: the outer boundary may hold them.
+    if SIDE == "dirichlet" and _held.size:
+        _gap = float(np.abs(uh.x.array[_held] - _held_want[:, n]).max())
+        if _gap > 1e-9 * max(1.0, float(np.abs(_held_want[:, n]).max())):
+            sys.exit(f"EXPORT SELF-CHECK: step {n + 1} of {N_STEPS}: the partner's temperature "
+                     f"is not in the solution at the interface nodes (largest gap {_gap:.3e}): "
+                     f"on the Dirichlet side the interface must be held -- a dirichletbc on the "
+                     f"interface dofs, with this step's column of the partner's trace, in the "
+                     f"bcs the step's matrix, lifting and set_bc use. A solve that frees them "
+                     f"returns this side's own answer and couples to nothing.")
     r.destroy()
     b_vol.destroy()
 
     T_out[:, n] = uh.x.array[iface_dofs]
     Q_out[:, n] = q
-
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
-    u_n.x.array[:] = uh.x.array
-    f_old.x.array[:] = f_new.x.array
-    b.destroy()
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 # FIELD DUMP, BEFORE exports.json (see the docstring). `weights` are the nodal
 # volume weights int phi_i dx, so a mass-lumped L2 norm of any nodal field is

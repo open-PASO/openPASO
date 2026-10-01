@@ -90,7 +90,7 @@ handshake.
 MEASURED — this file did not ship until it converged in a real coupling
 ======================================================================
 Manufactured two-material 3-D conduction: box [0,1]^3 split by the plane
-x = 0.5, k = 0.8 (this side) and 3.2, exact Dirichlet on all five non-interface
+x = 0.5, one constant k on each half, exact Dirichlet on all five non-interface
 faces of each half, so the whole RIM of the interface plane is an outer
 Dirichlet edge — the 3-D corner case made as large as it can be.  Real
 Dirichlet-Neumann coupling through src/core/coupling_driver.run_coupling, this
@@ -145,7 +145,7 @@ Z0, Z1     = 0.0, 1.0
 IFACE_AXIS = 0               # interface plane normal: 0=x, 1=y, 2=z
 IFACE_POS  = 0.5             # its position; must equal this box's lo or hi on that axis
 
-K          = 0.8             # conductivity of THIS subdomain (constant)
+K          = 1.7             # conductivity of THIS subdomain (constant)
 NX, NY, NZ = 8, 8, 8         # this subdomain's OWN mesh; need NOT match the partner
 
 # ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..,
@@ -435,6 +435,13 @@ def build_model():
     ids.  The Model owns the ModelPart, so it is parked in a module global: a
     ModelPart is a C++ object with no __dict__ to hang it on, and letting the
     Model be collected leaves the part dangling.
+
+    THE KUHN SPLIT, a fact about a hexahedron.  With the corners of one hex
+    numbered b = i + 2*j + 4*k (i, j, k = 0 or 1, its offset along x, y, z),
+    its six tetrahedra, each of positive volume in this node order, are
+    (0, 1, 3, 7) (0, 1, 7, 5) (0, 2, 7, 3) (0, 2, 6, 7) (0, 4, 5, 7) (0, 4, 7, 6)
+    and the same six in every hex meet their neighbours face to face.
+    check_tets() below tests the split you build before anything is solved.
     """
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     global _MODEL
@@ -529,6 +536,78 @@ def area_weights(mp, tris, index_of):
     return w
 
 
+def check_tets(mp):
+    """THE MESH TEST: stop before the solve unless the tetrahedra fill this box
+    exactly once.
+
+    Kratos assembles any four nodes it is given and never says a mesh is wrong.
+    Measured on this install with hex splits cut by hand: a flat tetrahedron
+    gives NaN fluxes; a mix of positive and negative ones stops the solve with
+    'Error zero sum' or skips it ('ATTENTION! setting the RHS to zero!', the
+    field left at its start values); all of them negative gives the right
+    field with the flux sign flipped; overlapping ones give a smooth field and
+    a wrong flux.  Three tests, in this order: every volume above zero, the
+    volumes adding up to the box, and every face shared by exactly two
+    tetrahedra from opposite sides unless it lies on the box's boundary.
+    """
+    els = list(mp.Elements)
+    con = [[int(n.Id) for n in el.GetNodes()] for el in els]
+    if not con or any(len(c) != 4 for c in con):
+        print("[kratos3d] MESH TEST not judged: the model part holds no elements, "
+              "or elements that are not 4-node tetrahedra.")
+        return None
+    eid = [int(el.Id) for el in els]
+    con = np.asarray(con, dtype=np.int64)
+    xyz = {int(n.Id): (float(n.X), float(n.Y), float(n.Z)) for n in mp.Nodes}
+    P = np.array([[xyz[int(i)] for i in row] for row in con])
+    vol = np.einsum("ij,ij->i", np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]),
+                    P[:, 3] - P[:, 0]) / 6.0
+    box = float(np.prod(LEN))
+    fix = " The Kuhn split in build_model's notes fills a hex exactly once."
+    tiny = 1e-9 * box / len(vol)
+    bad = np.flatnonzero(vol <= tiny)
+    if bad.size:
+        e = int(bad[0])
+        what = ("has zero volume: its four nodes lie in one plane" if vol[e] > -tiny else
+                "has negative volume: its nodes run the other way round (swap two of them)")
+        sys.exit(f"MESH TEST: tetrahedron {eid[e]} (nodes {con[e].tolist()}) {what}; "
+                 f"{bad.size} of {len(vol)} tetrahedra fail this test.{fix}")
+    if abs(vol.sum() - box) > 1e-9 * box:
+        sys.exit(f"MESH TEST: the tetrahedra add up to a volume of {vol.sum():.9g} and "
+                 f"the box is {box:.9g}: they leave a gap or overlap.{fix}")
+    # The faces of a positive tetrahedron (a, b, c, d), each turned outward:
+    # (b, c, d), (a, d, c), (a, b, d), (a, c, b).  Two tetrahedra on opposite
+    # sides of a face turn it opposite ways, so the turns cancel.
+    pick = [1, 2, 3, 0, 3, 2, 0, 1, 3, 0, 2, 1]
+    F = con[:, pick].reshape(-1, 3)
+    FP = P[:, pick, :].reshape(-1, 3, 3)
+    odd = ((F[:, 0] > F[:, 1]).astype(int) + (F[:, 0] > F[:, 2]) + (F[:, 1] > F[:, 2])) % 2
+    S = np.sort(F, axis=1)
+    m = int(S.max()) + 1
+    uk, inv, cnt = np.unique((S[:, 0] * m + S[:, 1]) * m + S[:, 2],
+                             return_inverse=True, return_counts=True)
+    turn = np.bincount(inv, weights=1.0 - 2.0 * odd, minlength=len(uk))
+    rim = ((np.abs(FP - LO) < TOL).all(1) | (np.abs(FP - HI) < TOL).all(1)).any(1)
+    lone = (cnt[inv] == 1) & ~rim
+    worse = ((cnt[inv] == 2) & (turn[inv] != 0)) | (cnt[inv] > 2)
+    hit = np.flatnonzero(lone | worse)
+    if hit.size:
+        f = int(hit[0])
+        who = [eid[int(k) // 4] for k in np.flatnonzero(inv == inv[f])]
+        if lone[f]:
+            what = ("lies inside the box and no other tetrahedron has it: the "
+                    "tetrahedra there leave a gap or overlap, or two neighbouring "
+                    "hexes cut their shared face along different diagonals")
+        else:
+            what = (f"is shared by tetrahedra {who}, not by two from opposite sides "
+                    "of it: they overlap")
+        sys.exit(f"MESH TEST: face {F[f].tolist()} of tetrahedron {eid[f // 4]} "
+                 f"{what}.{fix}")
+    print(f"[kratos3d] MESH TEST: {len(vol)} tetrahedra of positive volume fill "
+          f"the box exactly once.")
+    return None
+
+
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 def linear_solver():
     if LIN_SOLVER == "direct":
@@ -575,6 +654,10 @@ def main():
                  f"{pts_raw[:, AX].mean()}, not {IFACE_POS} — the mesh and the "
                  f"slice index disagree")
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+    # THE MESH TEST, served: the run stops here, before anything is solved,
+    # unless the tetrahedra built above fill the box exactly once.
+    check_tets(mp)
 
     order = order_plane(pts_raw[:, TAN])
     ids = ids_raw[order]

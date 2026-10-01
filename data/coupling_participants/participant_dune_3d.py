@@ -5,8 +5,11 @@ CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1, so an
 iteration-1 fallback is mandatory), writes exports.json LAST and exits 0.
 Needs dune-fem importable in the interpreter named in `command` (conda-forge
-`dune-fem`).  DUNE JIT-COMPILES ITS UFL FORMS ON FIRST USE: the first run of a
-new form takes minutes.  That is not a hang.  The forms here do not depend on
+`dune-fem`).  DUNE JIT-COMPILES ITS UFL FORMS ON FIRST USE, AND THIS FILE'S
+FORMS TAKE SEVERAL MINUTES COLD: measured 7 to 12 minutes for its first run on
+this install (16 form modules), and 4 to 6 minutes more when the 3-D grid and
+its space are not yet in DUNE's cache.  That is not a hang, and a timeout
+shorter than that stops it mid-compile.  The forms here do not depend on
 NX/NY/NZ, so a mesh-refinement study compiles once and then reuses the cache.
 
 Physics: steady conduction  -div(K grad T) = f  on one BOX subdomain of a box
@@ -74,7 +77,7 @@ handshake.
 MEASURED — this file did not ship until it converged in a real coupling
 ======================================================================
 Manufactured two-material 3-D conduction: box [0,1]^3 split by the plane
-x = 0.5, k = 3.2 (this side) and 0.8, exact Dirichlet on all five non-interface
+x = 0.5, one constant k on each half, exact Dirichlet on all five non-interface
 faces of each half, so the whole RIM of the interface plane is an outer
 Dirichlet edge — the 3-D corner case made as large as it can be.
 
@@ -134,7 +137,7 @@ Z0, Z1     = 0.0, 1.0
 IFACE_AXIS = 0               # interface plane normal: 0=x, 1=y, 2=z
 IFACE_POS  = 0.5             # its position; must equal this box's lo or hi on that axis
 
-K          = 3.2             # conductivity of THIS subdomain (constant)
+K          = 2.9             # conductivity of THIS subdomain (constant)
 NX, NY, NZ = 8, 8, 8         # this subdomain's OWN mesh; need NOT match the partner
 
 # ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..,

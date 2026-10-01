@@ -20,6 +20,119 @@ import functools
 import re
 from pathlib import Path
 
+# ── facts shared by the write-time traps and the run-time table ───────────
+# Each measured on this install (scikit-fem 12.0.1, dolfinx 0.10.0): the wrong call raised the
+# quoted error and the named call ran. The scripts of one coupled round died on every one of them.
+_SKFEM_ELEMENT_FIX = (
+    "an element is an INSTANCE: Basis(mesh, ElementTriP1()), with the parentheses, and "
+    "basis.with_element(ElementTriP0()) the same. The class itself, directly or through a name bound "
+    "to it (element = ElementTriP1), stops inside skfem with an error that names no element")
+_SKFEM_JOIN_FIX = (
+    "there is no extend. Refine with mesh.refined(n) and use the RETURN value (meshes are immutable); "
+    "join two meshes of one type with m1 + m2, which merges the nodes they share; cut a rectangle out "
+    "of a box with mesh.remove_elements(<cell indices>) on the tensor mesh. The facets of an interface "
+    "with two straight legs come from one mesh.facets_satisfying(<that leg's test>, "
+    "boundaries_only=True) per leg, concatenated: without boundaries_only a leg's line also takes the "
+    "interior facets beyond it")
+_SKFEM_W_FIX = (
+    "inside a form, w carries w.x (the quadrature points' coordinates), w.h, w.idx, w.n on a facet "
+    "basis, and the fields passed to asm as keywords -- nothing else. A coefficient that varies by "
+    "region is evaluated from w.x in the form, np.where(<test on w.x[0], w.x[1]>, k1, k2), or passed "
+    "as a piecewise-constant field: k0 = basis.with_element(ElementTriP0()).interpolate(k_per_cell), "
+    "asm(form, basis, k=k0), and w.k in the form")
+_SKFEM_SIZE_FIX = (
+    "Basis.interpolate(x) takes basis.N values in x, and so does a field passed to asm as a keyword (asm "
+    "interpolates it on the basis being assembled). Two measured ways to miss it: a dof vector of an "
+    "ElementVector basis interpolated on a FacetBasis built on the scalar element, whose N is half as large -- "
+    "build the FacetBasis on the same element, FacetBasis(mesh, basis.elem, facets=...); and a per-cell array "
+    "passed as a field, which is a piecewise-constant field: "
+    "k0 = basis.with_element(ElementTriP0()).interpolate(k_per_cell), then asm(form, basis, k=k0)")
+_DOLFINX_VECTOR_FIX = (
+    "fem.assemble_vector returns a dolfinx.la.Vector, which has no PETSc methods: its values are "
+    "b.array, and b.scatter_reverse(la.InsertMode.add) adds the ghost contributions. The PETSc vector, "
+    "with ghostUpdate, is dolfinx.fem.petsc.assemble_vector after `import dolfinx.fem.petsc`")
+_DOLFINX_CSR_FIX = (
+    "fem.assemble_matrix returns a dolfinx.la.MatrixCSR: A.scatter_reverse() adds the ghost "
+    "contributions and A.to_scipy() (or A.to_dense()) hands it to scipy; it has no .mat, .assemble() "
+    "or .shape. The PETSc matrix, with .assemble(), is dolfinx.fem.petsc.assemble_matrix after "
+    "`import dolfinx.fem.petsc`")
+_DOLFINX_BCS_FIX = (
+    "assemble_vector takes no bcs. fem.assemble_matrix(a, bcs=[bc]) takes them for the matrix; the "
+    "vector gets the boundary values through fem.apply_lifting(b.array, [a], bcs=[[bc]]), "
+    "b.scatter_reverse(la.InsertMode.add) and bc.set(b.array)")
+_DOLFINX_INDEXMAP_FIX = (
+    "an IndexMap counts with size_local (this process) and size_global (all processes), and a space "
+    "has no .dim: its dof count is V.dofmap.index_map.size_local * V.dofmap.index_map_bs")
+_DOLFINX_TAGS_FIX = (
+    "tags are made by the lowercase FUNCTION dolfinx.mesh.meshtags(mesh, dim, indices, values) with "
+    "int32 arrays; the MeshTags class only wraps what that function returns, and dolfinx.fem has no "
+    "MeshTags or MeshTag")
+_DOLFINX_MEASURE_FIX = (
+    "the measure is UFL's: ds = ufl.Measure('ds', domain=mesh, subdomain_data=tags), then "
+    "ds(<tag value>) integrates over the facets with that value; dolfinx.fem has no Measure, and "
+    "ufl.ds(tags) reads the tags as an id")
+_DOLFINX_RANK1_FIX = (
+    "dolfinx's create_matrix, which LinearProblem calls first, raises this range-check IndexError, "
+    "naming no form, when the form in the bilinear slot has rank 1: its unknown is a fem.Function "
+    "where u = ufl.TrialFunction(V) belongs (fem.form(a).rank is then 1; a bilinear form's is 2), or "
+    "the two forms are swapped, LinearProblem(L, a). The Function is what .solve() returns")
+# Measured on this install (dolfinx 0.10), each in the fenics interpreter: the wrong call raised the
+# quoted error and the named call ran. The scripts of one coupled round died on each of them.
+_DOLFINX_BCS_LIST_FIX = (
+    "bcs are always a LIST, and apply_lifting takes one list of them per form: "
+    "dolfinx.fem.petsc.assemble_matrix(a_form, bcs=bcs), apply_lifting(b, [a_form], bcs=[bcs]), "
+    "set_bc(b, bcs). Measured on this install: apply_lifting(b, a_form, bcs) raises 'Form' object is "
+    "not iterable; a single DirichletBC where the list belongs raises 'DirichletBC' object is not "
+    "iterable (assemble_matrix, apply_lifting) or object of type 'DirichletBC' has no len() (set_bc); "
+    "and bcs=[[bc] for bc in bcs], a list per condition, raises Mismatch in size between a and bcs "
+    "once there are two conditions")
+_DOLFINX_BC_VALUE_FIX = (
+    "dirichletbc takes (value, dofs, V) for a number or a fem.Constant -- default_scalar_type(0.0) or "
+    "fem.Constant(mesh, default_scalar_type(0.0)) -- and (g, dofs) for a fem.Function g on V, the "
+    "dofs being the int32 array locate_dofs_topological or locate_dofs_geometrical returns. Measured "
+    "on this install: a one-entry array np.array([0.0]) raises Rank mismatch between Constant and "
+    "function space; a Python list raises Boundary condition value must have a dtype attribute; and a "
+    "number or a Constant without V, a Function with V, or int64 dofs raise incompatible function "
+    "arguments")
+_DOLFINX_FORM_COMPILED_FIX = (
+    "dolfinx.fem.petsc.assemble_matrix, assemble_vector and apply_lifting take the compiled form "
+    "fem.form(a); LinearProblem takes the UFL forms and compiles them itself. Measured on this "
+    "install: assemble_matrix or apply_lifting given the bare UFL form raise 'Form' object has no "
+    "attribute '_cpp_object' (assemble_vector: no attribute 'function_spaces'), and so do the C++ "
+    "form fem.form(a)._cpp_object and a PETSc Mat given where a form belongs. "
+    "a_form = fem.form(a); A = dolfinx.fem.petsc.assemble_matrix(a_form, bcs=bcs); A.assemble()")
+_DOLFINX_CONNECTIVITY_FIX = (
+    "mesh.exterior_facet_indices(mesh.topology) needs the facet-to-cell connectivity: call "
+    "mesh.topology.create_connectivity(tdim - 1, tdim) first (locate_entities_boundary creates it by "
+    "itself, locate_entities does not)")
+# Measured on this install (NGSolve 6.2.2604): after `u, v = fes.TnT()` and a loop over mesh.vertices
+# whose variable is also named v, `gfun * v` prints "Invoked with: <...GridFunction...>, V18" (V18 is a
+# mesh vertex), `v * dx` "unsupported operand type(s) for *: 'ngsolve.comp.MeshNode' and ...", and
+# grad(v) "'ngsolve.comp.MeshNode' object has no attribute 'Operator'". Two of five workers of one
+# round met it at a served line and no reply said why.
+_NGSOLVE_REBOUND_FIX = (
+    "a mesh vertex (a MeshNode, printed V<number>) sits where a form needs the test or trial function: "
+    "the name was rebound after u, v = fes.TnT() -- a Python loop over mesh.vertices whose variable is "
+    "named v (or u), or v = mesh.vertices[i], leaves the name holding a vertex once it ends. Give the "
+    "vertex its own name (for vert in mesh.vertices) and keep u, v for the TnT pair")
+_NGSOLVE_DIMS_FIX = (
+    "CoefficientFunction reads a Python LIST as ONE number, its first entry: CoefficientFunction([[kxx, "
+    "kxy], [kyx, kyy]]) has no dims and the value kxx, and the same list with dims=(2, 2) raises this. A "
+    "2x2 matrix is a TUPLE of its four entries, row by row, with dims: CoefficientFunction((kxx, kxy, "
+    "kyx, kyy), dims=(2, 2)) -- the form the served NGSolve contract builds from config.json's k -- and "
+    "K * grad(u) * grad(v) * dx then assembles (K grad u) . grad v")
+
+# A NAME BOUND ONCE AND USED LATER, and nothing in between that binds it again: an assignment to it,
+# or a def/for/with line that names it. Used by the traps that follow a value from the call that made
+# it to the attribute read on it. Group `v` is the name.
+_NOT_REBOUND = (r"(?!^[ \t]*(?:\w+[ \t]*,[ \t]*)*(?P=v)[ \t]*(?:,[ \t]*\w+[ \t]*)*=(?!=)"
+                r"|^[ \t]*(?:def|for|with)[ \t][^\n]*\b(?P=v)\b)")
+# `import dolfinx.fem.petsc as fem` makes fem.assemble_* the PETSc assemblers, whose results DO have
+# ghostUpdate and .assemble(): a trap on fem.assemble_* reads the whole file for that alias first, and
+# names only its group `hit`.
+_FEM_IS_NOT_PETSC = r"\A(?![\s\S]*?\bpetsc[ \t]+as[ \t]+fem\b)[\s\S]*?"
+_SKFEM_ELEMENT_CLASS = r"(?:skfem\.)?Element(?:Tri|Quad|Tet|Hex|Line|Wedge)\w*"
+
 # (backend, pattern, what the run prints, the call that works)
 _TRAPS: tuple[tuple[str, str, str, str], ...] = (
     # ── CAUGHT AT WRITE TIME BECAUSE THE RUN IS THE EXPENSIVE PART ───────────
@@ -64,10 +177,10 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "TypeError: AbstractBasis.get_dofs() got an unexpected keyword argument 'component'",
      "a vector basis selects a component BY NAME: d = basis.get_dofs(...), "
      "then d.nodal['u^1'] and d.nodal['u^2'] (one-based; there is no u^0)"),
+    # THE RUN CHECK ANSWERED "refine" TO A SCRIPT JOINING TWO MESHES: the extend call is made to
+    # join or cut as often as to refine, so the fact names all three.
     ("skfem", r"\bmesh\.extend\s*\(|\bm\.extend\s*\(",
-     "AttributeError: 'MeshTri1' object has no attribute 'extend'",
-     "refine with mesh.refined(), or mesh.refined(n) for n halvings; the "
-     "meshes are immutable so use the RETURN value"),
+     "AttributeError: 'MeshTri1' object has no attribute 'extend'", _SKFEM_JOIN_FIX),
     ("skfem", r"from\s+skfem\.models\.elasticity\s+import[^\n]*plane_strain",
      "ImportError: cannot import name 'plane_strain' from 'skfem.models.elasticity'",
      "there is no plane_strain because lame_parameters IS the plane-strain "
@@ -82,6 +195,12 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "not from a Python callable: `from ngsolve import x, y, z` and write the "
      "expression in them -- CF(x*x + y*y). A string and a sympy object fail "
      "the same way. Measured on this install"),
+    # a solve through a method that does not exist was read as "never solves" (measured)
+    ("ngsolve", r"\.InvMult\s*\(",
+     "AttributeError: 'ngsolve.la.SparseMatrixd' object has no attribute 'InvMult'",
+     "NGSolve has no InvMult: an inverse is a matrix of its own, inv = a.mat.Inverse(<free dofs>), "
+     "applied with `*` to a vector (or inv.Mult(x, y), which writes inv x INTO y). Measured "
+     "on this install"),
     ("ngsolve", r"\.SetEssentialBC\s*\(",
      "AttributeError: 'ngsolve.comp.H1' object has no attribute 'SetEssentialBC'",
      "the Dirichlet boundary is an ARGUMENT of the space -- "
@@ -110,6 +229,18 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
     ("skfem", r"\bmesh\.f\b(?!acets|2)",
      "AttributeError: 'MeshTri1' object has no attribute 'f'",
      "the facet node table is mesh.facets (2 x n_facets); mesh.p, mesh.t, mesh.t2f and mesh.f2t are the others"),
+    # A CLASS WHERE AN INSTANCE BELONGS: Basis(mesh, ElementTriP1), and the same class reached
+    # through `element = ElementTriP1` (seventeen script versions of one round bound it that way).
+    # Only skfem's own element names are matched, so a class of the script's own is never read as one.
+    ("skfem", rf"\b\w*Basis\s*\([^()\n]*?,\s*{_SKFEM_ELEMENT_CLASS}\s*[,)]"
+              rf"|\.with_element\s*\(\s*{_SKFEM_ELEMENT_CLASS}\s*\)",
+     "TypeError: '>=' not supported between instances of 'property' and 'int'", _SKFEM_ELEMENT_FIX),
+    ("skfem", rf"^[ \t]*(?P<v>\w+)[ \t]*=[ \t]*{_SKFEM_ELEMENT_CLASS}[ \t]*$(?:{_NOT_REBOUND}[\s\S])*?"
+              rf"(?:\b\w*Basis[ \t]*\([^()\n]*?,[ \t]*(?P=v)[ \t]*[,)]"
+              rf"|\.with_element[ \t]*\([ \t]*(?P=v)[ \t]*\)|\bElementVector[ \t]*\([ \t]*(?P=v)[ \t]*[,)])",
+     "TypeError: '>=' not supported between instances of 'property' and 'int'", _SKFEM_ELEMENT_FIX),
+    ("skfem", rf"\bElementVector\s*\(\s*{_SKFEM_ELEMENT_CLASS}\s*[,)]",
+     "TypeError: unsupported operand type(s) for *: 'int' and 'property'", _SKFEM_ELEMENT_FIX),
     # ── NGSolve ───────────────────────────────────────────────────────────
     ("ngsolve", r"\.AddVertex\s*\(",
      "AttributeError: 'SplineGeometry' object has no attribute 'AddVertex'",
@@ -127,7 +258,7 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "the mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges"),
     ("ngsolve", r"\bfes\.Dofs\s*\(",
      "AttributeError: 'H1' object has no attribute 'Dofs'",
-     "a vertex's dof is fes.GetDofNrs(NodeId(VERTEX, v.nr))[0]; the free set is fes.FreeDofs()"),
+     "a vertex's dof is fes.GetDofNrs(NodeId(VERTEX, vert.nr))[0]; the free set is fes.FreeDofs()"),
     ("ngsolve", r"\.vertexnr\b|NodeId\([^)]*\)\.index\b|\bv\.index\b",
      "AttributeError: the node object has no 'vertexnr' / 'index'",
      "a MeshNode carries .nr (its number) and .point (its coordinates)"),
@@ -164,6 +295,16 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "TypeError: incompatible constructor arguments (a Python function is not a CoefficientFunction)",
      "sample the function at the vertices into a P1 GridFunction and integrate that; a GridFunction "
      "IS a CoefficientFunction"),
+    # A MATRIX WRITTEN AS A PYTHON LIST. Measured on this install: CoefficientFunction([[a, b], [c, d]])
+    # has no dims and the value a, and every form built on it runs; the same list with dims=(2, 2)
+    # raises. A hand-written side solved with the scalar first entry of its conductivity that way.
+    ("ngsolve", r"\b(?:CoefficientFunction|CF)\s*\(\s*\[",
+     "no error without dims: the list is read as ONE number, its first entry, and the run goes on "
+     "with it; with dims=(2, 2) it stops with NgException: dims does not fit to dimension of "
+     "CoefficientFunction",
+     "a 2x2 matrix is a TUPLE of its four entries, row by row, with dims: "
+     "CoefficientFunction((kxx, kxy, kyx, kyy), dims=(2, 2)) -- the form the served NGSolve contract "
+     "builds from config.json's k"),
     # ── FEniCSx ───────────────────────────────────────────────────────────
     ("fenics", r"locate_dofs_(?:topological|geometrical)\s*\((?!\s*\[)[^)]*\)\s*\[\s*0\s*\]",
      "every dof but the first silently disappears (no error at that line)",
@@ -185,6 +326,36 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
     ("fenics", r"\.geometric_dimension\s*\(",
      "AttributeError: a UFL argument has no geometric_dimension()",
      "take the dimension from the mesh: mesh.geometry.dim"),
+    # THE NON-PETSc ASSEMBLERS. fem.assemble_vector / fem.assemble_matrix return dolfinx.la objects;
+    # the PETSc ones live in dolfinx.fem.petsc. Each trap follows the value from the call that made
+    # it to the attribute read on it, and is silent where `fem` is the petsc module.
+    ("fenics", rf"{_FEM_IS_NOT_PETSC}(?P<hit>^[ \t]*(?P<v>\w+)[ \t]*=[ \t]*(?:dolfinx\.)?fem\.assemble_vector"
+               rf"[ \t]*\((?:{_NOT_REBOUND}[\s\S])*?\b(?P=v)\.(?:ghostUpdate|apply)\b)",
+     "AttributeError: 'Vector' object has no attribute 'ghostUpdate' (or 'apply')", _DOLFINX_VECTOR_FIX),
+    ("fenics", rf"{_FEM_IS_NOT_PETSC}(?P<hit>^[ \t]*(?P<v>\w+)[ \t]*=[ \t]*(?:dolfinx\.)?fem\.assemble_matrix"
+               rf"[ \t]*\((?:{_NOT_REBOUND}[\s\S])*?\b(?P=v)\.(?:mat|assemble|shape)\b)",
+     "AttributeError: 'MatrixCSR' object has no attribute 'mat' (or 'assemble', 'shape')", _DOLFINX_CSR_FIX),
+    ("fenics", rf"{_FEM_IS_NOT_PETSC}(?P<hit>\bfem\.assemble_vector\s*\((?:[^()\n]|\([^()\n]*\))*?\bbcs\s*=)",
+     "TypeError: _assemble_vector_form() got an unexpected keyword argument 'bcs'", _DOLFINX_BCS_FIX),
+    ("fenics", r"\.dofmap\.index_map\.size\b|\.topology\.index_map\s*\([^()\n]*\)\.size\b"
+               r"|\.geometry\.index_map\s*\(\s*\)\.size\b",
+     "AttributeError: 'dolfinx.cpp.common.IndexMap' object has no attribute 'size'", _DOLFINX_INDEXMAP_FIX),
+    ("fenics", rf"^[ \t]*(?P<v>\w+)[ \t]*=[ \t]*(?:(?:dolfinx\.)?fem\.)?functionspace[ \t]*\("
+               rf"(?:{_NOT_REBOUND}[\s\S])*?\b(?P=v)\.dim\b",
+     "AttributeError: 'FunctionSpace' object has no attribute 'dim'", _DOLFINX_INDEXMAP_FIX),
+    ("fenics", r"(?<!fem\.)(?<!dolfinx\.)\bMeshTags\s*\([^()\n]*,",
+     "TypeError: MeshTags.__init__() takes 2 positional arguments but 5 were given", _DOLFINX_TAGS_FIX),
+    ("fenics", r"\bfem\.Measure\s*\(",
+     "AttributeError: module 'dolfinx.fem' has no attribute 'Measure'", _DOLFINX_MEASURE_FIX),
+    # A BILINEAR FORM BUILT ON A Function (measured on dolfinx 0.10: two recorded sides wrote
+    # u = fem.Function(V) as the unknown of a = dot(grad(u), grad(v))*dx and re-wrote their file 4 and
+    # 17 times on the error it gives). Read only in a file with no TrialFunction at all: the Function
+    # bound to a name, that name under grad, and a LinearProblem after it.
+    ("fenics", rf"\A(?![\s\S]*?\bTrialFunctions?\b)[\s\S]*?(?P<hit>^[ \t]*(?P<v>\w+)[ \t]*=[ \t]*"
+               rf"(?:(?:dolfinx\.)?fem\.)?Function[ \t]*\([^\n]*(?:{_NOT_REBOUND}[\s\S])*?"
+               rf"\bgrad[ \t]*\([ \t]*(?P=v)[ \t]*\)[\s\S]*?\bLinearProblem[ \t]*\()",
+     "IndexError: vector::_M_range_check: __n (which is 1) >= this->size() (which is 1), raised in "
+     "create_matrix inside LinearProblem", _DOLFINX_RANK1_FIX),
     # ── DUNE-fem ──────────────────────────────────────────────────────────
     ("dune", r"ufl\.Eq\s*\(",
      "ImportError / AttributeError: ufl.Eq no longer exists",
@@ -213,7 +384,7 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "the matrix-free class and has a different contract"),
     # ── Kratos ────────────────────────────────────────────────────────────
     ("kratos", r"LaplacianElement2D4N",
-     "Kratos error: LaplacianElement2D4N is not registered",
+     "Error: The Element \"LaplacianElement2D4N\" is not registered!",
      "2-D conduction is P1 TRIANGLES: LaplacianElement2D3N (3-D is LaplacianElement3D4N)"),
 )
 
@@ -308,6 +479,21 @@ def scrambled_exponent_hint(text: str) -> str | None:
             f"file is written again, so change that one line in place.")
 
 
+_OTHER_SIDE = {"dirichlet": "neumann", "neumann": "dirichlet"}
+
+
+def _side_test(test) -> tuple:
+    """(side, plain) for an `if` test that picks one side: `SIDE == "x"`, alone (plain: its else
+    is the other side) or as the first operand of an `and`; ('', False) for any other test."""
+    import ast
+    t = test.values[0] if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else test
+    if (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "SIDE"
+            and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq) and isinstance(t.comparators[0], ast.Constant)
+            and t.comparators[0].value in _OTHER_SIDE):
+        return t.comparators[0].value, t is test
+    return "", False
+
+
 def undefined_names(text: str) -> list:
     """Names the script USES at module level and never defines anywhere.
 
@@ -352,18 +538,85 @@ def undefined_names(text: str) -> list:
             bound.add(node.name)
         elif isinstance(node, ast.Global):
             bound.update(node.names)
+    # A STAR IMPORT BINDS NAMES THIS CHECK CANNOT SEE. Measured: a file with
+    # `from ngsolve import *` drew 13 false "never defined" replies (x, y, H1, Mesh, ...).
+    # The module is the solver's, loaded in the solver's own interpreter, so it is not
+    # read here; with a star import in the file no name is judged (a real NameError still
+    # stops the run, and the run check names it).
+    if any(isinstance(node, ast.ImportFrom) and any(al.name == "*" for al in node.names)
+           for node in ast.walk(tree)):
+        return []
     # module-level loads only: function bodies may legitimately read module names defined later
-    missing = {}
+    missing, sides = {}, {}
+
+    def visit(node, side):
+        # A NAME READ ONLY ON THE OTHER SIDE'S BRANCH DOES NOT STOP THIS SIDE'S RUN. Measured on a
+        # coupled round: two Neumann sides were told `u_if` and `keep` would stop the run with
+        # NameError; both are read only under `if SIDE == "dirichlet"`, and each worker re-typed its
+        # file (about 4 minutes each) to answer a stop that could not happen.
+        if isinstance(node, ast.If):
+            s, plain = _side_test(node.test)
+            if s:
+                visit(node.test, side)
+                for st in node.body:
+                    visit(st, s)
+                for st in node.orelse:
+                    visit(st, _OTHER_SIDE[s] if plain else side)
+                return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound:
+            missing.setdefault(node.id, node.lineno)
+            sides.setdefault(node.id, set()).add(side)
+        for ch in ast.iter_child_nodes(node):
+            visit(ch, side)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and sub.id not in bound:
-                missing.setdefault(sub.id, sub.lineno)
+        visit(node, "")
+    stated = _stated_side(text)
+    if stated:
+        missing = {n: ln for n, ln in missing.items() if sides.get(n) != {_OTHER_SIDE[stated]}}
     return [f"`{n}` is used at line {ln} and never defined in this file -- the run stops with "
             f"NameError/UnboundLocalError there. The served contract lists the names its surviving "
             f"lines need; every one of them has to come out of your solve."
             for n, ln in sorted(missing.items(), key=lambda kv: kv[1])]
+
+
+# KRATOS'S SOLVER MESSAGES, ANSWERED FOR WHAT EACH WAS MEASURED TO COME FROM (Kratos 10.3 on this
+# install: the served 3-D contract with its hex split swapped for recorded and constructed ones,
+# placeholder data). 'Error zero sum' was answered as element orientation with a swap of two
+# nodes, and with a node in no element and a problem with nothing held as the other causes.
+# Measured: a split MIXING positive and negative tetrahedra prints it (skyline LU; AMGCL stops the
+# same mesh with 'Zero sum in skyline_lu factorization'), and a recorded split that kept a flat
+# tetrahedron and left gaps printed it too; all negative prints nothing and returns the right
+# field with the flux negated; flat tetrahedra alone give NaN with no message (with every outer
+# face held, the RHS warning below). An orphan node and a side with nothing held printed nothing.
+# 'ATTENTION! setting the RHS to zero!' had no answer: Kratos prints it when the assembled
+# right-hand side is exactly zero and skips the solve. All-zero data prints it; with a nonzero
+# source, three flat tetrahedra of six (NaN fluxes) and a mixed split with every outer face held
+# (a finite field left at its start values, exported) print it too, and so does a 3-D model whose
+# nodal variable list leaves out CONDUCTIVITY and never sets it (the flux exported as 0, finite).
+_KRATOS_ZERO_SUM = (
+    "Kratos: the skyline LU met a zero pivot, and the field the solve returns holds NaN. Measured on "
+    "this install with tetrahedral meshes: a split that mixes positive and negative tetrahedra "
+    "prints it (under AMGCL the same mesh stops with 'Zero sum in skyline_lu factorization'), and "
+    "so did a recorded split that kept a flat tetrahedron and left gaps; all tetrahedra negative "
+    "prints nothing and flips the flux sign, and flat ones alone give NaN with no message. Test the "
+    "mesh, not the solver: every tetrahedron's signed volume dot(cross(p1-p0, p2-p0), p3-p0)/6 "
+    "above zero and the volumes adding up to the domain's (the served 3-D contract's "
+    "check_tets(mp) does both and checks the faces). In 2-D the test is each triangle's signed "
+    "area (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0) above zero; on record, a triangle whose nodes run "
+    "clockwise printed 'Error zero in diagonal'")
+_KRATOS_RHS_ZERO = (
+    "Kratos: the assembled right-hand side is exactly zero, so Kratos skipped the solve and the "
+    "field keeps the values it started from. Measured on this install: all-zero data prints it "
+    "(no source on the nodes and every held value zero; then the zero field is the answer); with "
+    "a nonzero source, so do tetrahedral meshes with flat tetrahedra (NaN fluxes follow) or with "
+    "positive and negative ones mixed (a finite field left at its start values, exported), and "
+    "so does a model part whose AddNodalSolutionStepVariable list leaves out CONDUCTIVITY (a "
+    "finite flux of 0, exported). When your source or a held value is not zero, test the mesh "
+    "before the source: every tetrahedron's signed volume above zero and the volumes adding up "
+    "to the domain's (the served 3-D contract's check_tets(mp)); then that CONDUCTIVITY is in "
+    "the variable list and set on every node")
 
 
 # The error text a run prints -> the call that works. Same measurements as _TRAPS, keyed the other
@@ -385,20 +638,26 @@ _NETGEN_2D = (
     "pmax=..., bc=...) and Circle(center=..., radius=..., bc=...), subtracted with -")
 
 
+#
+# EACH ENTRY IS KEYED TO THE CODES IT IS ABOUT, and answers only a failing script of one of them.
+# Measured: a FEniCSx script's `'FunctionSpace' object has no attribute 'dim'` was answered with the
+# DUNE-fem fix (space.size), because the needle "has no attribute 'dim'" is every code's. Which code
+# failed is read from the traceback (findings_from_output); an empty key is any code's.
+# (codes, what the run prints, the call that works)
 _ERROR_FIXES: tuple = (
     # THE LARGEST SINGLE UNGATED FAILURE IN THE RECORDED SET: 271 occurrences
     # across 120 cells. Three spellings of one mistake -- a Python function or
     # lambda, a string, or a sympy expression handed to a CoefficientFunction.
     # It lands hardest where it hurts most: the two problem families that have
     # never once produced a coupled level carry it 5 times each per cell.
-    ("Cannot make CoefficientFunction from",
+    (("ngsolve",), "Cannot make CoefficientFunction from",
      "ngsolve: a CoefficientFunction is built from NGSolve's OWN symbolic "
      "coordinates, not from a Python callable, a string or a sympy expression: "
      "`from ngsolve import x, y, z` then write the expression in them -- "
      "CF(x*x + y*y), CF(sin(pi*x)*cos(pi*y)) with sin/cos/exp/log imported "
      "from ngsolve too. A lambda, a def, 'x^2 + y^2' and a sympy object all "
      "raise this. Measured on this install"),
-    ("Did you mean: 'dx'",
+    (("ngsolve",), "Did you mean: 'dx'",
      "ngsolve: the spatial coordinates are NAMES YOU IMPORT, and `dx` is the "
      "volume measure, not a coordinate: `from ngsolve import x, y, z`. "
      "Measured on this install -- ngsolve exports all three"),
@@ -407,278 +666,389 @@ _ERROR_FIXES: tuple = (
     # "segmentation fault during 3D grid/UFL compilation" and abandoned the
     # run with the backend declared broken, while the traceback said this and
     # the script already imported Or on its own import line.
-    ("unsupported operand type(s) for |",
+    (("fenics", "dune"), "unsupported operand type(s) for |",
      "UFL: a condition is combined with Or(a, b) and And(a, b), imported from "
      "ufl -- Python's | and & are not defined on UFL conditions. conditional("
      "Or(lt(x[0], a), gt(x[0], b)), 1, 0); nest Or for three or more"),
-    ("unsupported operand type(s) for &",
+    (("fenics", "dune"), "unsupported operand type(s) for &",
      "UFL: a condition is combined with And(a, b) and Or(a, b), imported from "
      "ufl -- Python's & and | are not defined on UFL conditions"),
-    ("'Dofs' object is not callable",
+    (("skfem",), "'Dofs' object is not callable",
      "scikit-fem: basis.dofs is an ATTRIBUTE. Select with basis.get_dofs(facets=...) or "
      "basis.get_dofs(lambda x: ...), then .flatten()"),
-    ("missing 1 required positional argument: 'ubasis'",
+    (("skfem",), "missing 1 required positional argument: 'ubasis'",
      "scikit-fem: a form takes its basis POSITIONALLY -- laplace.assemble(basis), or asm(laplace, basis)"),
-    ("Attribute 'y' not found in 'w'",
+    (("skfem",), "Attribute 'y' not found in 'w'",
      "scikit-fem: inside a form the coordinates are w.x[0] and w.x[1]; there is no w.y"),
-    ("has no attribute 'init_rect'",
+    # after the 'y' entry, which it contains: a needle inside one already named is not named again
+    (("skfem",), "not found in 'w'", "scikit-fem: " + _SKFEM_W_FIX),
+    (("skfem",), "'>=' not supported between instances of 'property' and 'int'",
+     "scikit-fem: " + _SKFEM_ELEMENT_FIX),
+    (("skfem",), "unsupported operand type(s) for *: 'int' and 'property'",
+     "scikit-fem: " + _SKFEM_ELEMENT_FIX),
+    (("skfem",), "Input array has wrong size.", "scikit-fem: " + _SKFEM_SIZE_FIX),
+    (("skfem",), "has no attribute 'init_rect'",
      "scikit-fem: a rectangle is MeshTri.init_tensor(np.linspace(x0, x1, nx + 1), np.linspace(y0, y1, ny + 1))"),
-    ("unexpected keyword argument 'doforder'",
+    (("skfem",), "unexpected keyword argument 'doforder'",
      "scikit-fem: Basis(mesh, element) takes no doforder keyword"),
-    ("has no attribute 'find_dofs'",
+    (("skfem",), "has no attribute 'find_dofs'",
      "scikit-fem: every basis has get_dofs, not find_dofs"),
-    ("cannot import name 'trace' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'trace' from 'ngsolve'",
      "NGSolve: the tensor helpers are CAPITALISED and the set is not UFL's. Measured on this install, ngsolve EXPORTS Sym, Trace, Det, Grad, grad, div, Id, InnerProduct, OuterProduct, Inv, Cof -- and does NOT export sym, trace, det, Div, Identity or Transpose. The strain is Sym(Grad(u)), the trace Trace(...), the identity Id(2)"),
-    ("cannot import name 'det' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'det' from 'ngsolve'",
      "NGSolve: the tensor helpers are CAPITALISED and the set is not UFL's. Measured on this install, ngsolve EXPORTS Sym, Trace, Det, Grad, grad, div, Id, InnerProduct, OuterProduct, Inv, Cof -- and does NOT export sym, trace, det, Div, Identity or Transpose. The strain is Sym(Grad(u)), the trace Trace(...), the identity Id(2)"),
-    ("cannot import name 'Identity' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'Identity' from 'ngsolve'",
      "NGSolve: the tensor helpers are CAPITALISED and the set is not UFL's. Measured on this install, ngsolve EXPORTS Sym, Trace, Det, Grad, grad, div, Id, InnerProduct, OuterProduct, Inv, Cof -- and does NOT export sym, trace, det, Div, Identity or Transpose. The strain is Sym(Grad(u)), the trace Trace(...), the identity Id(2)"),
-    ("cannot import name 'Transpose' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'Transpose' from 'ngsolve'",
      "NGSolve: the tensor helpers are CAPITALISED and the set is not UFL's. Measured on this install, ngsolve EXPORTS Sym, Trace, Det, Grad, grad, div, Id, InnerProduct, OuterProduct, Inv, Cof -- and does NOT export sym, trace, det, Div, Identity or Transpose. The strain is Sym(Grad(u)), the trace Trace(...), the identity Id(2)"),
-    ("cannot import name 'SetLogLevels' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'SetLogLevels' from 'ngsolve'",
      "NGSolve: there is no SetLogLevels. Verbosity is a module global -- "
      "import ngsolve (the MODULE) and set ngsolve.ngsglobals.msg_level = 3 "
      "before the solve, or the run log carries none of this code's output"),
-    ("cannot import name 'DirichletBC' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'DirichletBC' from 'ngsolve'",
      "NGSolve: there is no DirichletBC class -- the condition belongs to the "
      "SPACE, as H1(mesh, order=..., dirichlet='<boundary names separated by "
      "|>'), and the VALUES are written into the GridFunction's vector at those "
      "dofs. fes.FreeDofs() then excludes them at solve time"),
-    ("'ngsolve.comp.H1' object has no attribute 'VDim'",
+    (("ngsolve",), "'ngsolve.comp.H1' object has no attribute 'VDim'",
      "NGSolve: the component count of a space is fes.dim (a vector space is "
      "H1(mesh, order=1, dim=2)); there is no VDim"),
-    ("No module named 'KratosMultiphysics'",
+    ((), "No module named 'KratosMultiphysics'",
      "Kratos: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("No module named 'dolfinx'",
+    ((), "No module named 'dolfinx'",
      "FEniCSx: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("No module named 'ngsolve'",
+    ((), "No module named 'ngsolve'",
      "NGSolve: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("No module named 'skfem'",
+    ((), "No module named 'skfem'",
      "scikit-fem: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("No module named 'dune'",
+    ((), "No module named 'dune'",
      "DUNE-fem: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("No module named 'netgen'",
+    ((), "No module named 'netgen'",
      "NGSolve/netgen: this code has its own interpreter. You ran it with one that does not have it. discover(query='list') names the interpreter or binary of every backend on this install -- use that exact path in the participant's `command`"),
-    ("has no attribute 'MeshTags'",
-     "FEniCSx: facet tags come from the lowercase FUNCTION in the mesh module -- "
-     "dolfinx.mesh.meshtags(mesh, mesh.topology.dim - 1, indices, values) with int32 "
-     "arrays; there is no fem.MeshTags and no dolfinx.MeshTags"),
-    ("Invalid format specifier",
+    (("fenics",), "has no attribute 'MeshTags'", "FEniCSx: " + _DOLFINX_TAGS_FIX),
+    (("fenics",), "module 'dolfinx.fem' has no attribute 'MeshTag'", "FEniCSx: " + _DOLFINX_TAGS_FIX),
+    (("fenics",), "MeshTags.__init__() takes 2 positional arguments", "FEniCSx: " + _DOLFINX_TAGS_FIX),
+    ((), "Invalid format specifier",
      "Python f-string: a literal { or } inside an f-string starts a "
      "replacement field, so JSON written with an f-string breaks on its own "
      "braces. DOUBLE them -- {{ and }} -- or build the dict and json.dumps it. "
      "Measured: f'{\"a\":\"x\"}' raises this, f'{{\"a\":\"x\"}}' returns the "
      "string"),
-    ("Kratos.ModelPart: No constructor defined!",
+    (("kratos",), "Kratos.ModelPart: No constructor defined!",
      "Kratos: a ModelPart is created BY a Model, never constructed directly -- "
      "model = KM.Model(); mp = model.CreateModelPart('<name>'). Measured: "
      "KM.ModelPart('x') raises this, model.CreateModelPart('x') returns one"),
-    ("'CellBasis' object has no attribute 'ndof'",
+    (("skfem",), "'CellBasis' object has no attribute 'ndof'",
      "scikit-fem: a basis counts its degrees of freedom with basis.N, not "
      ".ndof -- measured: N is 16 for a scalar P1 basis on a mesh where a "
      "vector basis of the same mesh gives 32, and len(basis.zeros()) is the "
      "same number. basis.nelems is the ELEMENT count, a different quantity"),
-    ("CellBasis.__init__() missing 1 required positional argument: 'elem'",
+    (("skfem",), "CellBasis.__init__() missing 1 required positional argument: 'elem'",
      "scikit-fem: Basis(mesh, element) needs the ELEMENT -- Basis(mesh, "
      "ElementTriP1()) for a scalar P1 field, Basis(mesh, "
      "ElementVector(ElementTriP1())) for a vector one"),
-    ("compute_colliding_cells(): incompatible function arguments",
+    (("fenics",), "compute_colliding_cells(): incompatible function arguments",
      "FEniCSx: the point array must have THREE columns even in 2-D -- "
      "np.column_stack([x, y, np.zeros_like(x)]) -- for both "
      "geometry.compute_collisions_points(bb_tree, pts) and "
      "geometry.compute_colliding_cells(mesh, candidates, pts). Measured: an "
      "(n, 2) array raises this, an (n, 3) array returns the AdjacencyList"),
-    ("compute_collisions_points(): incompatible function arguments",
+    (("fenics",), "compute_collisions_points(): incompatible function arguments",
      "FEniCSx: the point array must have THREE columns even in 2-D -- "
      "np.column_stack([x, y, np.zeros_like(x)]). Measured: an (n, 2) array "
      "raises this"),
-    ("Boundaries(): incompatible function arguments",
+    (("ngsolve",), "Boundaries(): incompatible function arguments",
      "NGSolve: mesh.Boundaries takes the boundary NAME as a string, not an "
      "index -- mesh.Boundaries('left') or a regex over the names, "
      "mesh.Boundaries('left|top'). The names are the ones you passed as bcs= "
      "when you built the geometry"),
-    ("GetDofs(): incompatible function arguments",
+    (("ngsolve",), "GetDofs(): incompatible function arguments",
      "NGSolve: to get the dof numbers of a mesh node use "
      "fes.GetDofNrs(NodeId(VERTEX, i)), which returns a tuple. GetDofs takes a "
      "Region (mesh.Boundaries('name')), not an integer"),
-    ("Set(): incompatible function arguments",
+    (("ngsolve",), "Set(): incompatible function arguments",
      "NGSolve: GridFunction.Set takes a FIELD -- a CoefficientFunction, a "
      "symbolic expression or a scalar -- not a dof array. To write raw values "
      "use gfu.vec.FV().NumPy()[:] = <array>, or index gfu.vec directly. "
      "Measured: gfu.Set(np.zeros(fes.ndof)) raises this, gfu.Set(x*y) works"),
-    (".LeafGrid' object has no attribute 'geometry'",
+    (("dune",), ".LeafGrid' object has no attribute 'geometry'",
      "DUNE-fem: a grid view has no geometry -- geometry belongs to an ENTITY. "
      "Iterate and ask the element: for e in gridView.elements: "
      "e.geometry.center, e.geometry.volume, e.geometry.corners. Measured, the "
      "grid view itself offers elements, vertices, size, dimension, dimGrid and "
      "indexSet"),
-    (".LeafGrid' object has no attribute 'leaves'",
+    (("dune",), ".LeafGrid' object has no attribute 'leaves'",
      "DUNE-fem: the entities of a grid view are gridView.elements (and "
      "gridView.vertices); there is no .leaves. Measured on this install"),
-    ("cannot import name 'Eq' from 'ufl'",
+    (("fenics", "dune"), "cannot import name 'Eq' from 'ufl'",
      "UFL: there is no Eq, and DO NOT take the interpreter's suggestion here. "
      "It proposes `eq`, which is a BOOLEAN comparison for use inside "
      "ufl.conditional -- measured, ufl.eq(a, L) returns an EQ object without "
      "complaining, and it is not your variational problem. A variational "
      "equation is written with the operator: `a == L`, which returns a ufl "
      "Equation"),
-    ("cannot import name 'Variable' from 'ufl'",
+    (("fenics", "dune"), "cannot import name 'Variable' from 'ufl'",
      "UFL: the spelling is lowercase, ufl.variable(expr), and here the "
      "interpreter's suggestion is right -- it marks an expression so you can "
      "differentiate with respect to it via ufl.diff"),
-    ("'numpy.ndarray' object has no attribute 'grad'",
+    (("skfem",), "'numpy.ndarray' object has no attribute 'grad'",
      "scikit-fem: inside a form the arguments are DiscreteField objects, which "
      "DO carry .grad -- but the helpers return plain arrays, so grad(u).grad is "
      "this error. Take the derivative once: from skfem.helpers import grad, "
      "then grad(u) is the (dim, ...) array and grad(u)[0], grad(u)[1] are its "
      "components"),
-    ("cannot import name 'sym' from 'skfem.helpers'",
+    (("skfem",), "cannot import name 'sym' from 'skfem.helpers'",
      "scikit-fem: the symmetric gradient is one helper, sym_grad, not sym "
      "composed with grad. Measured exports of skfem.helpers: grad, sym_grad, "
      "div, curl, cross, dot, ddot, inner, mul, prod, trace, transpose, det, "
      "inv, eye, identity, jump, d, dd, ddd, dddd, dddot, zeros_like -- and no "
      "sym"),
-    ("cannot import name 'SetBC' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'SetBC' from 'ngsolve'",
      "NGSolve: there is no SetBC. The Dirichlet boundary is an ARGUMENT of the "
      "space -- H1(mesh, order=..., dirichlet='<names|joined>') -- the values go "
      "into the GridFunction's vector at those dofs, and fes.FreeDofs() is what "
      "the solve inverts on"),
-    ("first argument should be a ufl equation",
+    (("dune",), "first argument should be a ufl equation",
      "DUNE-fem: the scheme takes an EQUATION, not a form -- galerkin(a == L, ...) "
      "with `a` the bilinear form and `L` the linear one. Measured: galerkin(a) "
      "raises this, galerkin(a == L) returns a Scheme. For a form with no "
      "right-hand side write `a == 0`"),
-    ("solve() missing 1 required positional argument: 'target'",
+    (("dune",), "solve() missing 1 required positional argument: 'target'",
      "DUNE-fem: the scheme solves INTO a discrete function -- uh = "
      "space.interpolate(0, name='u'); scheme.solve(target=uh). It does not "
      "return the solution, it fills the target and returns an info dict"),
-    ("'Kratos.Properties' object has no attribute 'Value'",
+    ((), "input is less than 3-dimensional since all points have the same",
+     "scipy griddata: the points lie on one line -- an interface -- and Qhull cannot triangulate a "
+     "line. Interpolate along it instead: np.interp(t_new, t, values) on the coordinate the interface "
+     "runs along (sorted). Measured: griddata on nine points sharing one x raises this QhullError, "
+     "np.interp on their y returns the value"),
+    (("kratos",), "SetSolutionStepValue(): incompatible function arguments",
+     "Kratos: SetSolutionStepValue takes (variable, value) or (variable, step, value), and the "
+     "step is an INT -- 0 is the current step. Measured: "
+     "node.SetSolutionStepValue(KM.CONDUCTIVITY, 0, 2.5) and (KM.TEMPERATURE, 2.5) work; "
+     "(KM.CONDUCTIVITY, 0.0, 2.5) raises this, because 0.0 is a float. Compare the call with the "
+     "signatures the error lists: the variable's type (DoubleVariable, IntegerVariable, ...) fixes "
+     "the value's type"),
+    (("kratos",), "'Kratos.Properties' object has no attribute 'Value'",
      "Kratos: a Properties object uses SetValue/GetValue, not Value -- "
      "props.SetValue(KM.DENSITY, 2.5) then props.GetValue(KM.DENSITY), and "
      "props[KM.DENSITY] reads the same value. Measured on this install"),
-    ("object has no attribute 'GetOCCGeometry'",
+    (("ngsolve",), "object has no attribute 'GetOCCGeometry'",
      "netgen: a CSGeometry is not an OCC geometry and cannot be converted. OCC "
      "lives in a different module (netgen.occ.OCCGeometry); for a rectangle use "
      "netgen.geom2d.SplineGeometry -- geo.AddRectangle((X0, Y0), (X1, Y1), "
      "bcs=(bottom, right, top, left)) then geo.GenerateMesh(maxh=...)"),
-    ("No module named 'kratos'",
+    ((), "No module named 'kratos'",
      "Kratos: the import is `import KratosMultiphysics as KM`, capitalised and "
      "one word -- there is no lowercase `kratos` module. It also needs its own "
      "interpreter, which discover(query='list') prints"),
-    ("'ngsolve.comp.H1' object has no attribute 'SetEssentialBC'",
+    (("ngsolve",), "'ngsolve.comp.H1' object has no attribute 'SetEssentialBC'",
      "NGSolve: a space has no SetEssentialBC. The Dirichlet boundary is an "
      "ARGUMENT of the space -- H1(mesh, order=..., dirichlet='<names|joined>') "
      "-- the values go into the GridFunction's vector, and fes.FreeDofs() is "
      "what the solve inverts on"),
-    ("cannot import name 'abs' from 'ufl'",
+    (("fenics", "dune"), "cannot import name 'abs' from 'ufl'",
      "UFL: there is no ufl.abs -- use the Python builtin abs(expr) on a UFL "
      "expression. Measured, ufl DOES export sign, sqrt, conditional, eq and "
      "variable, so the lowercase spelling is right for those and not for abs"),
-    ("module 'dolfinx.fem' has no attribute 'petsc'",
+    (("fenics",), "module 'dolfinx.fem' has no attribute 'petsc'",
      "FEniCSx: dolfinx.fem.petsc is a SUBMODULE that is not imported with its "
      "parent -- add `import dolfinx.fem.petsc` (or `from dolfinx.fem.petsc "
      "import LinearProblem`) and the attribute appears"),
-    ("cannot import name 'NewtonSolver' from 'dolfinx.nls'",
+    (("fenics",), "cannot import name 'NewtonSolver' from 'dolfinx.nls'",
      "FEniCSx: the Newton solver is in the petsc submodule -- `import "
      "dolfinx.nls.petsc` then dolfinx.nls.petsc.NewtonSolver. The same shape as "
      "dolfinx.fem.petsc: importing the parent does not bring it in"),
-    ("'MatrixCSR' object has no attribute 'assemble'",
-     "FEniCSx: fem.assemble_matrix returns a MatrixCSR, whose finalise step is "
-     "A.scatter_reverse() (then A.to_dense() or A.data). `.assemble()` belongs "
-     "to the PETSc matrix that fem.petsc.assemble_matrix returns instead"),
-    ("cannot import name 'plane_strain' from 'skfem.models.elasticity'",
+    (("fenics",), "'MatrixCSR' object has no attribute 'assemble'", "FEniCSx: " + _DOLFINX_CSR_FIX),
+    (("fenics",), "'MatrixCSR' object has no attribute 'mat'", "FEniCSx: " + _DOLFINX_CSR_FIX),
+    (("fenics",), "'MatrixCSR' object has no attribute 'shape'", "FEniCSx: " + _DOLFINX_CSR_FIX),
+    (("fenics",), "'Vector' object has no attribute 'ghostUpdate'", "FEniCSx: " + _DOLFINX_VECTOR_FIX),
+    (("fenics",), "'Vector' object has no attribute 'apply'", "FEniCSx: " + _DOLFINX_VECTOR_FIX),
+    (("fenics",), "_assemble_vector_form() got an unexpected keyword argument 'bcs'",
+     "FEniCSx: " + _DOLFINX_BCS_FIX),
+    (("fenics",), "'dolfinx.cpp.common.IndexMap' object has no attribute 'size'",
+     "FEniCSx: " + _DOLFINX_INDEXMAP_FIX),
+    (("fenics",), "'FunctionSpace' object has no attribute 'dim'", "FEniCSx: " + _DOLFINX_INDEXMAP_FIX),
+    (("fenics",), "module 'dolfinx.fem' has no attribute 'Measure'", "FEniCSx: " + _DOLFINX_MEASURE_FIX),
+    (("fenics",), "Invalid subdomain_id <dolfinx.mesh.MeshTags", "FEniCSx: " + _DOLFINX_MEASURE_FIX),
+    (("fenics",), "Facet to cell connectivity has not been computed",
+     "FEniCSx: " + _DOLFINX_CONNECTIVITY_FIX),
+    # MEASURED ON THIS INSTALL (dolfinx 0.10): LinearProblem with a rank-1 form where the bilinear
+    # form belongs prints exactly `IndexError: vector::_M_range_check: __n (which is 1) >=
+    # this->size() (which is 1)` from create_matrix, then the __del__ echo. The run check named the
+    # constructor's error and no cause; one side spent about fourteen minutes on it.
+    (("fenics",), "vector::_M_range_check", "FEniCSx: " + _DOLFINX_RANK1_FIX),
+    # THE DOMINANT dolfinx ERRORS OF ONE COUPLED ROUND, none of which the run check answered
+    # (measured: _cpp_object 8 times, 6 of them a bare UFL form; 'Form' not iterable 6; dirichletbc
+    # arguments 5; the bcs size mismatch 3; a form divided or multiplied by a number 3; petsc_vec,
+    # 'Grad'.ufl and connectivity indexed twice each; createKSP, petsc_mat and get_connectivity
+    # once). Each wrong call and each named call was run on this install (dolfinx 0.10).
+    (("fenics",), "has no attribute '_cpp_object'", "FEniCSx: " + _DOLFINX_FORM_COMPILED_FIX),
+    (("fenics",), "'Form' object has no attribute 'function_spaces'", "FEniCSx: " + _DOLFINX_FORM_COMPILED_FIX),
+    (("fenics",), "'Form' object is not iterable", "FEniCSx: " + _DOLFINX_BCS_LIST_FIX),
+    (("fenics",), "'DirichletBC' object is not iterable", "FEniCSx: " + _DOLFINX_BCS_LIST_FIX),
+    (("fenics",), "object of type 'DirichletBC' has no len()", "FEniCSx: " + _DOLFINX_BCS_LIST_FIX),
+    (("fenics",), "Mismatch in size between a and bcs", "FEniCSx: " + _DOLFINX_BCS_LIST_FIX),
+    (("fenics",), "unsupported operand type(s) for /: 'Form' and",
+     "FEniCSx: a UFL form is scaled from the LEFT or inside its integrand -- (1.0 / dt) * a, or "
+     "((1.0 / dt) * u * v) * ufl.dx. Measured on this install: a / 2.0 and a * 2.0 raise this (a / 2 "
+     "too), 0.5 * a compiles"),
+    (("fenics",), "unsupported operand type(s) for *: 'Form' and",
+     "FEniCSx: a UFL form is scaled from the LEFT or inside its integrand -- (1.0 / dt) * a, or "
+     "((1.0 / dt) * u * v) * ufl.dx. Measured on this install: a / 2.0 and a * 2.0 raise this (a / 2 "
+     "too), 0.5 * a compiles"),
+    (("fenics",), "Rank mismatch between Constant and function space", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
+    (("fenics",), "Boundary condition value must have a dtype attribute", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
+    (("fenics",), "Invoked with types: dolfinx.cpp.fem.DirichletBC", "FEniCSx: " + _DOLFINX_BC_VALUE_FIX),
+    (("fenics",), "'petsc4py.PETSc.Vec' object has no attribute 'petsc_vec'",
+     "FEniCSx: dolfinx.fem.petsc.assemble_vector returns the PETSc Vec itself -- use it as it is; "
+     "petsc_vec belongs to a Function's vector, uh.x.petsc_vec (measured on this install)"),
+    (("fenics",), "'petsc4py.PETSc.Mat' object has no attribute 'petsc_mat'",
+     "FEniCSx: dolfinx.fem.petsc.assemble_matrix returns the PETSc Mat itself: "
+     "A = assemble_matrix(a_form, bcs=bcs); A.assemble() (measured on this install)"),
+    (("fenics",), "'Grad' object has no attribute",
+     "FEniCSx: a '.' between two UFL expressions is Python attribute access, not a product: the dot "
+     "product is ufl.dot(ufl.grad(u), ufl.grad(v)), or ufl.inner. Measured on this install: "
+     "ufl.grad(u) . ufl.grad(v) raises 'Grad' object has no attribute 'ufl', and grad(u) . grad(v) "
+     "has no attribute 'grad'"),
+    (("fenics",), "'petsc4py.PETSc.Mat' object has no attribute 'createKSP'",
+     "FEniCSx: a KSP is its own object, not a method of the matrix: ksp = PETSc.KSP().create(mesh.comm); "
+     "ksp.setOperators(A); ksp.setType('preonly'); ksp.getPC().setType('lu'); ksp.solve(b, "
+     "uh.x.petsc_vec); uh.x.scatter_forward(), with b lifted and set first (measured on this install)"),
+    (("fenics",), "'method' object is not subscriptable",
+     "FEniCSx: a method is called with (), not indexed with []: topology.connectivity(d0, d1), after "
+     "topology.create_connectivity(d0, d1), then .links(i); dofmap.cell_dofs(c). Measured on this "
+     "install: topology.connectivity[d0, d1] and dofmap.cell_dofs[c] raise this"),
+    (("fenics",), "'Topology' object has no attribute 'get_connectivity'",
+     "FEniCSx: there is no get_connectivity: topology.create_connectivity(d0, d1), then "
+     "topology.connectivity(d0, d1).links(i) (measured on this install)"),
+    (("skfem",), "cannot import name 'plane_strain' from 'skfem.models.elasticity'",
      "scikit-fem: there is no plane_strain, because lame_parameters IS the "
      "plane-strain pair. Measured exports of skfem.models.elasticity: "
      "BilinearForm, ddot, eye, lame_parameters, linear_elasticity, "
      "linear_stress, plane_stress, sym_grad, trace. For PLANE STRAIN write "
      "linear_elasticity(*lame_parameters(E, nu)); plane_stress(E, nu) is the "
      "separate plane-stress helper"),
-    ("'Dofs' object has no attribute 'shape'",
+    (("skfem",), "'Dofs' object has no attribute 'shape'",
      "scikit-fem: get_dofs returns a DofsView, not an array. It has .flatten() "
      "for the index array, .all() (optionally .all('u^1')) and .nodal['u^1'] / "
      ".nodal['u^2'] for a vector basis -- and no .shape and no .size"),
-    ("get_dofs() got an unexpected keyword argument 'component'",
+    (("skfem",), "get_dofs() got an unexpected keyword argument 'component'",
      "scikit-fem: a vector basis selects a component BY NAME, not by component=. "
      "d = basis.get_dofs(<facets or predicate>); the x dofs are d.nodal['u^1'] and the y dofs "
      "d.nodal['u^2'] (one-based, there is no u^0); d.all() and d.flatten() give both interleaved"),
-    ("'MeshTri1' object has no attribute 'extend'",
-     "scikit-fem: refine with mesh.refined() -- mesh.refined(n) for n halvings. The meshes are "
-     "immutable, so use the RETURN value; there is no mesh.extend"),
-    ("'MeshTri1' object has no attribute 'f'",
+    (("skfem",), "'MeshTri1' object has no attribute 'extend'", "scikit-fem: " + _SKFEM_JOIN_FIX),
+    (("skfem",), "'MeshTri1' object has no attribute 'f'",
      "scikit-fem: the facet node table is mesh.facets; mesh.p, mesh.t, mesh.t2f and mesh.f2t are the others"),
-    ("has no attribute 'AddVertex'",
+    (("ngsolve",), "has no attribute 'AddVertex'",
      "NGSolve: a rectangle is geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(bottom, right, top, left)); "
      "single points are AddPoint(x, y) with SEPARATE coordinates"),
-    ("has no attribute 'AddRect'",
+    (("ngsolve",), "has no attribute 'AddRect'",
      "NGSolve: the call is AddRectangle, spelled in full"),
-    ("object has no attribute 'Faces'",
+    (("ngsolve",), "object has no attribute 'Faces'",
      "NGSolve: the mesh iterators are lowercase properties -- mesh.vertices, mesh.faces, mesh.edges"),
-    ("object has no attribute 'Vertices'",
+    (("ngsolve",), "object has no attribute 'Vertices'",
      "NGSolve: the mesh iterators are lowercase properties -- mesh.vertices, mesh.faces, mesh.edges"),
-    ("MeshNode' object has no attribute",
-     "NGSolve: a MeshNode carries .nr and .point; a vertex's dof is fes.GetDofNrs(NodeId(VERTEX, v.nr))[0]"),
-    ("cannot import name 'inverse' from 'ngsolve'",
+    # A TEST FUNCTION REBOUND TO A MESH VERTEX: three messages, one cause (see _NGSOLVE_REBOUND_FIX).
+    # The 'Operator' one comes before the general MeshNode entry, whose .nr/.point fact is not its fix.
+    (("ngsolve",), re.compile(r"Invoked with: [^\n]*?\bV\d+\b"), "NGSolve: " + _NGSOLVE_REBOUND_FIX),
+    (("ngsolve",), "for *: 'ngsolve.comp.MeshNode'", "NGSolve: " + _NGSOLVE_REBOUND_FIX),
+    (("ngsolve",), "MeshNode' object has no attribute 'Operator'", "NGSolve: " + _NGSOLVE_REBOUND_FIX),
+    (("ngsolve",), "MeshNode' object has no attribute",
+     "NGSolve: a MeshNode carries .nr and .point; a vertex's dof is fes.GetDofNrs(NodeId(VERTEX, vert.nr))[0]"),
+    (("ngsolve",), "dims does not fit to dimension of CoefficientFunction", "NGSolve: " + _NGSOLVE_DIMS_FIX),
+    (("ngsolve",), "cannot import name 'inverse' from 'ngsolve'",
      "NGSolve: `inverse` is a KEYWORD of Inverse, not an import -- "
      "a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky')"),
-    ("cannot import name 'sym' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'sym' from 'ngsolve'",
      "NGSolve: there is no `sym`, `trace` or `Div`. Sym and Trace exist but act on a MATRIX -- the "
      "strain is Sym(Grad(u)), never Sym(u) (that raises 'Sym of non-matrix called'); the "
      "divergence is lowercase div(u); and the identity is Id(mesh.dim), never Id()"),
-    ("Sym of non-matrix called",
+    (("ngsolve",), "Sym of non-matrix called",
      "NGSolve: Sym takes a matrix, so build the strain from the gradient -- Sym(Grad(u)), not Sym(u)"),
-    ("cannot import name 'Div' from 'ngsolve'",
+    (("ngsolve",), "cannot import name 'Div' from 'ngsolve'",
      "NGSolve: the divergence is lowercase div(u); inside a stress it is Trace(Sym(Grad(u)))"),
-    ("BaseVector' object has no attribute 'vec'",
+    (("ngsolve",), "BaseVector' object has no attribute 'vec'",
      "NGSolve: a LinearForm's vector IS f.vec; assign through .data and read numbers with FV().NumPy()"),
-    ("must not have TrialFunction",
+    (("ngsolve",), "must not have TrialFunction",
      "NGSolve: a LinearForm carries only the test function; every term with the trial function belongs "
      "in the BilinearForm"),
-    ("has no attribute 'subset_dofs'",
+    (("fenics",), "has no attribute 'subset_dofs'",
      "FEniCSx: fem.locate_dofs_topological(V, fdim, facets) or fem.locate_dofs_geometrical(V, marker)"),
-    ("'float' object has no attribute 'ufl_domain'",
+    (("fenics",), "'float' object has no attribute 'ufl_domain'",
      "FEniCSx: ufl.Constant takes a DOMAIN, not a value -- use a plain scalar for a boundary value, "
      "or fem.Constant(mesh, value) inside a form"),
-    ("has no attribute 'FiniteElement'",
+    (("fenics",), "has no attribute 'FiniteElement'",
      "FEniCSx: build spaces with fem.functionspace(mesh, ('Lagrange', 1))"),
-    ("has no attribute 'VectorFunctionSpace'",
+    (("fenics",), "has no attribute 'VectorFunctionSpace'",
      "FEniCSx: fem.functionspace(mesh, ('Lagrange', 1, (mesh.geometry.dim,)))"),
-    ("missing 1 required keyword-only argument: 'petsc_options_prefix'",
+    (("fenics",), "missing 1 required keyword-only argument: 'petsc_options_prefix'",
      "FEniCSx: LinearProblem requires petsc_options_prefix='<any name>' on this install (measured "
      "exactly this message)"),
-    ("'LinearProblem' object has no attribute '_solver'",
-     "FEniCSx: the solver is the PUBLIC p.solver; touching p._solver raises"),
-    ("has no attribute 'geometry.point'",
+    # `'LinearProblem' object has no attribute '_solver'` is not in this table: it is
+    # LinearProblem.__del__ tidying up after a failed constructor, and findings_from_output names the
+    # constructor's own error instead (see _del_echo_finding).
+    (("dune",), "has no attribute 'geometry.point'",
      "DUNE-fem: a vertex's coordinates are vertex.geometry.center (or .corner(0))"),
-    ("'Geometry' object has no attribute 'point'",
+    (("dune",), "'Geometry' object has no attribute 'point'",
      "DUNE-fem: a vertex's coordinates are vertex.geometry.center (or .corner(0))"),
-    ("'Form' object has no attribute 'copy'",
-     "DUNE-fem: a UFL form is immutable -- build the second one by writing the expression again"),
-    ("has no attribute 'converged'",
+    # ufl.Form has no copy in both codes' UFL (2025.2.1 with dolfinx, 2024.2.0 with DUNE-fem)
+    (("dune", "fenics"), "'Form' object has no attribute 'copy'",
+     "UFL: a form is immutable -- build the second one by writing the expression again"),
+    (("dune",), "has no attribute 'converged'",
      "DUNE-fem: scheme.solve returns a DICT -- read info['converged']"),
-    ("has no attribute 'dim'",
+    (("dune",), "has no attribute 'dim'",
      "DUNE-fem: a discrete space counts its dofs with space.size (or len(space))"),
-    ("has no attribute 'dofCoordinates'",
+    (("dune",), "has no attribute 'dofCoordinates'",
      "DUNE-fem: dof coordinates come from the grid -- gridView.vertices with v.geometry.center, "
      "numbered by gridView.indexSet.index(v)"),
-    ("synchronous_iterator.h",
-     "deal.II: that wall of template errors is a constructor mistake in YOUR file, usually "
-     "FEEvaluation where FEValues belongs"),
-    ("request for member \u2018unsubscribe\u2019",
-     "deal.II: read the FIRST error and check your constructor -- FEValues<2>(fe, quadrature, "
-     "update_flags), in that order"),
-    ("is not registered",
-     "Kratos: 2-D conduction is P1 TRIANGLES (LaplacianElement2D3N); 3-D is LaplacianElement3D4N"),
+    (("dealii",), "synchronous_iterator.h",
+     "deal.II: a wall of template errors inside the deal.II headers names no line of yours; the "
+     "FIRST error line names what the compiler rejected. On record it was FEEvaluation where "
+     "FEValues belongs (FEEvaluation is the matrix-free class)"),
+    # MEASURED ON THIS INSTALL (deal.II 9.8): 'unsubscribe' and the two lines below come from a
+    # solver or preconditioner given the NUMBER type as its template argument. No FEValues
+    # argument order reproduces 'unsubscribe' here.
+    (("dealii",), "request for member \u2018unsubscribe\u2019",
+     "deal.II: a preconditioner or solver declared with the number type where deal.II expects the "
+     "matrix or vector type -- PreconditionSSOR<SparseMatrix<double>> p; p.initialize(A, 1.2); and "
+     "SolverCG<Vector<double>> cg(control)"),
+    (("dealii",), "PreconditionSSOR<double>",
+     "deal.II: the preconditioner's template argument is the MATRIX type, and it is built with the "
+     "default constructor and then initialized: PreconditionSSOR<SparseMatrix<double>> p; "
+     "p.initialize(A, 1.2)"),
+    (("dealii",), "is not a class, struct, or union type",
+     "deal.II: a solver takes the VECTOR type as its template argument, not the number type -- "
+     "SolverCG<Vector<double>> cg(control), not SolverCG<double>"),
+    # A NAME THAT IS NOT REGISTERED IS ANSWERED FOR WHAT IT NAMES. One entry keyed on "is not
+    # registered" answered a missing CONDITION with the conduction ELEMENT. Kratos 10.3.0 says which
+    # kind it is, in two shapes each (measured): CreateNewElement / CreateNewCondition follow the
+    # error with "The following Elements (Conditions) are registered:" and the list, and a .mdpa
+    # read asks to "check the spelling of the element (condition) name". Each needle is one kind's.
+    *((("kratos",), _needle,
+       "Kratos: the name that is not registered is an ELEMENT. A name exists only once the "
+       "application that defines it is imported, and most names end in the dimension and node "
+       "count (2D3N: 2-D, 3 nodes). `import KratosMultiphysics.ConvectionDiffusionApplication` "
+       "registers the conduction elements: LaplacianElement2D3N in 2-D, which is P1 TRIANGLES "
+       "(there is no LaplacianElement2D4N), and LaplacianElement3D4N in 3-D; without that import "
+       "neither exists. CreateNewElement's error lists every element that is registered")
+      for _needle in ("The following Elements are registered", "spelling of the element name")),
+    *((("kratos",), _needle,
+       "Kratos: the name that is not registered is a CONDITION, which sits on the boundary. A name "
+       "exists only once the application that defines it is imported, and most names end in the "
+       "dimension and node count of the boundary piece: 2D2N for an edge in 2-D, 3D3N for a "
+       "triangle face in 3-D. `import KratosMultiphysics.ConvectionDiffusionApplication` registers "
+       "the heat-flux conditions FluxCondition2D2N and ThermalFace2D2N (3-D: FluxCondition3D3N, "
+       "ThermalFace3D3N); without that import neither exists, while LineCondition2D2N needs no "
+       "application. CreateNewCondition's error lists every condition that is registered")
+      for _needle in ("The following Conditions are registered", "spelling of the condition name")),
     # 21 recorded transcripts carry one of these two; one run met it four times,
     # exported NaN each time and replaced the served contract to get past it.
-    ("Error zero sum",
-     "Kratos: the skyline LU met a zero pivot -- the assembled system is singular, and what "
-     "it exports is NaN. On record both of these messages came from ELEMENT ORIENTATION: "
-     "tetrahedra with negative volume ('Error zero sum') and a triangle whose nodes run "
-     "clockwise ('Error zero in diagonal'). On a mesh you built, take each triangle's "
-     "signed area (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0) (a tetrahedron's signed volume) and "
-     "swap two nodes where it is negative; the other causes are a node in no element and "
-     "a problem with no held value anywhere"),
-    ("Error zero in diagonal",
+    # EACH ANSWER SAYS WHAT ITS MESSAGE WAS MEASURED TO COME FROM (see _KRATOS_ZERO_SUM).
+    (("kratos",), "Error zero sum", _KRATOS_ZERO_SUM),
+    (("kratos",), "Zero sum in skyline_lu factorization", _KRATOS_ZERO_SUM),
+    (("kratos",), "setting the RHS to zero", _KRATOS_RHS_ZERO),
+    (("kratos",), "Error zero in diagonal",
      "Kratos: a zero on the diagonal of the assembled system -- on record, a triangle whose "
      "nodes run clockwise (negative area); take each element's signed area and swap two "
      "nodes where it is negative"),
@@ -687,45 +1057,753 @@ _ERROR_FIXES: tuple = (
     # was not in the job folder, mesh.ndof and a list given as `dirichlet`, and then gave up. The
     # ReadGmsh and dolfinx.io.gmsh entries were measured beside them. Every one is re-derived on
     # this install by tests/test_a_failed_run_is_told_the_measured_fix.py.
-    ("name 'SplineGeometry' is not defined", _SPLINE_GEOMETRY),
-    ("cannot import name 'SplineGeometry'", _SPLINE_GEOMETRY),
-    ("name 'Rectangle' is not defined", _NETGEN_2D),
-    ("'ngsolve.comp.Mesh' object has no attribute 'ndof'",
+    (("ngsolve",), "name 'SplineGeometry' is not defined", _SPLINE_GEOMETRY),
+    (("ngsolve",), "cannot import name 'SplineGeometry'", _SPLINE_GEOMETRY),
+    (("ngsolve",), "name 'Rectangle' is not defined", _NETGEN_2D),
+    (("ngsolve",), "'ngsolve.comp.Mesh' object has no attribute 'ndof'",
      "NGSolve: a mesh counts its vertices with mesh.nv and its elements with mesh.ne; ndof "
      "belongs to a finite-element SPACE (fes.ndof)"),
-    ("NgException: Error opening file",
+    (("ngsolve",), "NgException: Error opening file",
      "NGSolve/netgen: the file is not where the script looked. run_simulation starts the "
      "script in a job folder of its own, so a relative path is read from there: use the "
      "absolute path (generate_mesh's reply gives it). A Gmsh .msh is read with "
      "Mesh(ReadGmsh(path)) from netgen.read_gmsh -- Mesh(path) reads netgen's .vol format "
      "only, and on a .msh it returns an EMPTY mesh (mesh.ne == 0) without an error"),
-    ("nelem = int(f.readline())",
+    (("ngsolve",), "nelem = int(f.readline())",
      "netgen's ReadGmsh reads MSH 2.2 ASCII only; a 4.x file stops it here with 'invalid "
      "literal for int()'. Write 2.2 (gmsh.option.setNumber('Mesh.MshFileVersion', 2.2) "
      "before gmsh.write); openPASO's generate_mesh writes 2.2"),
-    ("No module named 'dolfinx.io.gmshio'", _DOLFINX_GMSH),
-    ("cannot import name 'gmshio' from 'dolfinx.io'", _DOLFINX_GMSH),
-    ("Unable to cast Python instance of type <class 'str'> to C++ type",
+    (("fenics",), "No module named 'dolfinx.io.gmshio'", _DOLFINX_GMSH),
+    (("fenics",), "cannot import name 'gmshio' from 'dolfinx.io'", _DOLFINX_GMSH),
+    (("ngsolve",), "Unable to cast Python instance of type <class 'str'> to C++ type",
      "NGSolve: one call that raises this, measured: `dirichlet` given as a Python LIST of "
      "names. It takes ONE string, the boundary names joined by | -- "
      "H1(mesh, order=2, dirichlet='left|top|cylinder')"),
 )
 
 
-def findings_from_output(output: str) -> list:
+# Needles every code can print. They answer only a failure whose code the traceback shows; with no
+# code in sight they would name one at a guess.
+_NEEDS_THE_CODE = frozenset({
+    "has no attribute 'dim'", "has no attribute 'converged'",
+    "'numpy.ndarray' object has no attribute 'grad'", "Input array has wrong size.",
+    "'>=' not supported between instances of 'property' and 'int'",
+    "unsupported operand type(s) for *: 'int' and 'property'",
+    "vector::_M_range_check", "'method' object is not subscriptable",
+})
+
+# A library frame's package names its code; any other frame is a script whose imports do.
+_LIBRARY_CODES = (("/dolfinx/", "fenics"), ("/basix/", "fenics"), ("/ffcx/", "fenics"),
+                  ("/skfem/", "skfem"), ("/ngsolve/", "ngsolve"), ("/netgen/", "ngsolve"),
+                  ("/dune/", "dune"), ("/KratosMultiphysics/", "kratos"))
+_TYPE_CODES = (("dolfinx.", "fenics"), ("skfem.", "skfem"), ("ngsolve.", "ngsolve"),
+               ("netgen.", "ngsolve"), ("dune.", "dune"), ("Kratos.", "kratos"))
+_FRAME = re.compile(r'^[ \t]*File "([^"\n]+)", line \d+', re.M)
+_ERROR_LINE = re.compile(r"^[ \t]*((?:\w+\.)*\w*(?:Error|Exception)\b:[^\n]*)", re.M)
+
+
+def _failing_codes(output: str) -> set:
+    """The codes of the script that failed, read from its traceback.
+
+    A traceback names every file it passed through, and a script's frame is its absolute path
+    (Python 3.9 and later), which this process can read: the script's own imports decide. A frame in
+    an installed package names that package's code, and a type in the error line may carry its
+    module (dolfinx.cpp.common.IndexMap). Empty when the output shows none of these."""
+    codes: set = set()
+    for path in list(dict.fromkeys(_FRAME.findall(output)))[:40]:
+        p = path.replace("\\", "/")
+        codes.update(c for seg, c in _LIBRARY_CODES if seg in p)
+        if "-packages/" in p or not p.endswith(".py"):
+            continue
+        try:
+            q = Path(path)
+            if q.is_file() and q.stat().st_size < 4_000_000:
+                codes.update(backends_in(q.read_text(errors="ignore")))
+        except OSError:
+            continue
+    for line in _ERROR_LINE.findall(output):
+        codes.update(c for mark, c in _TYPE_CODES if mark in line)
+    return codes
+
+
+# The C library's own words when it finds its heap damaged (glibc's malloc checks).
+_HEAP_DAMAGE = re.compile(r"(?:free|malloc|malloc_consolidate|realloc|munmap_chunk)\(\): [^\n]{3,80}"
+                          r"|double free or corruption[^\n]{0,20}|invalid fastbin entry \(free\)"
+                          r"|corrupted size vs\. prev_size[^\n]{0,30}|corrupted double-linked list")
+
+_SOLVER_ECHO = "'LinearProblem' object has no attribute '_solver'"
+
+
+def _del_echo_finding(output: str) -> tuple:
+    """(finding, the output without the echo) when the run printed LinearProblem.__del__'s echo.
+
+    MEASURED on dolfinx 0.10: LinearProblem.__del__ reads self._solver, which __init__ sets last, so
+    a constructor that fails leaves an object whose __del__ prints `'LinearProblem' object has no
+    attribute '_solver'`; a constructed problem has _solver and reading it raises nothing. A missing
+    keyword prints the echo BEFORE the constructor's own error, an error inside __init__ AFTER it.
+    The table used to answer the echo ("touching p._solver raises"), which is false, and the error
+    that stopped the run went unnamed. ('', output) when there is no echo."""
+    if _SOLVER_ECHO not in output:
+        return "", output
+    rest = output
+    while _SOLVER_ECHO in rest:
+        j = rest.find(_SOLVER_ECHO)
+        i = rest.rfind("Exception ignored in", 0, j)
+        if i < 0 or rest.count("\n", i, j) > 12:
+            i = rest.rfind("\n", 0, j) + 1              # not inside an echo block: cut its line only
+        k = rest.find("\n", j)
+        rest = rest[:i] + (rest[k + 1:] if k >= 0 else "")
+    errors = _ERROR_LINE.findall(rest)
+    said = ("FEniCSx: that line is LinearProblem.__del__ tidying up an object whose constructor "
+            "failed, not what stopped the run")
+    if errors:
+        own = " ".join(errors[-1].split())
+        own = own if len(own) <= 200 else own[:197] + "..."
+        said += f"; the constructor's own error is `{own}`, fix that one"
+    else:
+        said += "; the constructor's own error is not in this output"
+    return f"the run printed `{_SOLVER_ECHO}` -- {said}. Measured on this install.", rest
+
+
+# A PROGRAM KILLED BY SIGSEGV, in every wording this install prints: bash's "Segmentation fault",
+# `timeout`'s "the monitored command dumped core" (German locale: "... erzeugte einen
+# Speicherauszug"), Python's faulthandler, and an exit code of 139 or -11.
+_CRASH = re.compile(r"Segmentation fault|SIGSEGV|signal 11|dumped core|core dumped|Speicherauszug|"
+                    r"exit(?:ed)?(?: with)?(?: code| status)? (?:139|-11)\b")
+# MEASURED ON THIS INSTALL (Kratos 10.3, the served 3-D contract, 2x2x2): a LaplacianElement3D4N
+# model whose ProcessInfo holds no CONVECTION_DIFFUSION_SETTINGS dies at strategy.Solve() with
+# SIGSEGV, exit 139, and no message of Kratos's own; `python -X faulthandler` names that line. A
+# coupled round met it three times in two cells and the run check said nothing: the crash answer
+# was deal.II's alone and did not match `timeout`'s "dumped core".
+_KRATOS_SETTINGS = ("settings = KM.ConvectionDiffusionSettings() with SetUnknownVariable(KM.TEMPERATURE), "
+                    "SetDiffusionVariable(KM.CONDUCTIVITY), SetVolumeSourceVariable(KM.HEAT_FLUX) and "
+                    "SetSurfaceSourceVariable(KM.FACE_HEAT_FLUX), then "
+                    "mp.ProcessInfo.SetValue(KM.CONVECTION_DIFFUSION_SETTINGS, settings), before the solve")
+_KRATOS_CRASH = ("the program was KILLED BY SIGSEGV (exit 139, 'dumped core'): a crash inside Kratos's compiled "
+                 "code, not an install fault, and Kratos prints no message for it. A LaplacianElement3D4N model "
+                 "whose ProcessInfo holds no CONVECTION_DIFFUSION_SETTINGS dies this way at strategy.Solve(): "
+                 f"{_KRATOS_SETTINGS}. `python -X faulthandler <script>` prints the Python line a crash died on. "
+                 "Measured on this install.")
+_UNNAMED_CRASH = ("the program was KILLED BY SIGSEGV (exit 139, 'dumped core'): a crash inside compiled code, not "
+                  "an install fault, and the output names no code. What this install measured to crash with no "
+                  "message: a Kratos LaplacianElement3D4N model whose ProcessInfo holds no "
+                  "CONVECTION_DIFFUSION_SETTINGS (it dies at strategy.Solve()); in a Release deal.II, an FEValues "
+                  "accessor whose update flag was not requested, or an index vector handed unsized to "
+                  "get_dof_indices. `python -X faulthandler <script>` prints the Python line a crash died on. "
+                  "Measured on this install.")
+_OTHER_CODE = re.compile(r"envs/dune[-\w]*/bin/python|/dune/|dolfinx|ngsolve|netgen|skfem|\bdune\.")
+
+
+def findings_from_output(output: str, command: str = "") -> list:
     """What a run already told you, with the call that works.
 
     A failed run has bought the diagnosis; spending a second run to learn it is the loop that ate
-    round 49. Names at most three, because an agent acts on the first."""
+    round 49. Names at most three, because an agent acts on the first. Only the fixes of the code
+    that failed are named when the traceback shows it; a needle inside one already named (the 'y'
+    entry and the general 'not found in w' one) is not named twice. `command` is the command that
+    ran, read only to tell which code crashed when the output cannot."""
     if not isinstance(output, str) or not output.strip():
         return []
-    out, seen = [], set()
-    for needle, fix in _ERROR_FIXES:
-        if needle in output and fix not in seen:
-            seen.add(fix)
-            out.append(f"the run printed `{needle}` -- {fix}. Measured on this install.")
+    codes = _failing_codes(output)
+    echo, text = _del_echo_finding(output)
+    out, seen, named = ([echo] if echo else []), set(), []
+    # A C++ BUILD IS JUDGED BY ITS FIRST ERROR. A deal.II template wall repeats header
+    # names in every later error, and the entry keyed on one of them named a false cause
+    # three times while the first error was a std::map keyed on Point (measured).
+    _first_cxx = next((ln for ln in text.splitlines() if re.search(r":\d+:(?:\d+:)? (?:fatal )?error: ", ln)), "")
+    _dealii_build = "dealii" in codes or "dealii::" in text or "/deal.II/" in text
+    # A PROGRAM KILLED BY SIGSEGV IS NAMED AS A CRASH, not an install fault (measured: a cell
+    # gave up 0.4 minutes after a bare failure, blaming the install).
+    if _CRASH.search(text) and (_dealii_build or re.search(r"deal\.?ii", text, re.I)):
+        # THE BUILD THE WRAPPER NAMES DECIDES THE ADVICE. Measured: a cell whose DEBUG line was already
+        # on was told again to turn it on, after deal.II had printed its assertion.
+        if "This build has DEBUG on" in text:
+            out.append("the program was KILLED BY SIGSEGV: a crash inside it, not an install fault. DEBUG is on "
+                       "in this build, so deal.II checked its own assertions; one that failed prints 'An error "
+                       "occurred in line' on the stderr above, and an index vector handed unsized to "
+                       "get_dof_indices crashes with or without DEBUG. Measured on this install.")
+        else:
+            out.append("the program was KILLED BY SIGSEGV: a crash inside it, not an install fault. A Release "
+                       "deal.II asserts nothing -- an FEValues accessor whose update flag was not requested, or an "
+                       "index vector handed unsized to get_dof_indices, crashes with no message; "
+                       "target_compile_definitions(<target> PRIVATE DEBUG) after deal_ii_setup_target makes deal.II "
+                       "name a missing flag. Measured on this install.")
+    # A KRATOS CRASH, OR ONE WHOSE CODE THE OUTPUT DOES NOT NAME, IS ANSWERED TOO (see _KRATOS_CRASH).
+    elif _CRASH.search(text):
+        _seen = text + "\n" + (command if isinstance(command, str) else "")
+        if "kratos" in codes or re.search(r"KratosMultiphysics|\bKRATOS\b", _seen):
+            out.append(_KRATOS_CRASH)
+        elif not codes and not _OTHER_CODE.search(_seen):
+            out.append(_UNNAMED_CRASH)
+    # A DAMAGED HEAP IS NAMED AS A WRITE PAST AN ARRAY, and DEBUG as the way to find it. Measured on a
+    # coupled elasticity round: three runs of one cell died on "malloc(): corrupted top size" and the like
+    # and nothing answered; the cell gave up on it. Measured here: an 8 x 8 FullMatrix written at column
+    # 8 and beyond aborts a Release build in the C library ("invalid fastbin entry (free)"), and the
+    # same program with DEBUG stops at the write: "Index 8 is not in the half-open range [0,8)".
+    _heap = _HEAP_DAMAGE.search(text)
+    if _heap and (_dealii_build or re.search(r"deal\.?ii", text, re.I)):
+        _said = " ".join(_heap.group(0).split())[:80]
+        out.append(f"the run printed `{_said}`: the C library found the heap damaged, and it aborts there, "
+                   f"at a later allocation or free -- a write past the end of an array the program owns (a "
+                   f"FullMatrix, a Vector or a std::vector). A Release deal.II checks no index. Uncomment "
+                   f"target_compile_definitions(<target> PRIVATE DEBUG) in CMakeLists.txt, rebuild and run "
+                   f"again: deal.II then stops at the bad write and names the index, as in 'Index 8 is not in "
+                   f"the half-open range [0,8)' (an 8 x 8 matrix written at column 8). Measured on this "
+                   f"install.")
+    # A COMPILE THAT READ THE SYSTEM PACKAGE IS NAMED AS SUCH (measured: two cells built against
+    # /usr 9.1.1 and never linked).
+    if "/usr/include/deal.II/" in _first_cxx or re.search(r"deal\.II-9\.1\.1 installation found at /usr", text):
+        out.append("the compile read /usr/include/deal.II: it builds against the system deal.II package, not the "
+                   "tree DEAL_II_DIR should name. Keep HINTS ${DEAL_II_DIR} $ENV{DEAL_II_DIR} in find_package and "
+                   "deal_ii_setup_target(<target>) in CMakeLists.txt. Measured on this install.")
+    if _dealii_build or re.search(r"deal\.?ii", text, re.I):
+        _dfe = _dealii_first_error_finding(_first_cxx, text)
+        if _dfe:
+            out.append(_dfe)
+    if _dealii_build and re.search(r"no match for .operator<.", _first_cxx) and "Point<" in _first_cxx:
+        out.append("the build's first error is `no match for operator<` on dealii::Point -- a Point has "
+                   "no ordering, so a std::map or std::set keyed on Point does not compile; key it by "
+                   "the dof index (DoFTools::map_dofs_to_support_points gives index -> Point). Measured "
+                   "on this install.")
+    for keys, needle, fix in _ERROR_FIXES:
+        # A NEEDLE MAY BE A PATTERN where the message carries a varying part (an address, a
+        # vertex number); the run's own words are quoted then.
+        if isinstance(needle, re.Pattern):
+            _m = needle.search(text)
+            if not _m:
+                continue
+            said = " ".join(_m.group(0).split())
+            said = said if len(said) <= 120 else said[:117] + "..."
+        elif keys == ("dealii",) and _first_cxx:
+            if needle not in _first_cxx:
+                continue                 # a C++ build: only its first error decides
+            said = needle
+        elif needle not in text:
+            continue
+        else:
+            said = needle
+        if any(said in n for n in named):
+            continue
+        if keys and codes and not codes.intersection(keys):
+            continue                     # another code's fix: the failing script does not use it
+        if not codes and said in _NEEDS_THE_CODE:
+            continue                     # every code prints it, and the code is not in sight
+        if fix in seen:
+            named.append(said)           # one cause, already named: it still covers the needles inside it
+            continue
+        seen.add(fix)
+        named.append(said)
+        out.append(f"the run printed `{said}` -- {fix}. Measured on this install.")
         if len(out) >= 3:
             break
+    return out
+
+
+# ── deal.II builds: the FIRST error of a measured misuse, and the call that works ──────────────
+# Measured on a transient coupled round: 13 failed deal.II builds of two cells, and no run check
+# answered any of them. Each entry below was compiled on this install (deal.II 9.8.0-pre, g++,
+# the cells' language) as one small program per wrong call, and is keyed to the FIRST error that
+# program printed: all its words must be in that line (quotes read as '), or, for a link error,
+# in the output when no compile error came first.
+_DEALII_HEADERS = {
+    "deal.II/fe/fe_face_values.h": "FEFaceValues is declared in deal.II/fe/fe_values.h, beside FEValues",
+    "deal.II/lac/sparse_direct_umfpack.h": "SparseDirectUMFPACK is declared in deal.II/lac/sparse_direct.h",
+    "deal.II/grid/boundary_descriptor.h": ("boundary ids need no header of their own: set_boundary_id(id) is a "
+                                           "member of a face iterator, declared with the triangulation in "
+                                           "deal.II/grid/tria.h"),
+    "deal.II/numerics/affine_constraints.h": "AffineConstraints is declared in deal.II/lac/affine_constraints.h",
+    "deal.II/base/affine_constraints.h": "AffineConstraints is declared in deal.II/lac/affine_constraints.h",
+    "deal.II/base/vector_tools.h": "VectorTools is declared in deal.II/numerics/vector_tools.h",
+    "deal.II/lac/vector_tools.h": "VectorTools is declared in deal.II/numerics/vector_tools.h",
+    "deal.II/base/deallog.h": "deallog is declared in deal.II/base/logstream.h",
+    "deal.II/lac/precondition_relaxation.h": "PreconditionSSOR is declared in deal.II/lac/precondition.h",
+    "deal.II/numerics/integrate.h": ("there is no such header: QGauss and the other quadrature rules are declared in "
+                                     "deal.II/base/quadrature_lib.h, and an integral is a sum over the quadrature "
+                                     "points of an FEValues, weighted by JxW(q)"),
+}
+_DISTRIBUTE = ("AffineConstraints::distribute takes the solution vector, after the solve: "
+               "constraints.distribute(solution). Given a SparseMatrix it compiles and fails to LINK "
+               "('undefined reference to ... distribute<dealii::SparseMatrix<double> >'), and given a matrix "
+               "and a vector, or two vectors, it does not compile. A matrix and its right-hand side take the "
+               "constraints through condense(matrix, rhs) before the solve, or through "
+               "distribute_local_to_global while they are assembled")
+_FFV = ("FEFaceValues holds no dof numbers: the dofs of the face's cell are cell->get_dof_indices(indices), "
+        "indices a std::vector<types::global_dof_index> of fe.n_dofs_per_cell() entries, and shape_value(i, q) "
+        "runs over all of that cell's dofs, i from 0 to fe.n_dofs_per_cell() - 1 (for FE_Q it is zero for a dof "
+        "off that face)")
+_DEALII_FIRST_ERRORS = (
+    (("undefined reference to", "AffineConstraints<double>::distribute<dealii::SparseMatrix"), _DISTRIBUTE),
+    (("no matching function", "AffineConstraints<double>::distribute(dealii::SparseMatrix"), _DISTRIBUTE),
+    (("no matching function", "AffineConstraints<double>::distribute(dealii::Vector<double>&, dealii::Vector"),
+     _DISTRIBUTE),
+    (("no matching function", "map_dofs_to_support_points(dealii::DoFHandler"),
+     "DoFTools::map_dofs_to_support_points takes the mapping first: (mapping, dof_handler, points), with "
+     "MappingQ<2> mapping(1) for straight-edged cells and points a std::vector<Point<2>> of n_dofs entries"),
+    (("no matching function", "map_dofs_to_support_points(dealii::FEValuesExtractors"),
+     "DoFTools::map_dofs_to_support_points takes the mapping first: (mapping, dof_handler, points), with "
+     "MappingQ<2> mapping(1) for straight-edged cells and points a std::vector<Point<2>> of n_dofs entries"),
+    (("no matching function", "::MappingQ(dealii::FE_Q"),
+     "MappingQ<2> takes the polynomial degree of the geometry, not the finite element: MappingQ<2> mapping(1) "
+     "for straight-edged cells"),
+    (("FEFaceValues<", "has no member named 'dof_index'"), _FFV),
+    (("FEFaceValues<", "has no member named 'face_dof_index'"), _FFV),
+    (("FEFaceValues<", "has no member named 'n_dofs_per_face'"), _FFV),
+    (("FEFaceValues<", "has no member named 'local_dof_index'"), _FFV),
+    (("'Face' does not name a type",),
+     "there is no Face class to declare: cell->face(f) is an iterator to the face, so keep it as "
+     "const auto face = cell->face(f) and call its members with ->; the face numbers of a cell are "
+     "cell->face_indices()"),
+    (("SparseMatrix<", "has no member named 'initialize'"),
+     "a SparseMatrix is sized by reinit(sparsity_pattern), or built on the pattern, SparseMatrix<double> "
+     "A(sparsity_pattern); the pattern has to outlive the matrix"),
+    (("DoFHandler<", "has no member named 'initialize'"),
+     "a DoFHandler is built on the triangulation, DoFHandler<2> dof_handler(triangulation), or given it by "
+     "reinit(triangulation), and then numbers its dofs with distribute_dofs(fe)"),
+    (("Tensor<", "has no member named 'copy_into'"), "a Tensor copies by assignment: g = t"),
+    (("::Tensor(double, double)",),
+     "a Tensor<1, 2> has no constructor from two numbers: fill it entry by entry, t[0] = x and t[1] = y, or "
+     "build a Point<2>(x, y), which is a Tensor<1, 2>"),
+    (("base operand of '->' has non-pointer type", "DoFAccessor"),
+     "cell->face(f) is already the iterator: call its members through it, cell->face(f)->center(); "
+     "*cell->face(f) is the accessor itself, whose members take a dot"),
+    (("no match for 'operator='", "std::vector<", "and 'int')"),
+     "a std::vector has no = 0: a deal.II Vector<double> sets every entry so (Vector<double> v(n); v = 0), "
+     "and a std::vector is filled with std::fill(v.begin(), v.end(), 0.0)"),
+    (("first template argument is a class derived from 'EnableObserverPointer'",),
+     "that static assertion is what a preconditioner declared with the number type prints on this install "
+     "(PreconditionSSOR<double>, measured): it takes the MATRIX type, PreconditionSSOR<SparseMatrix<double>>, "
+     "built empty and set up by initialize(matrix, relaxation)"),
+    (("was not declared in this scope; did you mean 'dealii::",),
+     "deal.II's names live in the namespace dealii: put using namespace dealii; at file scope after the "
+     "#include lines, or write dealii:: before each name"),
+    # A TWO-COMPONENT FIELD. Measured on a coupled elasticity round: one cell's deal.II side died on
+    # every one of these in twelve builds, and none drew an answer. Each was compiled here the same way.
+    (("use of deleted function", "FESystem<dim, spacedim>::FESystem()"),
+     "an FESystem has no default constructor: a class member FESystem is built in the constructor's member "
+     "initializer list, fe(FE_Q<2>(1), 2), and a local one where it is declared, FESystem<2> fe(FE_Q<2>(1), 2)"),
+    (("use of deleted function", "FESystem<2>::operator="),
+     "an FESystem cannot be assigned: build it once where it is declared (a class member in the initializer "
+     "list, fe(FE_Q<2>(1), 2)), or hold it through a std::unique_ptr<FESystem<2>> made by "
+     "std::make_unique<FESystem<2>>(FE_Q<2>(1), 2)"),
+    (("no matching function", "AffineConstraints<double>::reinit("),
+     "AffineConstraints is not sized by a dof count: clear() empties it, then add_line and set_inhomogeneity "
+     "(or interpolate_boundary_values into it) fill it, and close() ends the filling"),
+    (("no matching function", "ComponentMask::ComponentMask(int)"),
+     "a ComponentMask is built with its size and a value, ComponentMask(2, true), or taken from the element, "
+     "fe.component_mask(FEValuesExtractors::Scalar(c)), and an entry changes through set(c, value)"),
+    (("FEValues<", "has no member named 'gradient'"),
+     "FEValues has no gradient member: a two-component FESystem's shape function i is read through an "
+     "extractor, fe_values[FEValuesExtractors::Vector(0)].gradient(i, q) (a Tensor<2, 2>), .symmetric_gradient(i, "
+     "q) (a SymmetricTensor<2, 2>) and .divergence(i, q), and one component's gradient is "
+     "shape_grad_component(i, q, c)"),
+    (("FEValues<", "has no member named 'distribute_local_to_global'"),
+     "distribute_local_to_global is a member of AffineConstraints, constraints.distribute_local_to_global("
+     "cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs), and it empties the constrained rows a "
+     "consistent recovery reads; system_matrix.add(local_dof_indices, cell_matrix) adds a cell matrix with no "
+     "constraint"),
+    (("Values<", "has no member named 'value'"),
+     "FEValues and FEFaceValues have no value member: shape function i at point q is shape_value(i, q), and for "
+     "a two-component FESystem fe_face_values[FEValuesExtractors::Vector(0)].value(i, q) is its Tensor<1, 2> and "
+     "shape_value_component(i, q, c) one component"),
+    (("has no member named 'at_vertex'",),
+     "a cell's corner is cell->vertex(v), a Point<2>, v from 0 to 3 on a quadrilateral; its number in the "
+     "triangulation is cell->vertex_index(v)"),
+    (("'PointComparator' was not declared",),
+     "deal.II has no PointComparator, and a Point has no ordering: keep the points in a std::vector indexed by "
+     "dof (DoFTools::map_dofs_to_support_points), or order them with a lambda that compares the coordinates"),
+    (("Triangulation<", "has no member named 'point'"),
+     "a Triangulation's vertices are tria.get_vertices(), a std::vector<Point<2>> of tria.n_vertices() entries, "
+     "and a cell's are cell->vertex(v)"),
+    (("no matching function", "set_inhomogeneity(std::map"),
+     "AffineConstraints takes one inhomogeneity per line: for each (dof, value) of the map, add_line(dof) then "
+     "set_inhomogeneity(dof, value); interpolate_boundary_values(mapping, dof_handler, id, function, "
+     "constraints) fills them itself"),
+    (("'MappingKind'", "does not name a type"),
+     "DoFTools::map_dofs_to_support_points takes a mapping object first: (MappingQ<2>(1), dof_handler, points), "
+     "points a std::vector<Point<2>> of n_dofs entries"),
+    (("'add_dof_values' is not a member of",),
+     "VectorTools has no add_dof_values: a cell vector goes into the global one entry by entry, "
+     "system_rhs(local_dof_indices[i]) += cell_rhs(i), or through constraints.distribute_local_to_global("
+     "cell_rhs, local_dof_indices, system_rhs)"),
+    (("has no member named 'distribute_zero'",),
+     "AffineConstraints has no distribute_zero: set_zero(vector) zeroes the constrained entries, and "
+     "distribute(vector) sets them from the constraints after a solve"),
+    (("no matching function", "apply_boundary_values(dealii::AffineConstraints"),
+     "MatrixTools::apply_boundary_values takes a std::map<types::global_dof_index, double> of held values, "
+     "(boundary_values, matrix, solution, rhs), never AffineConstraints, and it empties the held rows of the "
+     "matrix it gets: hand it a copy of the matrix a consistent recovery reads"),
+    (("no matching function", "interpolate_boundary_values(", "brace-enclosed initializer list"),
+     "interpolate_boundary_values takes one boundary id, or a std::map<types::boundary_id, const Function<2> *> "
+     "for several ({{1, &f}, {2, &f}}), then the std::map of values or the AffineConstraints; a braced list of "
+     "ids does not convert"),
+)
+
+
+def _dealii_first_error_finding(first: str, text: str) -> str:
+    """The answer to a deal.II build's first error, when it is one measured here; '' otherwise."""
+    q = lambda s: s.replace("\u2018", "'").replace("\u2019", "'")      # noqa: E731
+    line = q(first)
+    m = re.search(r"fatal error: (deal\.II/[\w/.]+\.h): No such file or directory", line)
+    if m:
+        h = m.group(1)
+        answer = _DEALII_HEADERS.get(h, "include the header that declares the class you need; the deal.II "
+                                        "headers are the files under include/deal.II/ of the tree the build uses")
+        return (f"the build's first error is that {h} does not exist in this deal.II: {answer}. "
+                f"Measured on this install.")
+    where = line if line else q(text)
+    for words, answer in _DEALII_FIRST_ERRORS:
+        if all(w in where for w in words):
+            shown = " ".join(first.split())[:160] if first else "a link error"
+            return f"the build's first error, `{shown}`: {answer}. Measured on this install."
+    return ""
+
+
+# ── deal.II C++ and its CMakeLists, judged when written (measured on deal.II 9.8.0-pre Release) ──
+_FEV_NEEDS = (("quadrature_point", "update_quadrature_points"), ("get_quadrature_points", "update_quadrature_points"),
+              ("shape_value", "update_values"), ("get_function_values", "update_values"),
+              ("shape_grad", "update_gradients"), ("get_function_gradients", "update_gradients"),
+              ("JxW", "update_JxW_values"), ("get_JxW_values", "update_JxW_values"),
+              ("normal_vector", "update_normal_vectors"))
+
+
+@functools.lru_cache(maxsize=1)
+def _dealii_include_dir():
+    """The include directory of the deal.II tree discover names, when it holds deal.II's headers;
+    None otherwise (then no header is judged)."""
+    try:
+        from backends.dealii.backend import _find_dealii          # noqa: PLC0415
+        tree = _find_dealii()
+    except Exception:                                             # noqa: BLE001
+        return None
+    inc = Path(tree) / "include" if tree else None
+    return inc if inc is not None and (inc / "deal.II" / "base" / "function.h").is_file() else None
+
+
+def cxx_findings(text: str, name: str = "") -> list:
+    """What a deal.II program or its CMakeLists will do wrong, read when it is written.
+
+    MEASURED ON THIS INSTALL: a Release deal.II asserts nothing, so an FEValues accessor
+    whose update flag was not requested, and an index vector handed unsized to
+    get_dof_indices, end the program with SIGSEGV and no message (two of five cells of one
+    round crashed so, one gave up on it); a find_package without HINTS builds against the
+    system package (deal.II 9.1.1 at /usr) whatever -DDEAL_II_DIR says, and linking
+    dealii::dealii without deal_ii_setup_target compiles against /usr/include and fails on
+    mpi.h."""
+    out: list = []
+    if not isinstance(text, str):
+        return out
+    if name.lower() == "cmakelists.txt" or re.search(r"find_package\s*\(\s*deal\.II", text):
+        fp = re.search(r"find_package\s*\(\s*deal\.II[^)]*\)", text)
+        if fp and "HINTS" not in fp.group(0):
+            out.append("`" + fp.group(0) + "` has no HINTS: it finds the system package (deal.II 9.1.1 at /usr "
+                       "on this install) whatever -DDEAL_II_DIR says (measured). Write find_package(deal.II 9.0 "
+                       "REQUIRED HINTS ${DEAL_II_DIR} $ENV{DEAL_II_DIR}).")
+        if re.search(r"dealii::dealii", text) and "deal_ii_setup_target" not in text:
+            out.append("this CMakeLists links dealii::dealii without deal_ii_setup_target(<target>): the compile "
+                       "then reads /usr/include/deal.II and stops on mpi.h (measured). Add "
+                       "deal_ii_setup_target(<target>) after add_executable.")
+        return out
+    if "#include <deal.II/" not in text and "dealii::" not in text:
+        return out
+    body = re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.S)
+    # A HEADER THE TREE DOES NOT HAVE stops the compile at its first line (measured: eight builds of two
+    # cells). Judged against the include directory of the tree discover names, and only when that
+    # directory holds deal.II's headers; otherwise nothing is said.
+    _inc = _dealii_include_dir()
+    for h in dict.fromkeys(re.findall(r"^\s*#\s*include\s*<(deal\.II/[\w/.]+\.h)>", body, re.M)):
+        if _inc is not None and not (_inc / h).is_file():
+            out.append(f"#include <{h}>: this deal.II has no such header (its include directory lacks it), and the "
+                       f"compile stops there with 'No such file or directory' (measured). "
+                       + _DEALII_HEADERS.get(h, "Include the header that declares the class you need") + ".")
+    # distribute() HANDED A SparseMatrix compiles and fails only at the LINK (measured: the last error
+    # before two cells gave up).
+    _matrices = set(re.findall(r"\bSparseMatrix\s*<[^;>]*>\s+(\w+)\s*[;(]", body))
+    for m in re.finditer(r"\.distribute\s*\(\s*(\w+)\s*[,)]", body):
+        if m.group(1) in _matrices:
+            out.append(f"`.distribute({m.group(1)}` hands a SparseMatrix to AffineConstraints::distribute, which "
+                       f"takes the solution vector after the solve: this compiles and fails to link with "
+                       f"'undefined reference to ... distribute<dealii::SparseMatrix<double> >' (measured). "
+                       f"A matrix and its right-hand side take the constraints through condense(matrix, rhs) "
+                       f"before the solve.")
+            break
+    flag_vars = {m.group(1): set(re.findall(r"update_\w+", m.group(2)))
+                 for m in re.finditer(r"UpdateFlags\s+(\w+)\s*=\s*([^;]+);", body)}
+    for m in re.finditer(r"FE(?:Face|Subface)?Values\s*<[^>]*>\s+(\w+)\s*\((.*?)\)\s*;", body, re.S):
+        obj, args = m.group(1), m.group(2)
+        flags = set(re.findall(r"update_\w+", args))
+        if not flags:
+            named = [v for v in re.findall(r"\b([A-Za-z_]\w*)\b", args) if v in flag_vars]
+            if not named:
+                continue                                   # flags not readable here: nothing judged
+            for v in named:
+                flags |= flag_vars[v]
+        missing = sorted({flag for acc, flag in _FEV_NEEDS
+                          if re.search(rf"\b{re.escape(obj)}\s*\.\s*{acc}\s*\(", body) and flag not in flags})
+        if missing:
+            out.append(f"`{obj}` is built without {', '.join(missing)} but its loop reads what "
+                       f"{'that flag' if len(missing) == 1 else 'those flags'} provide{'s' if len(missing) == 1 else ''}: "
+                       f"on a Release deal.II the program then ends with SIGSEGV and no message (measured). Add "
+                       f"{' | '.join(missing)} to its flags.")
+    for m in re.finditer(r"std::vector\s*<\s*(?:dealii::)?(?:types::global_dof_index|unsigned int)\s*>\s+(\w+)\s*;", body):
+        v = m.group(1)
+        if (re.search(rf"get_dof_indices\s*\(\s*{re.escape(v)}\s*\)", body)
+                and not re.search(rf"\b{re.escape(v)}\s*\.\s*(?:resize|assign)\s*\(", body)):
+            out.append(f"`{v}` is declared empty and handed to get_dof_indices, which writes into it without "
+                       f"sizing it: SIGSEGV, in Release and in Debug alike (measured). Declare it "
+                       f"std::vector<types::global_dof_index> {v}(fe.n_dofs_per_cell()).")
+    return out
+
+
+def _hole_name_findings(text: str) -> list:
+    """Undefined names, with the ones the contract's hole must define folded into one note."""
+    # A SERVED TEXT THAT STILL CARRIES ITS HOLE MARKERS IS NOT JUDGED FOR NAMES; the
+    # marker alone does not make a text served. Judged by the marker only, one pasted
+    # comment line switched this check off for a hand-written side.
+    if _SERVED_MARK in text and _is_served_contract(text):
+        return []
+    out = []
+    _und = undefined_names(text)
+    _hole = set()
+    _m = re.search(r"WHAT YOUR SOLVE MUST LEAVE BEHIND[^\n]*\n((?:#[^\n]*\n)+)", text)
+    if _m:
+        _hole = set(re.findall(r"^#\s{3,}([A-Za-z_]\w*)\s*$", _m.group(1), re.M))
+    _left = [f for f in _und if re.match(r"`([A-Za-z_]\w*)` is used", f)
+             and re.match(r"`([A-Za-z_]\w*)`", f).group(1) in _hole]
+    out += [f for f in _und if f not in _left]
+    _names = sorted({re.match(r"`([A-Za-z_]\w*)`", f).group(1) for f in _left})
+    if _names:
+        out.append("your solve has not yet defined " + ", ".join(f"`{n}`" for n in _names)
+                   + " from the list this file ends with (WHAT YOUR SOLVE MUST LEAVE "
+                     "BEHIND); the run stops at the first line that uses one.")
+    # A NAME ON THAT LIST MUST ALSO STILL MEAN WHAT THE LINES AFTER THE HOLE NEED. Measured on
+    # a coupled round: two of five NGSolve fills defined u, v = fes.TnT() and then rebound v
+    # to a mesh vertex -- `for v in mesh.vertices:`, and `v = mesh.vertices[vn]` in a loop --
+    # and the served Neumann line stopped with a TypeError whose last line was "Invoked with:
+    # <GridFunction>, V79"; nothing named the cause.
+    if _hole and not any(f.startswith("this file does not parse") for f in _und):
+        out += _rebound_hole_names(text, _hole)
+    return out
+
+
+# How a binding gives a name its value: a loop's variable, a call, an item picked out of a
+# collection, another name, or anything else.
+_BIND_FOR, _BIND_CALL, _BIND_ITEM, _BIND_ALIAS, _BIND_OTHER = "for", "call", "item", "alias", "other"
+
+
+def _bind_kind(value) -> str:
+    import ast
+    if isinstance(value, ast.Call):
+        return _BIND_CALL
+    if isinstance(value, ast.Subscript):
+        return _BIND_ITEM
+    if isinstance(value, ast.Name):
+        return _BIND_ALIAS
+    return _BIND_OTHER
+
+
+def _module_events(tree, names: set) -> list:
+    """The module-level bindings and reads of `names`, in source order: (kind, name, node,
+    enclosing loops, the name an alias copies, the targets of the enclosing loops).
+
+    Function and class bodies are their own scope and are left out; so is a comprehension's
+    own variable, and a lambda's body (it runs later)."""
+    import ast
+    ev: list = []
+
+    def reads(expr, loops, shadow=frozenset()):
+        if expr is None:
+            return
+        if isinstance(expr, ast.Lambda):
+            return
+        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            shadow = shadow | {n.id for g in expr.generators for n in ast.walk(g.target)
+                               if isinstance(n, ast.Name)}
+        if isinstance(expr, ast.Name) and isinstance(expr.ctx, ast.Load) and expr.id in names \
+                and expr.id not in shadow:
+            ev.append(("load", expr.id, expr, loops, None))
+        for ch in ast.iter_child_nodes(expr):
+            reads(ch, loops, shadow)
+
+    def binds(target, kind, loops, stmt, value=None):
+        if isinstance(target, ast.Name):
+            if target.id in names:
+                alias = value.id if kind == _BIND_ALIAS and isinstance(value, ast.Name) else None
+                ev.append((kind, target.id, stmt, loops, alias))
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for t in target.elts:
+                binds(t, kind, loops, stmt, None if kind == _BIND_ALIAS else value)
+        elif isinstance(target, ast.Starred):
+            binds(target.value, kind, loops, stmt)
+        else:                                   # gfu.vec[...] = ... reads gfu
+            reads(target, loops)
+
+    def walk(stmts, loops):
+        for st in stmts:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for d in getattr(st, "decorator_list", []):
+                    reads(d, loops)
+                if st.name in names:
+                    ev.append((_BIND_OTHER, st.name, st, loops, None))
+                continue
+            if isinstance(st, (ast.For, ast.AsyncFor)):
+                reads(st.iter, loops)
+                binds(st.target, _BIND_FOR, loops + (st,), st)
+                walk(st.body, loops + (st,))
+                walk(st.orelse, loops)
+            elif isinstance(st, ast.While):
+                reads(st.test, loops)
+                walk(st.body, loops + (st,))
+                walk(st.orelse, loops)
+            elif isinstance(st, ast.If):
+                reads(st.test, loops)
+                walk(st.body, loops)
+                walk(st.orelse, loops)
+            elif isinstance(st, (ast.With, ast.AsyncWith)):
+                for it in st.items:
+                    reads(it.context_expr, loops)
+                    if it.optional_vars is not None:
+                        binds(it.optional_vars, _BIND_OTHER, loops, st)
+                walk(st.body, loops)
+            elif isinstance(st, ast.Try) or type(st).__name__ == "TryStar":
+                walk(st.body, loops)
+                for h in st.handlers:
+                    reads(h.type, loops)
+                    if h.name and h.name in names:
+                        ev.append((_BIND_OTHER, h.name, h, loops, None))
+                    walk(h.body, loops)
+                walk(st.orelse, loops)
+                walk(st.finalbody, loops)
+            elif isinstance(st, ast.Assign):
+                reads(st.value, loops)
+                for t in st.targets:
+                    binds(t, _bind_kind(st.value), loops, st, st.value)
+            elif isinstance(st, ast.AnnAssign):
+                reads(st.value, loops)
+                if st.value is not None:
+                    binds(st.target, _bind_kind(st.value), loops, st, st.value)
+            elif isinstance(st, ast.AugAssign):      # a += ... updates a: a read, not a new value
+                reads(st.value, loops)
+                if isinstance(st.target, ast.Name):
+                    reads(ast.Name(id=st.target.id, ctx=ast.Load(), lineno=st.lineno,
+                                   col_offset=st.col_offset), loops)
+                else:
+                    reads(st.target, loops)
+            elif isinstance(st, (ast.Import, ast.ImportFrom)):
+                for al in st.names:
+                    nm = (al.asname or al.name).split(".")[0]
+                    if nm in names:
+                        ev.append((_BIND_OTHER, nm, st, loops, None))
+            else:
+                for ch in ast.iter_child_nodes(st):
+                    reads(ch, loops)
+
+    walk(tree.body, ())
+    return ev
+
+
+@functools.lru_cache(maxsize=64)
+def _contract_bind_kinds(template: str) -> dict:
+    """{name: how the shipped contract, holes filled, binds it at module level}."""
+    import ast
+    try:
+        tree = ast.parse(template)
+    except SyntaxError:
+        return {}
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    out: dict = {}
+    for kind, name, _node, _loops, _alias in _module_events(tree, names):
+        if kind != "load":
+            out.setdefault(name, set()).add(kind)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+@functools.lru_cache(maxsize=1)
+def _template_line_sets() -> tuple:
+    """(contract text, its served lines of 40 characters or more, holes cut) per shipped contract."""
+    out = []
+    for tpl in _served_templates():
+        lines = frozenset(ln.strip() for ln in _HOLE_RE.sub("", tpl).splitlines() if len(ln.strip()) >= 40)
+        if len(lines) >= 20:
+            out.append((tpl, lines))
+    return tuple(out)
+
+
+def _contract_of(text: str):
+    """The shipped contract (holes filled) this file was served from: the one whose served lines
+    it carries most, if it carries at least half of them; None otherwise."""
+    have = {ln.strip() for ln in text.splitlines()}
+    best, share = None, 0.0
+    for tpl, lines in _template_line_sets():
+        s = len(lines & have) / len(lines)
+        if s > share:
+            best, share = tpl, s
+    return best if share >= 0.5 else None
+
+
+def _rebound_hole_names(text: str, hole: set) -> list:
+    """A name on the list the contract ends with, rebound in the file before a line that reads it.
+
+    A loop over a collection whose variable carries such a name leaves the name holding the
+    loop's last item once the loop ends (not judged for a name the contract itself loops over).
+    Inside a loop, an item picked out of a collection or a copy of the loop's variable does the
+    same to a name the shipped contract makes with a call only (the test and trial functions,
+    the space, the grid function, the forms); names the contract fills from arrays are not
+    judged that way. Only a read after the rebinding, outside the loop that rebinds it and with
+    no new binding between, is named."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    tpl = _contract_of(text)
+    served_kinds = _contract_bind_kinds(tpl) if tpl else {}
+    lines = text.splitlines()
+
+    def _src(node) -> str:
+        ln = getattr(node, "lineno", 0)
+        s = re.sub(r"\s+#[^\n]*$", "", lines[ln - 1].strip()) if 0 < ln <= len(lines) else ""
+        return s if len(s) <= 90 else s[:87] + "..."
+
+    out = []
+    events = _module_events(tree, set(hole))
+    for name in sorted(hole):
+        own = [e for e in events if e[1] == name]
+        made_by_call = served_kinds.get(name, frozenset()) == frozenset({_BIND_CALL})
+        bad, good = None, None
+        for kind, _nm, node, loops, alias in own:
+            if kind == "load":
+                if bad is None or bad[2][-1:] and bad[2][-1] in loops:
+                    continue                 # no rebinding in force, or a read inside its own loop
+                what, stmt, _l = bad
+                how = ("after a Python loop the name holds the loop's last item"
+                       if what == _BIND_FOR else
+                       "it then holds one item of that collection" if what == _BIND_ITEM else
+                       "it then holds that loop's item")
+                out.append(
+                    f"`{name}` is on the list this file ends with (WHAT YOUR SOLVE MUST LEAVE "
+                    f"BEHIND): the lines after your hole need it"
+                    + (f" as line {good.lineno} made it (`{_src(good)}`)" if good is not None else "")
+                    + f". Line {stmt.lineno} (`{_src(stmt)}`) rebinds it, and {how}, so line "
+                    f"{node.lineno} (`{_src(node)}`) reads the wrong thing. Give "
+                    f"{'the loop variable' if what == _BIND_FOR else 'that value'} a name of its "
+                    f"own. Measured: a fill that named a loop over mesh.vertices `v` stopped the "
+                    f"served NGSolve Neumann line with TypeError ... Invoked with: <GridFunction>, "
+                    f"V<n>.")
+                break
+            loop_item = alias is not None and any(
+                isinstance(lp, (ast.For, ast.AsyncFor)) and any(
+                    isinstance(t, ast.Name) and t.id == alias for t in ast.walk(lp.target))
+                for lp in loops)
+            # THE CONTRACT'S OWN SHAPES ARE NOT A REBINDING. Measured over the 975 recorded files
+            # that carry the list: a name the contract itself loops over (`for d, q in zip(...)`)
+            # and an index array picked once out of np.where(...) fired, and neither is a defect.
+            if kind == _BIND_FOR and _BIND_FOR not in served_kinds.get(name, frozenset()):
+                bad = (_BIND_FOR, node, (node,))
+            elif made_by_call and loops and (kind == _BIND_ITEM or loop_item):
+                bad = (_BIND_ITEM if kind == _BIND_ITEM else _BIND_ALIAS, node, loops)
+            else:
+                bad = None
+                good = node if kind == _BIND_CALL else good
     return out
 
 
@@ -743,8 +1821,19 @@ def participant_findings(text: str) -> list:
         # recorded runs: 144 of 3873 participant scripts do not parse, and 47
         # of those were silent here; 34 are the same garble,
         # `(a)**2 + **(b)2`.
+        # A WRAPPER AROUND A COMPILED SOLVER (deal.II) IMPORTS NO SOLVER MODULE, and its
+        # unfilled hole was never named here (measured): its names are judged as any
+        # participant's are, below the parse check.
+        # ANY SCRIPT THAT DOES NOT PARSE IS NAMED, participant or not. Measured: writes cut short
+        # (a tool call cut at a literal it carried) left deck-writing scripts that could not run,
+        # and nothing was said because they named no exports.json yet.
+        _parse = [f for f in undefined_names(text) if f.startswith("this file does not parse")]
+        if _parse:
+            return _parse
         if looks_like_participant(text):
-            return [f for f in undefined_names(text) if f.startswith("this file does not parse")]
+            # only a copy of a served contract (its hole list travels with it) is judged for
+            # names: a hand-written file with no solver import stays unjudged, as before
+            return _hole_name_findings(text) if "WHAT YOUR SOLVE MUST LEAVE BEHIND" in text else []
         return []
     body = _strip_strings_and_comments(text)
     # AN UNFILLED SERVED CONTRACT IS NOT JUDGED FOR THE NAMES ITS HOLE MUST
@@ -760,20 +1849,7 @@ def participant_findings(text: str) -> list:
     # undefined are ONE note naming what the hole has left to define, and any other
     # name is judged as ever.
     out, seen = _module_findings(body, text), set()
-    if _SERVED_MARK not in text:
-        _und = undefined_names(text)
-        _hole = set()
-        _m = re.search(r"WHAT YOUR SOLVE MUST LEAVE BEHIND[^\n]*\n((?:#[^\n]*\n)+)", text)
-        if _m:
-            _hole = set(re.findall(r"^#\s{3,}([A-Za-z_]\w*)\s*$", _m.group(1), re.M))
-        _left = [f for f in _und if re.match(r"`([A-Za-z_]\w*)` is used", f)
-                 and re.match(r"`([A-Za-z_]\w*)`", f).group(1) in _hole]
-        out += [f for f in _und if f not in _left]
-        _names = sorted({re.match(r"`([A-Za-z_]\w*)`", f).group(1) for f in _left})
-        if _names:
-            out.append("your solve has not yet defined " + ", ".join(f"`{n}`" for n in _names)
-                       + " from the list this file ends with (WHAT YOUR SOLVE MUST LEAVE "
-                         "BEHIND); the run stops at the first line that uses one.")
+    out += _hole_name_findings(text)
     for backend, pattern, error, fix in _TRAPS:
         if backend not in codes or (backend, pattern) in seen:
             continue
@@ -781,8 +1857,14 @@ def participant_findings(text: str) -> list:
         if not m:
             continue
         seen.add((backend, pattern))
-        line = body[:m.start()].count("\n") + 1
-        out.append(f"{backend}: `{m.group(0).strip()}` (near line {line} of the stripped source) -- "
+        # A pattern that reads the whole file first names only its `hit`; a hit over several lines
+        # (a value followed from the call that made it to the attribute read on it) is quoted by its
+        # first and last line.
+        grp = "hit" if "hit" in m.re.groupindex else 0
+        lines = [ln.strip() for ln in m.group(grp).strip().splitlines() if ln.strip()]
+        quoted = lines[0] if len(lines) <= 1 else f"{lines[0]}` ... `{lines[-1]}"
+        line = body[:m.start(grp)].count("\n") + 1
+        out.append(f"{backend}: `{quoted}` (near line {line} of the stripped source) -- "
                    f"this run will stop with {error}. {fix}. Measured on this install.")
     return out
 
@@ -926,25 +2008,202 @@ _EXPORTS_WRITE = __import__("re").compile(
     r"""json\.dump\([^)]*['"]exports\.json['"]""", __import__("re").S)
 
 
-_SERVED_CHECK_LABELS = (("EXPORT SELF-CHECK", "the export self-check"),
-                        ("OUTER BOUNDARY", "the held-edge check"),
-                        ("INTERFACE DOFS", "the interface list against the mesh"),
-                        ("INTERFACE VERTICES", "the interface list against the mesh"),
-                        ("SOLVE SELF-CHECK", "the solve self-check"))
+# ── which served checks a side lacks, read from ITS OWN served contract ─────
+#
+# Both notes below named one fixed list -- export self-check, held-edge check, interface list,
+# solve self-check -- to every side. Measured over the served text of every contract: only the
+# NGSolve heat contract carries all four; the held-edge check is otherwise the Kratos Neumann
+# side's alone, the solve self-check NGSolve's alone, and the interface list NGSolve's and the
+# FEniCSx and scikit-fem heat contracts'. A scikit-fem heat side was told it lacked a held-edge check
+# and a solve self-check its contract never had, a Kratos side NGSolve's checks, and a 4C side three
+# checks its scaffold does not carry, while the per-level dump that scaffold writes went unnamed. So
+# the list is read from the served contract of the side's own code and role.
+#
+# (what it is called, how a served contract carries it, how a file shows it has it). A served check
+# is a STOP. A file's label counts wherever it is, except on a line that is a print: a check demoted
+# to a print no longer stops the run, and that is the one edit this can tell reliably (a label left in
+# a comment may sit over a stop reworded below it, so it still counts). _check_text drops the prints.
+_SERVED_CHECKS = (
+    ("export self-check", re.compile(r"EXPORT SELF-CHECK:"), re.compile(r"EXPORT SELF-CHECK")),
+    ("held-edge check", re.compile(r"OUTER BOUNDARY:"), re.compile(r"OUTER BOUNDARY")),
+    ("interface list against the mesh", re.compile(r"INTERFACE (?:DOFS|VERTICES):"),
+     re.compile(r"INTERFACE (?:DOFS|VERTICES)")),
+    ("solve self-check", re.compile(r"SOLVE SELF-CHECK:"), re.compile(r"SOLVE SELF-CHECK")),
+    # a file name carrying the level, written per level; a file shows it by any such name or write
+    ("per-level dump", re.compile(r"""f["'][^"'\n]*level[^"'\n]*\{"""),
+     re.compile(r"""PER-LEVEL|f["'][^"'\n]*(?:level|lvl)[^"'\n]*\{"""
+                r"""|(?:open|savetxt|to_csv|write_text|dump)\s*\([^\n]*(?:level|lvl)""", re.I)),
+)
+# THE PER-LEVEL DUMP IS NAMED FOR 4C ONLY. The Python sides keep it (above: of 35 written sides, 23
+# dropped the self-check and kept the dump, none the reverse); the 4C sides of one round wrote none,
+# and a ladder whose side keeps no per-level file keeps only its last level.
+_DUMP_NAMED_FOR = frozenset({"fourc"})
+# A 4C side imports no solver module: it writes a deck and runs the binary.
+_FOURC_SIDE = re.compile(r"PROBLEMTYPE|fourc_bin|FOURC_BIN|\.4C\.ya?ml|SCALAR TRANSPORT DYNAMIC")
+_DOOR_ROLES = ("", "elastic", "thermoelastic", "transient", "3d", "neumann")
+# the partner's role -> the roles this side can have in the same coupling
+_PARTNER_ROLES = {"base": ("base", "neumann"), "neumann": ("base", "neumann"),
+                  "tsi_mech": ("tsi_thermal",), "tsi_thermal": ("tsi_mech",),
+                  "fsi_fluid": ("fsi_solid",), "fsi_solid": ("fsi_fluid",)}
+# A side that states it is the Neumann (or Dirichlet) side: `SIDE = "neumann"`, or the first line
+# of the Kratos Neumann contract, "... (NEUMANN side)."
+_STATED_SIDE = re.compile(r"""^[ \t]*SIDE[ \t]*=[ \t]*["'](neumann|dirichlet)["']|\((NEUMANN|DIRICHLET) side\)""",
+                          re.M | re.I)
 
 
-def _served_checks_lacking(content: str) -> list:
-    """The served checks a file lacks, read from the file: a re-typed contract that kept
-    its held-edge stop under a renamed comment was told it carried none of them."""
-    missing = []
-    for lab, what in _SERVED_CHECK_LABELS:
-        if lab not in content and what not in missing:
-            if lab == "INTERFACE DOFS" and "INTERFACE VERTICES" in content:
+def _stated_side(content: str) -> str:
+    m = _STATED_SIDE.search(content or "")
+    return (m.group(1) or m.group(2)).lower() if m else ""
+
+
+def _side_codes(content: str) -> list:
+    codes = [_CONTRACT_DOOR[c] for c in backends_in(content) if c in _CONTRACT_DOOR]
+    if _FOURC_SIDE.search(content) and "fourc" not in codes:
+        codes.append("fourc")
+    # A PYTHON WRAPPER THAT RUNS A deal.II BINARY imports no solver module; it names
+    # deal.II in its code (measured: its restore call offered no code, or another one's).
+    if (not codes and "subprocess" in content
+            and re.search(r"deal\.?ii|DEALII", content, re.I)):
+        codes.append("dealii")
+    # AND ONE THAT WRITES A FEBio DECK AND RUNS THE BINARY (measured: a FEBio elastic side that lost
+    # its served Neumann branch was never judged, because no code was read off it).
+    if not codes and "subprocess" in content and "<febio_spec" in content:
+        codes.append("febio")
+    return codes
+
+
+@functools.lru_cache(maxsize=1)
+def _contracts_by_role() -> dict:
+    """{(code, role): (its served lines, the lines no other role of that code serves, the checks it
+    carries, its served stops, its served functions, its branches that take the partner's data in, its
+    served text)} for every contract a door serves: the main
+    door's roles exactly as participant_contract_text returns them (the 4C and DUNE-fem base
+    contracts are the door's scaffold), and the thermo-mechanical and fluid-structure contracts
+    through the same serving door. A served stop is (condition, message head, label, side), as
+    _guards_of reads it, outside the served functions; a served function is (name, side).
+    Empty when the doors cannot be read, and then no list is named."""
+    try:
+        from tools import coupling_knowledge as ck                # noqa: PLC0415
+    except Exception:                                             # noqa: BLE001
+        return {}
+    texts = {}
+    for key in getattr(ck, "_BACKEND_ORDER", ()):
+        for role in _DOOR_ROLES:
+            try:
+                text, err = ck.participant_contract_text(key, f"participant:{role}" if role else "participant")
+            except Exception:                                     # noqa: BLE001
                 continue
-            if lab == "INTERFACE VERTICES" and "INTERFACE DOFS" in content:
+            if text and not err:
+                texts[(key, role or "base")] = text
+        for q in sorted(_PARTICIPANT_DIR.glob(f"participant_[tf]si_*_{key}.py")):
+            try:
+                texts[(key, "_".join(q.stem.split("_")[1:3]))] = ck._serve_participant(q)
+            except Exception:                                     # noqa: BLE001
                 continue
-            missing.append(what)
-    return missing
+    lines = {kr: frozenset(ln.strip() for ln in t.splitlines() if len(ln.strip()) >= 40)
+             for kr, t in texts.items()}
+    out = {}
+    for (key, role), t in texts.items():
+        others = set().union(*[v for (k, r), v in lines.items() if k == key and r != role])
+        carried = tuple(name for name, served, _has in _SERVED_CHECKS
+                        if served.search(t) and (name != "per-level dump" or key in _DUMP_NAMED_FOR))
+        funcs = _served_functions(t)
+        out[(key, role)] = (lines[(key, role)], frozenset(lines[(key, role)] - others), carried,
+                            tuple(_guards_of(t, inside=[(r0, r1) for _n, r0, r1, _s in funcs])),
+                            tuple((n, s) for n, _r0, _r1, s in funcs), _served_branches(t), t)
+    return out
+
+
+def _served_branches(text: str) -> tuple:
+    """(side, label, its served lines squashed) of each module-level `if SIDE == ...` branch of a
+    served contract that reads the partner's data (imp): the lines that take the partner's values or
+    normal_fluxes into this side's system on that side. Measured on a coupled round: two workers
+    re-typed the scikit-fem elastic contract and dropped its Neumann branch, the one line that adds
+    the partner's traction into the load among them; no served function and no served stop was lost,
+    so nothing named it, and the side never applied the partner's traction."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return ()
+    rows = text.splitlines()
+    out = []
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        side, plain = _side_test(node.test)
+        if not side:
+            continue
+        branches = [(side, node.body)]
+        if plain and node.orelse and not (len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If)):
+            branches.append((_OTHER_SIDE[side], node.orelse))
+        for s, body in branches:
+            if not any(isinstance(n, ast.Name) and n.id == "imp" for st in body for n in ast.walk(st)):
+                continue
+            lines = [code for st in body if not isinstance(st, ast.Raise)
+                     for r in range(st.lineno - 1, getattr(st, "end_lineno", None) or st.lineno)
+                     if len(code := rows[r].split("#", 1)[0].strip()) >= 12]
+            if lines:
+                label = f"`{lines[0][:60]}`" + (f" ... `{lines[-1][:70]}`" if len(lines) > 1 else "")
+                out.append((s, label, frozenset(_squash(l) for l in lines)))
+    return tuple(out)
+
+
+def _side_roles(content: str, partner_text=None) -> list:
+    """The served contracts, as (code, role), this side can be.
+
+    In this order: the partner's served contract names the coupling (a heat partner makes this a heat
+    side, a thermo-mechanical one the other thermo-mechanical role), and a side that states it is the
+    Neumann side picks that contract where its code has one; else the file's own served lines -- a
+    side re-typed from one contract carries lines only that contract serves (measured over 376
+    recorded hand-written sides: where the best role held 5 % of its own lines, the next held at most
+    3 %); else every contract its code serves, whose common checks are the only ones named."""
+    table = _contracts_by_role()
+    codes = _side_codes(content)
+    cands = [kr for kr in table if kr[0] in codes]
+    if not cands:
+        return []
+    if partner_text:
+        have = {ln.strip() for ln in partner_text.splitlines()}
+        best = max(((len(v[0] & have) / len(v[0]), kr) for kr, v in table.items() if v[0]), default=None)
+        if best and best[0] >= 0.5:
+            want = _PARTNER_ROLES.get(best[1][1], (best[1][1],))
+            cands = [kr for kr in cands if kr[1] in want]    # none: its code serves no such contract
+    side = _stated_side(content)
+    if side and {"base", "neumann"} <= {r for _k, r in cands}:
+        keep = "neumann" if side == "neumann" else "base"
+        cands = [kr for kr in cands if kr[1] == keep or kr[1] not in ("base", "neumann")]
+    if len(cands) <= 1:
+        return cands
+    have = {ln.strip() for ln in content.splitlines()}
+    scores = sorted(((len(table[kr][1] & have) / len(table[kr][1]), kr) for kr in cands if table[kr][1]),
+                    reverse=True)
+    if scores and scores[0][0] >= 0.05 and (len(scores) == 1 or 3 * scores[1][0] <= scores[0][0]):
+        return [scores[0][1]]
+    return cands
+
+
+def _served_checks_lacking(content: str, partner_text=None) -> list:
+    """The checks this side's own served contract carries and the file does not.
+
+    Read from the served contract of the side's code and role (_side_roles); when the role is not
+    known, only the checks every contract of its code carries are named."""
+    table = _contracts_by_role()
+    roles = _side_roles(content, partner_text)
+    if not roles:
+        return []
+    carried = set.intersection(*[set(table[kr][2]) for kr in roles])
+    text = _check_text(content)
+    return [name for name, _served, has in _SERVED_CHECKS if name in carried and not has.search(text)]
+
+
+def _check_text(content: str) -> str:
+    """The file without the lines that are prints: a label there is a check that no longer stops."""
+    return re.sub(r"^[ \t]*print\s*\([^\n]*", "", content, flags=re.M)
+
+
+def _named(items: list) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def missing_export_selfcheck(content: str) -> str:
@@ -976,14 +2235,12 @@ def missing_export_selfcheck(content: str) -> str:
         # AND THE OTHER SERVED CHECKS IT LACKS. Measured: a side re-written by hand
         # beside a partner that was hand-written too dropped the solve self-check that
         # had caught its defect three times, and only this note spoke, naming one block.
-        + _also_lacks([w for w in _served_checks_lacking(content) if w != "the export self-check"]))
+        # Only the checks its own code's served contract carries (_served_checks_lacking).
+        + _also_lacks([w for w in _served_checks_lacking(content) if w != "export self-check"]))
 
 
 def _also_lacks(items: list) -> str:
-    if not items:
-        return ""
-    said = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
-    return f" It also lacks {said}."
+    return f" It also lacks the served {_named(items)}." if items else ""
 
 
 # ── the imported values that never reached the answer ──────────────────────
@@ -1025,7 +2282,10 @@ _BOUND_NAME = re.compile(r"^\s*(\w+)\s*=\s*([^\n]*)", re.M)
 _IFACE_NAME = re.compile(r"interface|iface", re.I)
 # a mask bit cleared -- not an attribute's subscript: `gfu.vec[int(d)] = 0.0` zeroes a value
 # and was read as a mask, which silenced "nothing holds those entries fixed" (measured)
-_FREE_MASK = re.compile(r"(?<![\w.])\w+\s*\[\s*(?:int\()?\w+\)?\s*\]\s*=\s*(?:False|0)\b")
+# ... and a single bit cleared by name, m.Clear(i), is the same act (measured: a file that cleared
+# each interface dof this way was told no free-dof mask excludes them)
+_FREE_MASK = re.compile(r"(?<![\w.])\w+\s*\[\s*(?:int\()?\w+\)?\s*\]\s*=\s*(?:False|0)\b"
+                        r"|(?<![\w.])\w+\.Clear\s*\(\s*[^)\s][^)]*\)")
 _BILINEAR = re.compile(r"\bBilinearForm\s*\(")
 
 # ── WHICH LINES CAN RUN TOGETHER ───────────────────────────────────────────
@@ -1255,9 +2515,33 @@ def unset_mask_bits(content: str) -> str:
     return ""
 
 
-def imported_values_not_held(content: str) -> str:
-    """'' unless partner values are loaded into the solution vector and then lost."""
+def _config_side(near) -> str:
+    """The side ("neumann" or "dirichlet") config.json beside the file states, or ''."""
+    if near is None:
+        return ""
+    try:
+        import json as _json                                      # noqa: PLC0415
+        cfg = _json.loads((Path(near).parent / "config.json").read_text() or "{}")
+    except (OSError, ValueError):
+        return ""
+    side = str(cfg.get("side", "")).strip().lower() if isinstance(cfg, dict) else ""
+    return side if side in ("neumann", "dirichlet") else ""
+
+
+def imported_values_not_held(content: str, near=None) -> str:
+    """'' unless partner values are loaded into the solution vector and then lost. `near` is the
+    path of the file judged: config.json beside it may state the side."""
     if not isinstance(content, str) or "ngsolve" not in backends_in(content):
+        return ""
+    # A NEUMANN SIDE HOLDS NO TRACE. Measured: a Neumann side that wrote imported values
+    # into its vector as a starting guess was told to hold its interface fixed.
+    # AND THE SIDE MAY BE STATED IN config.json, which the served contracts read over the
+    # file's SIDE: a correct Neumann side that set its role there, its SIDE constant left at
+    # the served "dirichlet", drew this check's finding nine times (measured).
+    _side = _config_side(near)
+    if _side == "neumann" or (not _side and (
+            re.search(r"^SIDE\s*=\s*[\"']neumann[\"']", content, re.M | re.I)
+            or re.search(r"\(NEUMANN side\)", content[:400], re.I))):
         return ""
     body = _strip_strings_and_comments(content)
     bound = _solver_bound_names(body)
@@ -1312,6 +2596,18 @@ def imported_values_not_held(content: str) -> str:
                     f"is never solved" + (", and the load is written over" if y.endswith(".vec")
                                           and y[:-4] in _lfs else "")
                     + ". A solve's result has to land in the solution vector.")
+    # A SOLVE INTO A TEMPORARY THROUGH Mult IS A SOLVE TOO. `inv.Mult(f.vec, tmp)` then
+    # `gfu.vec.data = tmp` replaced the solution vector with the load's solve, and no line of it read
+    # as a solve here (measured: silent at write time, stopped later by the run-time self-check).
+    # What the temporary holds is the inverse applied to Mult's first argument.
+    mult_src = {}
+    for mm in _INVERSE_MULT.finditer(body):
+        if mm.group("inv") and mm.group("inv") not in _invs and mm.group("inv") not in bound:
+            continue
+        x, y = re.sub(r"\s", "", mm.group("x")), re.sub(r"\s", "", mm.group("y"))
+        if re.fullmatch(r"[A-Za-z_]\w*", y) and not x.startswith("-"):
+            mult_src[y] = f"{mm.group('inv') or 'Inverse(...)'} * {x}"
+            temps.setdefault(y, " ".join(mm.group(0).split()).rstrip(",)") + ")")
     dropped = _DISCARDED_SOLVE.search(body)
     if dropped:
         return (f"`{' '.join(dropped.group(0).split())[:90]}` computes a solve and throws its "
@@ -1347,6 +2643,9 @@ def imported_values_not_held(content: str) -> str:
         a finding: a vector whose definition the script does not show is not
         called wrong."""
         expr = expr.strip()
+        base = re.sub(r"\.data\s*$", "", expr)
+        if base in mult_src and depth <= 2:            # a temporary a Mult wrote into
+            return _applied_to(mult_src[base], depth + 1)
         if "-" in expr and ".mat" in expr:
             return "residual"
         # f - A u written in two steps: `Au.data = a.mat * gfu.vec` then `f.vec - Au`
@@ -1366,6 +2665,13 @@ def imported_values_not_held(content: str) -> str:
             return "load"
         return _applied_to(d, depth + 1)
 
+    # The index is usually the loop variable, so the interface name sits on
+    # the `for` line above it rather than inside the brackets. Read the
+    # write together with the lines that bind it.
+    def _from_interface(w) -> bool:
+        head = body[:w.start()].rsplit("\n", 4)[1:]
+        return bool(_IFACE_NAME.search("\n".join(head) + w.group(0)))
+
     for sol, op, rhs, at, lhs_form in solves:
         writes = list(re.finditer(rf"\b{re.escape(sol)}\.vec\s*\[([^\]]+)\]\s*=(?!=)\s*([^\n]*)", body))
         # A ZERO START IS NOT A LOST CONDITION. `gfu.vec[:] = 0.0` before an
@@ -1382,8 +2688,6 @@ def imported_values_not_held(content: str) -> str:
             if not _never_together(body, s.start(), at)
             and not re.match(r"(?:(?:CoefficientFunction|CF)\s*\(\s*)?\(?\s*0*\.?0*(?:e[+-]?\d+)?"
                              r"\s*\)?\s*(?:\)|,)", s.group(1), re.I)][:1]
-        if not before:
-            continue                                   # nothing essential loaded into it
         # IN WORDS, NOT AS THE TWO LINES OF THE SOLVE: the literal residual-form
         # solve given here was copied verbatim into correct runs, and the linear
         # solve is one of the things openPASO does not serve.
@@ -1392,6 +2696,26 @@ def imported_values_not_held(content: str) -> str:
                    "leave -- the load minus the assembled operator applied to them -- "
                    "and ADD the result. That is the one form in which the fixed values "
                    "both stay and reach the interior.")
+        if not before:
+            # THE LOAD SOLVED ALONE, THE HELD VALUES WRITTEN BACK AFTER IT. Nothing is lost
+            # before the solve, so this check passed it -- and the interior was computed without
+            # the interface values, which only the exported trace then carries (measured: silent
+            # at write time, stopped later by the run-time self-check). A correction solved from
+            # the residual and written back is the right form, and is not this.
+            after = [w for w in writes if w.start() > at and _from_interface(w)]
+            if op == "=" and "+" not in rhs and after and _applied_to(rhs) == "load":
+                said = " ".join(rhs.split())
+                said = said if len(said) <= 72 else said[:69] + "..."
+                _t = re.sub(r"\.data\s*$", "", rhs.strip())
+                if _t in temps:
+                    said += f"`, where `{_t}` is `{' '.join(temps[_t].split())[:60]}"
+                return (
+                    f"`{sol}.{lhs_form} = {said}` solves the load alone, and the interface values "
+                    f"written into `{sol}.vec[...]` after it never reach the interior: it was "
+                    "computed without them and is the answer to a different problem, while the "
+                    "exported trace carries them. This converges, so the residual history will "
+                    "not tell you. " + lifting)
+            continue                                   # nothing essential loaded into it
         if op == "=" and "+" not in rhs:
             said = " ".join(rhs.split())
             said = said if len(said) <= 72 else said[:69] + "..."
@@ -1412,21 +2736,23 @@ def imported_values_not_held(content: str) -> str:
                 return (
                     f"`{sol}.{lhs_form} = {said}` replaces the whole vector with the "
                     "CORRECTION alone: the inverse on the free dofs leaves zero on every "
-                    "held one, so the values written there before -- the partner's trace, "
-                    "the outer values -- are zeroed and never written back. ADD the "
-                    "correction to the vector instead, or write the held values back "
-                    "after it.")
+                    "held one, and the values written there before are not written back. "
+                    "Where any of them is not zero -- the partner's trace, an outer value -- "
+                    "the field no longer holds it. ADD the correction to the vector instead, "
+                    "or write the held values back after it.")
+            # WHAT THIS READS IS THE TEXT: values written, then the vector replaced. Whether
+            # they were zero it cannot read (measured: it said "the answer to a different
+            # problem" nine times of a side whose held values were an outer value of 0).
             return (
                 f"`{sol}.vec[...]` is written with values first and then "
                 f"`{sol}.{lhs_form} = {said}` replaces the whole vector, so those "
-                "entries are gone by the time anything reads them: whatever "
-                "they held -- prescribed outer values on any side, the partner's "
-                "interface trace on a Dirichlet side -- is loaded, discarded, and "
-                "the system is solved as though those boundaries carried a zero "
-                "condition. Re-applying the values AFTER the solve does not repair "
-                "it -- the interior was computed without them and is the answer to "
-                "a different problem. This is the one defect that still converges, "
-                "so the residual history will not tell you. " + lifting)
+                "values are gone by the time anything reads them. Where any of them "
+                "is not zero -- a prescribed outer value, the partner's interface "
+                "trace on a Dirichlet side -- the system was solved as though that "
+                "boundary were held at zero, re-applying the value AFTER the solve "
+                "does not repair the interior, and it still converges, so the "
+                "residual history will not tell you; values that are all zero lose "
+                "nothing. " + lifting)
         if op == "+=" and _applied_to(rhs) == "load":
             # MEASURED: the old closing hint here ("an update keeps what is already
             # there") steered two runs into exactly this form, and the check was
@@ -1439,36 +2765,58 @@ def imported_values_not_held(content: str) -> str:
                 "partner's interface trace, the prescribed outer values -- never reach "
                 "the interior. It converges, and its error does not shrink with the "
                 "mesh. " + lifting)
-        # The index is usually the loop variable, so the interface name sits on
-        # the `for` line above it rather than inside the brackets. Read the
-        # write together with the lines that bind it.
-        def _from_interface(w) -> bool:
-            head = body[:w.start()].rsplit("\n", 4)[1:]
-            return bool(_IFACE_NAME.search("\n".join(head) + w.group(0)))
-
         # A MASK OF ITS OWN IS A MASK. A solve inverted on a BitArray the script
         # built (cleared, then the free bits set) may well hold the interface; this
         # branch only knew masks made by clearing bits and called such a side
         # "nothing holds those entries fixed" (measured on a recorded fill whose
         # mask was broken for another reason, named by unset_mask_bits).
-        def _custom_mask(expr: str) -> bool:
+        def _inverse_arg(expr: str) -> str:
+            """The WHOLE first argument of the Inverse the solve applies, traced through a temporary
+            or a name bound to the inverse; '' when there is none. Read to its closing comma or
+            parenthesis: `Inverse(fes.FreeDofs() & mask, ...)` was read as `fes.FreeDofs()`."""
             src = temps.get(re.sub(r"\.data\s*$", "", expr.strip()), expr)
-            inv = re.search(r"Inverse\s*\(\s*([^,()]+(?:\([^()]*\))?)", src)
-            if not inv:
-                for n in bound:
-                    if re.search(rf"\b{re.escape(n)}\b", src):
-                        inv = re.search(r"Inverse\s*\(\s*([^,()]+(?:\([^()]*\))?)", _definition(n))
-                        break
-            if not inv:
-                return False
-            arg = inv.group(1).strip()
-            if "FreeDofs" in arg:
+            for t in [src] + [_definition(n) for n in bound if re.search(rf"\b{re.escape(n)}\b", src)]:
+                m = re.search(r"Inverse\s*\(", t)
+                if not m:
+                    continue
+                depth, j = 0, m.end()
+                while j < len(t) and not (depth == 0 and t[j] in ",)"):
+                    depth += {"(": 1, "[": 1, ")": -1, "]": -1}.get(t[j], 0)
+                    j += 1
+                return re.sub(r"^\s*freedofs\s*=\s*", "", t[m.end():j]).strip()
+            return ""
+
+        def _custom_mask(expr: str) -> bool:
+            arg = _inverse_arg(expr)
+            if not arg or "FreeDofs" in arg:
                 return False
             d = _definition(arg) if re.fullmatch(r"\w+", arg) else ""
             return not re.fullmatch(r"\s*[\w\.]+\.FreeDofs\s*\([^)]*\)\s*", d or "")
 
+        # A MASK THE SCRIPT BUILDS IS DECIDED BY THE SCRIPT, OR BY THE CHECK THAT READS IT. Measured:
+        # a file took fes.FreeDofs(), cleared it and set only the free dofs off the interface, and was
+        # told "no free-dof mask excludes them"; another never zeroed its BitArray, and the same
+        # sentence named the wrong fault. A mask in the inverse's argument that is zeroed and then set
+        # bit by bit is the script's own choice of free dofs, which this check cannot read without
+        # running it; an unzeroed one is named by unset_mask_bits. Either way this note says nothing.
+        def _mask_decided_elsewhere(expr: str) -> bool:
+            arg = _inverse_arg(expr)
+            names = set(re.findall(r"[A-Za-z_]\w*", arg))
+            for nm in list(names):
+                names.update(re.findall(r"[A-Za-z_]\w*", _definition(nm)))
+            for nm in names:
+                n_ = re.escape(nm)
+                first = re.search(rf"\b{n_}\.Set\s*\(\s*[^)\s]|\b{n_}\s*\[(?!\s*:\s*\])[^\]\n]+\]\s*=(?!=)\s*(?:True|1)\b",
+                                  body)
+                zero = re.search(rf"\b{n_}\.Clear\s*\(\s*\)|\b{n_}\s*\[\s*:\s*\]\s*=(?!=)\s*(?:False|0)\b", body)
+                if first and zero and zero.start() < first.start():
+                    return True
+            unzeroed = re.match(r"`(\w+) = BitArray", unset_mask_bits(content) or "")
+            return bool(unzeroed and unzeroed.group(1) in names)
+
         if (any(_from_interface(w) for w in writes)
-                and not _FREE_MASK.search(body) and not _custom_mask(rhs)):
+                and not _FREE_MASK.search(body) and not _custom_mask(rhs)
+                and not _mask_decided_elsewhere(rhs)):
             dm = re.search(r"H1\s*\([^)]*dirichlet\s*=\s*([\"'][^\"']*[\"']|\([^)]*\))", content)
 
             def _holds_interface(spec: str) -> bool:
@@ -1494,49 +2842,344 @@ def imported_values_not_held(content: str) -> str:
     return ""
 
 
-# ── the tetrahedra that were never checked for sign ────────────────────────
+# ── the tetrahedra the author built, judged as a split of the hex ─────────
 #
 # Kratos ships no mesher, so a 3D participant writes its own connectivity, and
-# the naive path decomposition of a hexahedron puts three of its six
-# tetrahedra in an ODD permutation. A negatively oriented LaplacianElement3D4N
-# assembles a singular system: "LUSkylineFactorization: Error zero sum", and
-# every recovered reaction comes back NaN. The failure does not name the mesh,
-# so it reads as a solver problem and is debugged in the wrong place -- one
-# recorded cell spent its whole budget on it and wrote two throwaway probe
-# scripts before reporting the backend broken. It is not broken: the served
-# contract builds the same elements and recovers finite fluxes.
+# Kratos assembles any four nodes it is handed without a word about the mesh.
+# MEASURED on this install (Kratos 10.3, the 3-D contract with its split swapped,
+# placeholder data): a flat tetrahedron gives NaN fluxes, with "ATTENTION!
+# setting the RHS to zero!" when three of six are flat; a mix of positive and
+# negative ones stops the solve with "Error zero sum" (skyline LU) or "Zero sum
+# in skyline_lu factorization" (AMGCL), or skips it with the RHS warning and
+# exports the field it started from; all of them negative gives the right field
+# with the flux sign flipped, silently; overlapping ones give a smooth field and
+# a wrong flux, silently.
 #
-# MEASURED: 48 recorded scripts build 3D4N elements by hand and 29 of them
-# check no sign at all; every recorded run among those was incomplete.
-# Silent on the served set.
-#
-# It names the defect, not the mesh: which decomposition to use stays the
-# author's choice, and the only claim is that a tetrahedron handed to an
-# element has to have positive volume.
+# THE SERVED LINES ARE NOT THE AUTHOR'S. This check looked for np.cross or
+# np.linalg.det anywhere in the file, and the served 3-D contract carries both
+# (its interface areas and its conservation check), so no filled served contract
+# ever drew it while all five cells of one round filled its mesh hole with an
+# invalid split (measured). It now reads only the lines the author wrote, and
+# where it can read the split itself -- corners named by their offsets, or a
+# table of corner numbers whose numbering is in sight -- it judges the split:
+# flat, negative (unless the author's own swap turns them round), filling the
+# hex once, and meeting the next hex face to face when repeated.
 
 _TET_ELEMENT = re.compile(r"CreateNewElement\s*\(\s*[\"'][A-Za-z]*3D4N[\"']")
 _ORIENT_CHECK = re.compile(
     r"np\.cross|numpy\.cross|np\.linalg\.det|numpy\.linalg\.det|signed[_ ]?volume|orient",
     re.I)
+_SIGN_SWAP = re.compile(r"(?:vol\w*|det\w*|np\.dot\(np\.cross\(.*\)|\bv\d?)\s*<=?\s*0(?:\.0*)?\s*:")
+_KUHN_LINE = "(0, 1, 3, 7) (0, 1, 7, 5) (0, 2, 7, 3) (0, 2, 6, 7) (0, 4, 5, 7) (0, 4, 7, 6)"
+_TET_SYMPTOMS = (
+    "Kratos assembles such a mesh without naming it -- measured on this install: flat "
+    "tetrahedra give NaN fluxes (with 'setting the RHS to zero' when many are flat), a mix of "
+    "signs stops the solve with 'Error zero sum' or skips it with that same RHS warning, all "
+    "negative flips the flux sign, and overlapping ones give a smooth field with a wrong flux")
+
+
+def _own_line_numbers(content: str) -> set:
+    """The lines (1-based) the author wrote: all of them, unless the file is a served
+    contract, whose served lines (its holes cut) are the contract's and not the author's."""
+    rows = content.splitlines()
+    tpl = _template_of(content)
+    if tpl is None:
+        return set(range(1, len(rows) + 1))
+    served = {ln.strip() for ln in _HOLE_RE.sub("", tpl).splitlines() if ln.strip()}
+    return {i for i, ln in enumerate(rows, 1) if ln.strip() and ln.strip() not in served}
+
+
+def _index_term(e):
+    """(name, 0) for `i`, (name, 1) for `i + 1` or `1 + i`; None for anything else."""
+    import ast
+    if isinstance(e, ast.Name):
+        return e.id, 0
+    if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):
+        for a, b in ((e.left, e.right), (e.right, e.left)):
+            if isinstance(a, ast.Name) and isinstance(b, ast.Constant) and b.value in (0, 1) \
+                    and not isinstance(b.value, bool):
+                return a.id, int(b.value)
+    return None
+
+
+def _unwrap(e):
+    """`int(x)` read as `x`."""
+    import ast
+    while (isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "int"
+           and len(e.args) == 1 and not e.keywords):
+        e = e.args[0]
+    return e
+
+
+def _corner(e):
+    """(array, loop names, offsets) of a corner written nid[i + 1, j, k] (or with a tuple
+    index); None for anything else."""
+    import ast
+    e = _unwrap(e)
+    if not (isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name)
+            and isinstance(e.slice, ast.Tuple) and len(e.slice.elts) == 3):
+        return None
+    terms = [_index_term(x) for x in e.slice.elts]
+    if any(t is None for t in terms) or len({t[0] for t in terms}) != 3:
+        return None
+    return e.value.id, tuple(t[0] for t in terms), tuple(t[1] for t in terms)
+
+
+def _bit_numbering(tree, own):
+    """{array: shift per index} where corner b is written nid[i + (b & 1), j + ((b >> 1) & 1),
+    k + ((b >> 2) & 1)] in the author's lines; the shifts say which bit of b runs along which index."""
+    import ast
+
+    def shift(x):
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.BitAnd) and \
+                isinstance(x.right, ast.Constant) and x.right.value == 1:
+            y = x.left
+            if isinstance(y, ast.Name):
+                return y.id, 0
+            if isinstance(y, ast.BinOp) and isinstance(y.op, ast.RShift) and \
+                    isinstance(y.left, ast.Name) and isinstance(y.right, ast.Constant):
+                return y.left.id, int(y.right.value)
+        return None
+
+    out = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Subscript) and getattr(node, "lineno", 0) in own
+                and isinstance(node.value, ast.Name) and isinstance(node.slice, ast.Tuple)
+                and len(node.slice.elts) == 3):
+            continue
+        s = []
+        for x in node.slice.elts:
+            if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Add):
+                s.append(shift(x.right) or shift(x.left))
+            else:
+                s.append(None)
+        if all(s) and len({v for v, _ in s}) == 1 and sorted(b for _, b in s) == [0, 1, 2]:
+            out[node.value.id] = tuple(b for _, b in s)
+    return out
+
+
+def _axes_of(tree, array: str):
+    """Which physical axis (0 x, 1 y, 2 z) each index of `array` runs along, read from the
+    line that stores a node id in it and the CreateNewNode call that made that node; None when
+    the code does not say it plainly."""
+    import ast
+    # a coordinate passed by name (x = X0 + i * hx; CreateNewNode(c, x, y, z)) is read through
+    # the assignments that give that name its value
+    given = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            given.setdefault(node.targets[0].id, set()).update(
+                n.id for n in ast.walk(node.value) if isinstance(n, ast.Name))
+
+    def names_in(a):
+        found = {n.id for n in ast.walk(a) if isinstance(n, ast.Name)}
+        return found | set().union(*(given.get(n, set()) for n in found))
+
+    made = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr == "CreateNewNode" and len(node.args) >= 4:
+            made[ast.dump(node.args[0])] = [names_in(a) for a in node.args[1:4]]
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        t = node.targets[0]
+        if not (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == array
+                and isinstance(t.slice, ast.Tuple) and len(t.slice.elts) == 3
+                and all(isinstance(x, ast.Name) for x in t.slice.elts)):
+            continue
+        coords = made.get(ast.dump(node.value))
+        if coords is None:
+            continue
+        names = [x.id for x in t.slice.elts]
+        axes = []
+        for nm in names:
+            hit = [q for q, used in enumerate(coords) if nm in used and not (used & (set(names) - {nm}))]
+            if len(hit) != 1:
+                return None
+            axes.append(hit[0])
+        if sorted(axes) == [0, 1, 2]:
+            return tuple(axes)
+    return None
+
+
+def _written_splits(content: str, own: set) -> list:
+    """[(how it is written, line, [tetrahedra as corner labels], {label: offsets}, axes or None)]
+    for every hex split the author's lines spell out plainly: 5 or 6 tetrahedra whose corners
+    are named by their offsets, or a table of corner numbers with the numbering beside it."""
+    import ast
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return []
+    out = []
+    # corners named by their offsets: n100 = nid[i + 1, j, k]
+    named, unpacked = {}, set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and getattr(node, "lineno", 0) in own
+                and len(node.targets) == 1):
+            continue
+        t, v = node.targets[0], node.value
+        pairs = [(t, v)] if isinstance(t, ast.Name) else []
+        if isinstance(t, ast.Tuple) and isinstance(v, ast.Tuple) and len(t.elts) == len(v.elts):
+            pairs = list(zip(t.elts, v.elts))                   # n000, n100 = nid[...], nid[...]
+            unpacked.update((id(t), id(v)))                     # four names here are no tetrahedron
+        for tn, tv in pairs:
+            c = _corner(tv) if isinstance(tn, ast.Name) else None
+            if c:
+                named[tn.id] = c
+    lists = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) == 4
+                and getattr(node, "lineno", 0) in own and id(node) not in unpacked):
+            continue
+        if all(isinstance(e, ast.Name) and e.id in named for e in node.elts):
+            cs = [named[e.id] for e in node.elts]
+            labels = tuple(e.id for e in node.elts)
+        else:
+            cs = [_corner(e) for e in node.elts]
+            if not all(cs):
+                continue
+            labels = tuple(ast.unparse(_unwrap(e)) for e in node.elts)
+        if len({(c[0], c[1]) for c in cs}) != 1:
+            continue
+        lists.append((node.lineno, node.col_offset, labels, cs))
+    lists.sort(key=lambda r: (r[0], r[1]))
+    seen, tets, offs, first = set(), [], {}, None
+    for line, _col, labels, cs in lists:
+        if labels in seen:
+            continue
+        seen.add(labels)
+        tets.append(labels)
+        offs.update({lb: c[2] for lb, c in zip(labels, cs)})
+        first = first or (line, cs[0][0])
+    if 5 <= len(tets) <= 6 and len(set(offs.values())) >= 7:
+        out.append(("the tetrahedra named by their corners", first[0], tets, offs,
+                    _axes_of(tree, first[1])))
+    # a table of corner numbers, with corner b written nid[i + (b & 1), ...] beside it
+    bits = _bit_numbering(tree, own)
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.List, ast.Tuple)) and 5 <= len(node.elts) <= 6
+                and getattr(node, "lineno", 0) in own):
+            continue
+        rows = []
+        for r in node.elts:
+            if not (isinstance(r, (ast.List, ast.Tuple)) and len(r.elts) == 4 and all(
+                    isinstance(c, ast.Constant) and type(c.value) is int and 0 <= c.value <= 7
+                    for c in r.elts)):
+                break
+            rows.append(tuple(c.value for c in r.elts))
+        else:
+            # the array that holds node ids, where its axes can be read, before any other
+            ranked = sorted(bits.items(), key=lambda kv: _axes_of(tree, kv[0]) is None)
+            for array, sh in ranked[:1]:
+                offs = {str(b): tuple((b >> s) & 1 for s in sh) for b in range(8)}
+                out.append((f"the table of corner numbers read with {array}[i + (b & 1), ...]",
+                            node.lineno, [tuple(str(b) for b in r) for r in rows], offs,
+                            _axes_of(tree, array)))
+    return out
+
+
+def _split_defects(tets, offs, axes, swapped: bool) -> list:
+    """What is wrong with one hex split, measured on the unit hex: flat, negative (not when the
+    author swaps them round, and uniformly negative only when the index axes are known), not
+    filling the hex exactly once, and not meeting the next hex face to face."""
+    def vol6(t):
+        a, b, c, d = (offs[x] for x in t)
+        u, v, w = ([q[i] - a[i] for i in range(3)] for q in (b, c, d))
+        return (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0]))
+
+    n = len(tets)
+    sign = 1
+    if axes is not None:
+        perm = list(axes)
+        inv = sum(1 for i in range(3) for j in range(i + 1, 3) if perm[i] > perm[j])
+        sign = -1 if inv % 2 else 1
+    v = [sign * vol6(t) for t in tets]
+    say = lambda t: "[" + ", ".join(t) + "]"                     # noqa: E731
+    flat = [t for t, x in zip(tets, v) if x == 0]
+    has = lambda k: "has" if k == 1 else "have"                 # noqa: E731
+    if flat:
+        return [f"{len(flat)} of its {n} tetrahedra {has(len(flat))} zero volume, the four corners "
+                f"on one face of the hex (the first: {say(flat[0])})"]
+    out = []
+    neg = [t for t, x in zip(tets, v) if x < 0]
+    if neg and not swapped:
+        if len(neg) < n:
+            out.append(f"{len(neg)} of its {n} tetrahedra {has(len(neg))} negative volume and the "
+                       f"others positive (the first negative: {say(neg[0])})")
+        elif axes is not None:
+            out.append(f"all {n} of its tetrahedra have negative volume, so the flux comes out "
+                       f"with the wrong sign and nothing else shows it")
+    # fills the hex once: each tetrahedron turned positive, its outward faces must cancel
+    # pairwise inside the hex, and the volumes must add up to it
+    net, count = {}, {}
+    for t, x in zip(tets, v):
+        a, b, c, d = t if x > 0 else (t[0], t[1], t[3], t[2])
+        for f in ((b, c, d), (a, d, c), (a, b, d), (a, c, b)):
+            key = tuple(sorted(f))
+            odd = sum(1 for i in range(3) for j in range(i + 1, 3) if f[i] > f[j]) % 2
+            net[key] = net.get(key, 0) + (-1 if odd else 1)
+            count[key] = count.get(key, 0) + 1
+    on_face = lambda f: any(len({offs[p][ax] for p in f}) == 1 for ax in range(3))  # noqa: E731
+    filled = sum(abs(x) for x in v) == 6 and all(
+        (count[f] == 1 and on_face(f)) or (count[f] == 2 and net[f] == 0) for f in count)
+    if not filled:
+        out.append(f"its {n} tetrahedra do not fill the hex exactly once: they overlap or "
+                   f"leave a gap")
+        return out
+    # repeated in every hex: the diagonal on each face must match the one on the opposite face
+    for ax in range(3):
+        diag = {}
+        for f in count:
+            if count[f] != 1 or len({offs[p][ax] for p in f}) != 1:
+                continue
+            side = offs[f[0]][ax]
+            for p, q in ((f[0], f[1]), (f[0], f[2]), (f[1], f[2])):
+                d = [abs(offs[p][i] - offs[q][i]) for i in range(3) if i != ax]
+                if d == [1, 1]:
+                    ends = sorted(tuple(o for i, o in enumerate(offs[r]) if i != ax) for r in (p, q))
+                    diag.setdefault(side, set()).add(tuple(ends))
+        if diag.get(0) != diag.get(1):
+            out.append(f"repeated in every hex, it cuts the two faces normal to "
+                       f"{'xyz'[axes.index(ax)] if axes else 'one axis'} along different "
+                       f"diagonals, so neighbouring hexes do not meet face to face")
+            break
+    return out
 
 
 def unoriented_tetrahedra(content: str) -> str:
-    """'' unless tetrahedral elements are built by hand with no signed-volume check."""
+    """'' unless the author's own lines build tetrahedra that a mesh test would reject, or build
+    them with no test at all where nothing served tests them either."""
     if not isinstance(content, str) or not _TET_ELEMENT.search(content):
         return ""
-    if _ORIENT_CHECK.search(content):
+    own = _own_line_numbers(content)
+    rows = content.splitlines()
+    own_text = "\n".join(rows[i - 1] for i in sorted(own))
+    if not _TET_ELEMENT.search(own_text) and not re.search(r"CreateNewElement", own_text):
+        return ""                        # the served lines build nothing; the author built nothing
+    swapped = bool(_SIGN_SWAP.search(_strip_strings_and_comments(own_text)))
+    fact = (f"With the corners of a hex numbered b = i + 2*j + 4*k (the offsets along x, y, z), "
+            f"the Kuhn split {_KUHN_LINE} fills it exactly once, every volume positive, and meets "
+            f"the next hex face to face.")
+    for how, line, tets, offs, axes in _written_splits(content, own):
+        bad = _split_defects(tets, offs, axes, swapped)
+        if bad:
+            return (f"the hex split this script writes ({how}, line {line}) is not one Kratos can "
+                    f"solve right: " + "; ".join(bad) + f". {_TET_SYMPTOMS}. {fact}")
+    body = _strip_strings_and_comments(content)
+    if re.search(r"^\s*check_tets\s*\(", body, re.M):
+        return ""                        # the served mesh test judges the split when the run starts
+    if _ORIENT_CHECK.search(_strip_strings_and_comments(own_text)):
         return ""
     return (
-        "this script builds 3D4N tetrahedra from its own connectivity and never "
-        "checks their sign. Splitting a hexahedron along a path puts three of "
-        "the six tetrahedra in an odd permutation, and a negatively oriented "
-        "element assembles a singular system: the solve reports "
-        "'LUSkylineFactorization: Error zero sum' and every reaction you read "
-        "back is NaN. Nothing in that message mentions the mesh, so it is "
-        "usually debugged as a solver or a variable-registration problem and is "
-        "neither. Take the signed volume of each tetrahedron before you create "
-        "the element -- dot(cross(p1-p0, p2-p0), p3-p0) -- and swap two nodes "
-        "where it comes out negative.")
+        "this script builds 3D4N tetrahedra from its own connectivity and tests none of them. "
+        f"{_TET_SYMPTOMS}; none of these messages names the mesh. Test the tetrahedra before the "
+        "solve: every signed volume dot(cross(p1-p0, p2-p0), p3-p0)/6 above zero (a sign test "
+        "alone passes a flat one), the volumes adding up to the domain's, and every face inside "
+        "the domain shared by two tetrahedra from opposite sides (no overlap, no gap); the served "
+        f"3-D Kratos contract's check_tets(mp) does all three. {fact}")
 
 
 # ── the participant that answers without listening ─────────────────────────
@@ -1641,14 +3284,33 @@ _HOLE_RE = re.compile(r"# ── SOLVE ─ [^\n]*?DOES NOT SERVE THIS ─ begin.
 def _served_line_sets() -> tuple:
     """Per shipped contract, its served lines of 40 characters or more, holes cut."""
     out = []
+    for text in _served_templates():
+        lines = frozenset(ln.strip() for ln in _HOLE_RE.sub("", text).splitlines() if len(ln.strip()) >= 40)
+        if len(lines) >= 20:
+            out.append(lines)
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=1)
+def _served_templates() -> tuple:
+    """Every participant text openPASO serves: the shipped contract files, and the config-driven
+    scaffolds the 4C and DUNE-fem doors serve, which are no file here. Measured: a copy of the
+    served 4C scaffold scored 0.09 against the files alone, so a served 4C side read as
+    hand-written beside a served partner, and a demoted 4C stop was never judged."""
+    out = []
     try:
         for q in sorted(_PARTICIPANT_DIR.glob("participant_*.py")):
-            lines = frozenset(ln.strip() for ln in _HOLE_RE.sub("", q.read_text(errors="ignore")).splitlines()
-                              if len(ln.strip()) >= 40)
-            if len(lines) >= 20:
-                out.append(lines)
+            out.append(q.read_text(errors="ignore"))
     except OSError:
         return ()
+    try:
+        from tools import coupling_knowledge as _ck               # noqa: PLC0415
+        for key in ("fourc", "dune"):
+            text = _ck._door_scaffold(key) or ""
+            if text:
+                out.append(text)
+    except Exception:                                             # noqa: BLE001
+        pass
     return tuple(out)
 
 
@@ -1697,7 +3359,7 @@ def hand_written_beside_a_served_side(content: str, near=None) -> str:
         dirs = [d for d in sorted(near.parent.parent.glob("side*")) if d.is_dir() and d != near.parent]
     elif not near.name.lower().startswith("participant"):
         return ""                        # one flat folder: only a participant is a side
-    partner = None
+    partner, partner_txt = None, ""
     for d in dirs:
         for q in sorted(d.glob("*.py")):
             if q.resolve() == near.resolve() or ".replaced-" in q.name:
@@ -1707,14 +3369,14 @@ def hand_written_beside_a_served_side(content: str, near=None) -> str:
             except OSError:
                 continue
             if _is_served_contract(txt) and ("imports.json" in txt or "exports.json" in txt):
-                partner = q
+                partner, partner_txt = q, txt
                 break
         if partner:
             break
     if partner is None:
         return ""
-    codes = [c for c in backends_in(content) if c in _CONTRACT_DOOR]
-    code = _CONTRACT_DOOR[codes[0]] if codes else None
+    codes = _side_codes(content)
+    code = codes[0] if codes else None
     try:
         rel = str(near.relative_to(near.parent.parent)) if near.parent.name.lower().startswith("side") else near.name
     except ValueError:
@@ -1723,17 +3385,31 @@ def hand_written_beside_a_served_side(content: str, near=None) -> str:
         who = str(partner.relative_to(partner.parent.parent))
     except ValueError:
         who = partner.name
-    call = (f"write_participant_contract(solver='{code}', path='{rel}')" if code
+    # THE CALL NAMES THE CONTRACT THIS SIDE IS: its role, read from the partner (and the side the
+    # file states), is the variant the writer takes. Measured: a Kratos side whose script says
+    # SIDE = "neumann" was offered the call without variant='neumann', which writes the Dirichlet side.
+    _roles = sorted({r for k, r in _side_roles(content, partner_txt) if k == code})
+    _variant = _roles[0] if len(_roles) == 1 and _roles[0] in _DOOR_ROLES else ""
+    call = (f"write_participant_contract(solver='{code}', "
+            + (f"variant='{_variant}', " if _variant else "") + f"path='{rel}')" if code
             else f"write_participant_contract(solver=<this side's code>, path='{rel}')")
-    # WHICH SERVED CHECKS THE FILE LACKS, read from the file: a re-typed contract that kept
-    # its held-edge stop under a renamed comment was told it carried none of them.
-    _missing = _served_checks_lacking(content)
-    _lack = (f" It lacks the served {', '.join(_missing)}, so a defect those would stop runs on "
-             f"silently." if _missing else "")
+    # WHICH SERVED CHECKS THE FILE LACKS: those its own served contract carries (the partner names
+    # the role), each looked for as a stop in the file -- a label left in a comment or a print is not.
+    _missing = _served_checks_lacking(content, partner_txt)
+    _lack = (f" It lacks the served {_named(_missing)}, so a defect "
+             f"{'it' if len(_missing) == 1 else 'those'} would stop runs on silently." if _missing else "")
+    # A SCRIPT THAT ALREADY RAN IS KEPT. Measured: a run replaced two sides that had run with the
+    # served contracts written over them, empty, and gave up.
+    _ran = (near.parent / "exports.json").is_file()
+    if _ran:
+        call = call.replace(f"path='{rel}'", "path=<a new file name beside it>")
     return (
         f"this side is HAND-WRITTEN ({len(content):,} chars) while {who} is the served contract."
         f"{_lack} The served contract for this side is one call, {call}; then fill only its "
-        f"marked hole, in place.")
+        f"marked hole, in place."
+        + (" This side's script has already run (its exports.json is there): write the contract to a new "
+           "file and move your solve into its hole, and keep the script that ran until the new one runs."
+           if _ran else ""))
 
 
 _PARTICIPANT_DIR = Path(__file__).resolve().parents[2] / "data" / "coupling_participants"
@@ -1768,31 +3444,61 @@ def unsolved_linear_solve(content: str) -> str:
             f'"mumps" when available); an iterative one needs a converging KSP (cg/gmres with a tolerance).')
 
 
-def served_guard_removed(content: str, near=None) -> str:
-    """'' unless this is a served contract whose refusals were deleted or demoted to prints.
+# A statement that cannot stop the run: pass, continue, break, a print, or an assignment with no call.
+_CANNOT_STOP = re.compile(r"pass|continue|break|print\(.*\)|[\w.\[\]\s,:\-+*/'\"]+[+\-*/]?=[^()\n]*")
 
-    MEASURED: a run replaced the served `raise SystemExit("the TSI deck's temperature differs ...")`
-    with a WARNING print, its own logs then carried "scatra-vs-tsi T mismatch 1.00e+00" at every
-    level -- the structural deck's temperature was zero, its traction had no thermal stress -- and
-    the coupling never converged at the finest level. A served refusal stops a run that would hand
-    in a wrong number; the fill is the agent's, the guards are not.
-    """
+
+def _template_of(content: str):
+    """The shipped contract text a served file was written from, matched by its first line; None
+    when the file is not a served contract or no contract starts as it does."""
     if not isinstance(content, str) or not _is_served_contract(content):
-        return ""
+        return None
     first = content.lstrip().split("\n", 1)[0].strip()
     if not first.startswith('"""') or len(first) < 20:
-        return ""
-    template = None
-    try:
-        for q in sorted(_PARTICIPANT_DIR.glob("participant_*.py")):
-            head = q.read_text(errors="ignore").lstrip().split("\n", 1)[0].strip()
-            if head == first:
-                template = q.read_text(errors="ignore")
-                break
-    except OSError:
-        return ""
-    if template is None:
-        return ""
+        return None
+    for text in _served_templates():
+        if text.lstrip().split("\n", 1)[0].strip() == first:
+            return text
+    return None
+
+
+def _squash(line: str) -> str:
+    return re.sub(r"\s+", "", line)
+
+
+_SIDE_TEST = re.compile(r"""\bSIDE[ \t]*==[ \t]*["'](dirichlet|neumann)["']""")
+
+
+def _enclosing_side(rows: list, i: int) -> str:
+    """'dirichlet' or 'neumann' when row i sits under a test of SIDE that picks that side (an
+    `if SIDE == ...` header above it, or the `else:` of one), '' when it serves both."""
+    ind = _indent(rows[i]) if rows[i].strip() else 10 ** 6
+    for j in range(i - 1, -1, -1):
+        s = rows[j]
+        if not s.strip() or s.lstrip().startswith("#") or _indent(s) >= ind:
+            continue
+        ind = _indent(s)
+        head = s.strip()
+        if head.startswith(("if ", "elif ")):
+            m = _SIDE_TEST.search(" ".join(r.strip() for r in rows[j:i]).split(":", 1)[0])
+            if m:
+                return m.group(1)
+        elif head.startswith("else"):
+            for k in range(j - 1, -1, -1):          # the `if` this else belongs to
+                if rows[k].strip() and not rows[k].lstrip().startswith("#") and _indent(rows[k]) <= ind:
+                    m = _SIDE_TEST.search(rows[k]) if _indent(rows[k]) == ind else None
+                    if m and rows[k].strip().startswith(("if ", "elif ")):
+                        return "neumann" if m.group(1) == "dirichlet" else "dirichlet"
+                    break
+        if ind == 0:
+            break
+    return ""
+
+
+def _guards_of(template: str, inside=()) -> list:
+    """The served refusals of a contract text, (condition or None, message head, label, the side it
+    serves or '') each, in the served lines only (a hole's own stops are never served). A stop on a
+    row inside one of the (first row, last row) spans of `inside` is left out."""
     # THE HOLE'S OWN LINES ARE NEVER SERVED: the contract reaches the agent
     # with every hole elided, so a refusal inside a hole (the "hole is not
     # filled" stop) is not a guard the agent received. Measured: the pristine
@@ -1800,26 +3506,24 @@ def served_guard_removed(content: str, near=None) -> str:
     # exactly that stop, and the round was abandoned after five minutes.
     hole_free = re.sub(r"# ── SOLVE ─ [^\n]*?DOES NOT SERVE THIS ─ begin.*?DOES NOT SERVE THIS ─ end",
                        "", template, flags=re.S)
-    # A GUARD IS ITS CONDITION, AND ITS MESSAGE ONLY SECOND. Matching the
-    # message word for word over 70 characters called a refusal "removed"
-    # when a run had kept it and only shortened its text (served three times
-    # to a correct run, measured). A guard counts as kept when its `if`
-    # condition is still there and a `raise SystemExit` follows it, or when
-    # the first words of its message still sit behind a `raise SystemExit`;
-    # demoted when the condition is followed by a print instead; gone only
-    # when neither its condition nor the start of its message is left.
-    def _norm(line):
-        return re.sub(r"\s+", "", line)
-
     hole_lines = hole_free.splitlines()
-    guards = []                      # (condition or None, message head)
+    guards = []                      # (condition or None, message head, label)
+    # BOTH SPELLINGS OF A SERVED STOP. `sys.exit(...)` stops a run as `raise SystemExit(...)` does, and
+    # the served contracts use it for 1 to 8 of their refusals each -- the Kratos Neumann side's
+    # held-edge stop among them -- which this check never read.
     for i, line in enumerate(hole_lines):
-        if "raise SystemExit(" not in line:
+        if "raise SystemExit(" not in line and "sys.exit(" not in line:
             continue
-        m = re.search(r"raise SystemExit\(\s*f?([\"'])", line)
+        if any(r0 <= i <= r1 for r0, r1 in inside):
+            continue
+        m = re.search(r"(?:raise SystemExit|sys\.exit)\(\s*f?([\"'])", line)
+        said = line
+        if not m and re.search(r"(?:raise SystemExit|sys\.exit)\(\s*$", line) and i + 1 < len(hole_lines):
+            said = hole_lines[i + 1]  # the message opens the next line (measured: the served
+            m = re.match(r"\s*f?([\"'])", said)   # interface-list stops were read as unlabelled)
         text = ""
         if m:                         # up to the quote that opened it; an apostrophe inside stays
-            rest = line[m.end():]
+            rest = said[m.end():]
             end = rest.find(m.group(1))
             text = rest if end < 0 else rest[:end]
         full = text.split("{", 1)[0].strip()
@@ -1832,48 +3536,289 @@ def served_guard_removed(content: str, near=None) -> str:
             if not prev or prev.startswith("#"):
                 continue
             if prev.startswith("if ") and prev.endswith(":"):
-                cond = _norm(prev)
+                cond = _squash(prev)
             break
-        if (cond, head, full[:50]) not in guards and (cond or len(head) >= 12):
-            guards.append((cond, head, full[:50]))
+        if (cond, head, full[:50]) not in [g[:3] for g in guards] and (cond or len(head) >= 12):
+            guards.append((cond, head, full[:50], _enclosing_side(hole_lines, i)))
+    return guards
+
+
+def _guard_state(content: str, cond, head: str, body_lines=None, norm_body=None):
+    """'kept', 'demoted', 'edited', 'changed', or None (gone) for one served guard in `content`."""
+    # A GUARD IS ITS CONDITION, AND ITS MESSAGE ONLY SECOND. Matching the
+    # message word for word over 70 characters called a refusal "removed"
+    # when a run had kept it and only shortened its text (served three times
+    # to a correct run, measured). A guard counts as kept when its `if`
+    # condition is still there and a stop (raise, sys.exit) sits under it, or
+    # when the first words of its message still sit behind a stop; demoted
+    # when the condition is followed by a print instead; edited when nothing
+    # under the kept condition can stop the run; gone when neither its
+    # condition nor the start of its message is left.
+    body_lines = content.splitlines() if body_lines is None else body_lines
+    norm_body = [_squash(l) for l in body_lines] if norm_body is None else norm_body
+    state = None
+    if cond is not None:
+        for i, nl in enumerate(norm_body):
+            if nl != cond:
+                continue
+            # THE WHOLE BODY UNDER THE KEPT CONDITION, not its first line. Measured: a guard whose
+            # raise was replaced by `pass` kept its condition and read as present. It is EDITED
+            # only when every statement under it provably cannot stop the run (pass, continue,
+            # break, a print, an assignment with no call in it); a call might stop it, and then
+            # the state stays undecided, as before.
+            ind, block = _indent(body_lines[i]), []
+            for l in body_lines[i + 1:]:
+                if not l.strip() or l.strip().startswith("#"):
+                    continue
+                if _indent(l) <= ind:
+                    break
+                block.append(l.strip())
+            if any(re.match(r"raise\b|(?:sys\.|os\._)?exit\s*\(", s) for s in block):
+                return "kept"
+            if block and block[0].startswith("print("):
+                state = "demoted"
+            elif block and all(_CANNOT_STOP.fullmatch(s) for s in block):
+                state = "edited"
+            else:
+                state = state or "changed"
+    if len(head) >= 12:
+        for mm in re.finditer(re.escape(head), content):
+            before = content[max(0, mm.start() - 40):mm.start()]
+            if "raise SystemExit" in before or "sys.exit" in before:
+                return "kept"
+            if "print(" in before:
+                state = state or "demoted"
+    return state
+
+
+def _lost_label(label: str, state) -> str:
+    if state == "demoted":
+        return f"'{label}' (demoted to a print)"
+    if state == "edited":
+        return f"'{label}' (its condition is kept, and nothing under it stops the run)"
+    if isinstance(state, tuple) and state[0] == "narrowed":
+        return (f"'{label}' (narrowed: its condition also asks {state[1]}, so it no longer stops every run "
+                f"the served one stops)")
+    return f"'{label}'"
+
+
+def _stop_tests(text: str) -> dict:
+    """{the first 30 characters of a stop's message: (the conjuncts of the `if` test the stop sits
+    under, as ast dumps, and each one's source)} for every stop (raise SystemExit, sys.exit) with a
+    message. A stop under no `if` has no conjuncts."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {}
+    parent = {}
+    for node in ast.walk(tree):
+        for ch in ast.iter_child_nodes(node):
+            parent[ch] = node
+
+    def head(arg) -> str:
+        parts = []
+        for piece in ([arg] if not isinstance(arg, ast.BinOp) else [arg.left, arg.right]):
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append(piece.value)
+            elif isinstance(piece, ast.JoinedStr):
+                for v in piece.values:
+                    if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                        break
+                    parts.append(v.value)
+                break
+            else:
+                break
+        return "".join(parts).split("{", 1)[0].strip()[:30]
+
+    out = {}
+    for node in ast.walk(tree):
+        call = node.exc if isinstance(node, ast.Raise) else node.value if isinstance(node, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and call.args):
+            continue
+        f = call.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        if name not in ("SystemExit", "exit"):
+            continue
+        h = head(call.args[0])
+        if len(h) < 12:
+            continue
+        cur, test = node, None
+        while cur in parent:
+            up = parent[cur]
+            if isinstance(up, ast.If) and cur in up.body:
+                test = up.test
+                break
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                break
+            cur = up
+        parts = (test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
+                 else [test] if test is not None else [])
+        out.setdefault(h, {ast.dump(x): ast.unparse(x) for x in parts})
+    return out
+
+
+def _narrowed(content: str, template: str, head: str):
+    """('narrowed', the conditions added) when the stop whose message starts with `head` sits under
+    every condition the served one sits under and more; None otherwise. Measured on a coupled round:
+    a worker added a condition to the served export self-check so that it could not fire on a zero
+    import, its zero-load side then passed it, and the served-guard check counted the stop as kept."""
+    served = _stop_tests(template).get(head[:30])
+    mine = _stop_tests(content).get(head[:30])
+    if served is None or mine is None or not set(served) < set(mine):
+        return None
+    return ("narrowed", " and ".join(f"`{mine[k][:80]}`" for k in mine if k not in served))
+
+
+def _unset_guard_now_unreachable(cond, content: str) -> bool:
+    """True for a served stop on an unset placeholder (`if NAME is None:`) whose placeholder the
+    file now sets to something else: the stop can no longer fire, and dropping it loses nothing.
+    Measured: a fill that set FULL_OUTER_DIRICHLET = True and dropped the "is unset" stop drew
+    SERVED GUARD REMOVED three times."""
+    m = re.fullmatch(r"if(\w+)isNone:", cond or "")
+    return bool(m) and bool(re.search(rf"^{m.group(1)}\s*=\s*(?!None\b)\S", content, re.M))
+
+
+def served_guard_removed(content: str, near=None) -> str:
+    """'' unless this is a served contract whose refusals were deleted or demoted to prints.
+
+    MEASURED: a run replaced the served `raise SystemExit("the TSI deck's temperature differs ...")`
+    with a WARNING print, its own logs then carried "scatra-vs-tsi T mismatch 1.00e+00" at every
+    level -- the structural deck's temperature was zero, its traction had no thermal stress -- and
+    the coupling never converged at the finest level. A served refusal stops a run that would hand
+    in a wrong number; the fill is the agent's, the guards are not.
+    """
+    template = _template_of(content)
+    if template is None:
+        return ""
+    guards = _guards_of(template)
     if not guards:
         return ""
     body_lines = content.splitlines()
-    norm_body = [_norm(l) for l in body_lines]
+    norm_body = [_squash(l) for l in body_lines]
     gone = []
-    for cond, head, label in guards:
-        state = None
-        if cond is not None:
-            for i, nl in enumerate(norm_body):
-                if nl != cond:
-                    continue
-                follow = [l.strip() for l in body_lines[i + 1:i + 5] if l.strip() and not l.strip().startswith("#")]
-                nxt = follow[0] if follow else ""
-                state = "kept" if nxt.startswith("raise SystemExit") else ("demoted" if nxt.startswith("print(") else "changed")
-                if state == "kept":
-                    break
-        if state != "kept" and len(head) >= 12:
-            for mm in re.finditer(re.escape(head), content):
-                before = content[max(0, mm.start() - 40):mm.start()]
-                if "raise SystemExit" in before:
-                    state = "kept"
-                    break
-                if "print(" in before:
-                    state = state or "demoted"
-        if state == "kept":
+    for cond, head, label, _side in guards:
+        if _unset_guard_now_unreachable(cond, content):
             continue
-        label = label or head or (cond or "")[:40]
-        if state == "demoted":
-            gone.append(f"'{label}' (demoted to a print)")
-        elif state is None:
-            gone.append(f"'{label}'")
+        state = _guard_state(content, cond, head, body_lines, norm_body)
+        if state == "kept":
+            state = _narrowed(content, template, head) or state
+        if state in ("kept", "changed"):
+            continue
+        gone.append(_lost_label(label or head or (cond or "")[:40], state))
     if not gone:
         return ""
     return (f"SERVED GUARD REMOVED: {len(gone)} of the {len(guards)} refusals this contract came with "
-            f"are gone or demoted to a print: {'; '.join(gone[:4])}{'; ...' if len(gone) > 4 else ''}. "
+            f"are gone, demoted to a print, narrowed or edited so that they no longer stop the run: "
+            f"{'; '.join(gone[:4])}{'; ...' if len(gone) > 4 else ''}. "
             f"Each stops a run that would hand in a wrong number (measured: with the temperature "
             f"cross-check demoted, a run exported tractions with no thermal stress at every level). "
             f"Put them back as `raise SystemExit(...)`; fill the hole, keep the guards.")
+
+
+def _served_functions(text: str) -> tuple:
+    """(name, first row, last row, the side it serves or '') of each module-level function a served
+    contract defines, outside its EDIT block: the placeholder functions there (a source, a
+    coefficient) are the author's to replace, the others are served code."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return ()
+    rows = text.splitlines()
+    edit = []
+    for i, ln in enumerate(rows):
+        if ln.lstrip().startswith("#") and "EDIT THIS BLOCK" in ln:
+            j = next((k for k in range(i + 1, len(rows)) if re.fullmatch(r"[ \t]*#[ \t]*─{20,}[ \t]*", rows[k])),
+                     len(rows) - 1)
+            edit.append((i, j))
+    out = []
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            r0, r1 = n.lineno - 1, (getattr(n, "end_lineno", None) or n.lineno) - 1
+            if any(a <= r0 <= b for a, b in edit):
+                continue
+            # THE SIDE IT SERVES: the one side every line that uses it sits under, or '' (a helper
+            # only the Neumann branch calls is not lost from a Dirichlet side that dropped it).
+            uses = {_enclosing_side(rows, k) for k, ln in enumerate(rows)
+                    if not r0 <= k <= r1 and re.search(rf"\b{re.escape(n.name)}\b", ln.split("#", 1)[0])}
+            out.append((n.name, r0, r1, uses.pop() if len(uses) == 1 else ""))
+    return tuple(out)
+
+
+# ── a served block that a file written from its contract no longer carries ──
+#
+# MEASURED on a coupled round: a worker filled the served scikit-fem contract in place, then wrote the
+# whole file again (17k characters of the contract's 37k) and lost the served interface-list stops, in
+# both their forms, with the Dirichlet lines they guard. Nothing said so at the write: the file no
+# longer read as a served contract (a quarter of its served lines), so the served-guard check never
+# looked, and it kept its export self-check, so the no-self-check note stayed silent. The trace-held
+# stop found the result in the ladder, minutes later. This names, at the write, each served stop and
+# each served function of the side's own contract that the file no longer carries, read from that
+# contract as served, never from a fixed list.
+def served_blocks_lost(content: str, near=None) -> str:
+    """'' unless this participant is written from its own served contract and has lost served blocks.
+
+    Written from it: its code and role are known (_side_roles, one contract), and it still carries
+    at least half of that contract's served blocks -- its served functions and served stops, those
+    of the side the file states when it states one. A hand-written side beside a served partner is
+    left to hand_written_beside_a_served_side, and the stops of a file that still reads as a served
+    contract to served_guard_removed; the served functions it lost are named here either way."""
+    if not isinstance(content, str) or not looks_like_participant(content):
+        return ""
+    table = _contracts_by_role()
+    roles = _side_roles(content)
+    if len(roles) != 1 or len(table.get(roles[0], ())) < 5:
+        return ""
+    code, role = roles[0]
+    _lines, _own, _carried, stops, funcs, branches, served_text = table[(code, role)]
+    side = _stated_side(content)
+    body_lines = content.splitlines()
+    norm_body = [_squash(l) for l in body_lines]
+    blocks = []                                          # (what it is called, kept?)
+    # A SERVED BRANCH THAT TAKES THE PARTNER'S DATA IN is a block too: kept while at least half of
+    # its served lines are in the file (a line re-worded in place is not a lost branch). Judged only
+    # in a file that carries at least half of the lines only this role serves: measured, every file
+    # written from a role carries 0.9 or more of them, and a file read as a role it was not written
+    # from (the retired DUNE-fem heat file as the elastic role) 0.11 or less.
+    have = set(norm_body)
+    stripped = {ln.strip() for ln in body_lines}
+    for s, label, lines in branches if 2 * len(_own & stripped) >= len(_own) else ():
+        if not side or s == side:
+            blocks.append((f"the served {s} branch that takes the partner's data in, {label}",
+                           2 * sum(1 for ln in lines if ln in have) >= len(lines)))
+    for name, s in funcs:
+        if not side or not s or s == side:
+            blocks.append((f"the function {name}()",
+                           bool(re.search(rf"^[ \t]*def[ \t]+{re.escape(name)}[ \t]*\(", content, re.M))))
+    for cond, head, label, s in stops:
+        if _unset_guard_now_unreachable(cond, content):
+            continue
+        if not side or not s or s == side:
+            state = _guard_state(content, cond, head, body_lines, norm_body)
+            if state == "kept":
+                state = _narrowed(content, served_text, head) or state
+            blocks.append(("the stop " + _lost_label(label or head or (cond or "")[:40], state),
+                           state in ("kept", "changed")))
+    kept = sum(1 for _b, k in blocks if k)
+    if not blocks or 2 * kept < len(blocks) or kept == len(blocks):
+        return ""                                        # not written from it, or nothing lost
+    if hand_written_beside_a_served_side(content, near=near):
+        return ""
+    served = _template_of(content) is not None           # its stops are served_guard_removed's
+    lost = [b for b, k in blocks if not k and not (served and b.startswith("the stop "))]
+    if not lost:
+        return ""
+    where = f"the served {code} contract" + (f" (variant '{role}')" if role != "base" else "")
+    call = (f" write_participant_contract(solver='{code}'"
+            + (f", variant='{role}'" if role != "base" else "")
+            + ", path=<another file>) writes that contract beside this one to copy from."
+            if role == "base" or role in _DOOR_ROLES else "")
+    return (f"LOST SERVED BLOCKS: this file is written from {where} (it carries {kept} of the "
+            f"{len(blocks)} served blocks that contract has for {'the ' + side if side else 'either'} "
+            f"side) and no longer carries {len(lost)}: {'; '.join(lost[:6])}"
+            f"{'; ...' if len(lost) > 6 else ''}. They are served code, not part of the holes: copy "
+            f"each back from the contract and fill only its holes, in place.{call}")
 
 
 def _solvers_asked_about(near=None):

@@ -1,7 +1,8 @@
 """FEniCSx (dolfinx) VECTOR participant for the openPASO `couple` driver.
 
 Plane-strain linear elasticity  -div(sigma(u)) = 0  on ONE rectangular
-subdomain of a domain split by a straight interface at x = IFACE_X. Unlike the
+subdomain of a domain split by a straight interface at x = IFACE_X (or
+y = IFACE_X when IFACE_AXIS is "y"). Unlike the
 scalar (heat) participants, the exchanged interface state is a VECTOR on BOTH
 channels:
 
@@ -60,7 +61,7 @@ IFACE_X   = 0.55          # the shared interface; X0/X1 for axis "x", Y0/Y1 for 
 E_MOD     = 1000.0        # Young's modulus
 NU        = 0.3           # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 # The two subdomains must agree at the two interface corners, or the coupled
@@ -255,21 +256,22 @@ domain.topology.create_connectivity(fdim, domain.topology.dim)
 # tabulate_dof_coordinates() has ONE ROW PER NODE (dof block); the scalar
 # array index of component c at node n is n*2 + c.
 xy = V.tabulate_dof_coordinates()
-iface_n = np.where(np.abs(xy[:, 0] - IFACE_X) < 1e-10)[0]
-iface_n = iface_n[np.argsort(xy[iface_n, 1])]            # constant order, always
-y_if = xy[iface_n, 1]
+iface_n = np.where(np.abs(xy[:, AX] - IFACE_X) < 1e-10)[0]
+iface_n = iface_n[np.argsort(xy[iface_n, AL])]           # constant order, always
+y_if = xy[iface_n, AL]
 if len(iface_n) == 0:
-    sys.exit(f"no interface DOFs at x={IFACE_X}: this subdomain spans "
-             f"[{X0},{X1}], so nothing is shared with the partner")
+    sys.exit(f"no interface DOFs at {'xy'[AX]}={IFACE_X}: this subdomain spans "
+             f"[{LO},{HI}] in {'xy'[AX]}, so nothing is shared with the partner")
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES.
-# (IFACE_X, Y0) and (IFACE_X, Y1) sit on a y-face, which carries a prescribed
-# displacement in the un-split problem, so they stay Dirichlet in BOTH
-# subproblems. Handing them to the interface leaves them unconstrained on the
-# Neumann side: that subproblem is still well posed, still converges, and lands
-# a few percent off — measured, 4.7% in the interface displacement and 28% in
-# the interface traction, on a coupling whose residual reached 1e-10 and whose
-# flux balanced. They are still EXPORTED; they are just not interface-imposed.
-corner = (np.abs(y_if - Y0) < 1e-10) | (np.abs(y_if - Y1) < 1e-10)
+# The two ends of the interface sit on the faces it ends on, which carry a
+# prescribed displacement in the un-split problem, so they stay Dirichlet in
+# BOTH subproblems. Handing them to the interface leaves them unconstrained on
+# the Neumann side: that subproblem is still well posed, still converges, and
+# lands a few percent off — measured, 4.7% in the interface displacement and 28%
+# in the interface traction, on a coupling whose residual reached 1e-10 and
+# whose flux balanced. They are still EXPORTED; they are just not
+# interface-imposed.
+corner = (np.abs(y_if - ALO) < 1e-10) | (np.abs(y_if - AHI) < 1e-10)
 iface_bc_n = iface_n[~corner]
 
 
@@ -294,9 +296,9 @@ L = L_vol
 # ── Dirichlet on the WHOLE non-interface boundary ─────────────────────────
 g_out = fem.Function(V)
 g_out.x.array[:] = 0.0
-outer_n = np.where((np.abs(xy[:, 0] - OUTER_X) < 1e-10) |
-                   (np.abs(xy[:, 1] - Y0) < 1e-10) |
-                   (np.abs(xy[:, 1] - Y1) < 1e-10))[0]
+outer_n = np.where((np.abs(xy[:, AX] - OUTER_X) < 1e-10) |
+                   (np.abs(xy[:, AL] - ALO) < 1e-10) |
+                   (np.abs(xy[:, AL] - AHI) < 1e-10))[0]
 ox, oy = xy[outer_n, 0], xy[outer_n, 1]
 g_out.x.array[2 * outer_n] = (UDX[0] + UDX[1] * ox + UDX[2] * oy
                               + UDX[3] * oy * oy)
@@ -307,7 +309,7 @@ bcs = [fem.dirichletbc(g_out, outer_n.astype(np.int32))]
 # One definition of the interface measure, used by the Neumann branch to APPLY
 # the partner's traction and by the Dirichlet branch to RECOVER its own.
 facets = dmesh.locate_entities_boundary(
-    domain, fdim, lambda x: np.isclose(x[0], IFACE_X))
+    domain, fdim, lambda x: np.isclose(x[AX], IFACE_X))
 tags = dmesh.meshtags(domain, fdim, np.sort(facets),
                       np.full(len(facets), 7, dtype=np.int32))
 ds_if = ufl.Measure("ds", domain=domain, subdomain_data=tags)(7)
@@ -540,7 +542,8 @@ try:
     with open(f"interface_level{LEVEL}.csv", "w") as _f:
         _f.write("x,y,ux,uy,qx,qy\n")
         for _y, (_ux, _uy), (_qx, _qy) in zip(y_if, U, Q):
-            _f.write(f"{float(IFACE_X):.11e},{float(_y):.11e},{float(_ux):.11e},{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
+            _px, _py = ((float(IFACE_X), float(_y)) if AX == 0 else (float(_y), float(IFACE_X)))
+            _f.write(f"{_px:.11e},{_py:.11e},{float(_ux):.11e},{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
 except Exception as _dump_exc:
     # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
     # before it fails, so a dump that died mid-way leaves a header-only

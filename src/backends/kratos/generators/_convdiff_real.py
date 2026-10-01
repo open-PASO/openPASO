@@ -31,9 +31,9 @@ it, and each one had a wrong first guess:
     BY a condition; with no condition there is nothing to integrate it, and
     Kratos runs, converges, exits 0 and returns the no-flux solution. Measured
     on one mesh, three runs differing only in this:
-        zero flux, conditions present     max|T| = 2.307291e-03
-        flux on nodes, NO conditions      max|T| = 2.307291e-03  <- IDENTICAL
-        flux on nodes AND conditions      max|T| = 3.605675e-03
+        zero flux, conditions present     max|T| = T0
+        flux on nodes, NO conditions      max|T| = T0, IDENTICAL to all printed digits
+        flux on nodes AND conditions      a different field: the flux is applied
     numpy.allclose on the first two is True. This is why it is invisible: the
     imported flux leaves no trace at all.
   * THE COMPONENT NAME GOES IN A STRING, THROUGH THE FACTORY:
@@ -365,16 +365,14 @@ Kratos runs, converges, exits 0, and returns exactly the solution it would
 have returned with no flux at all. Measured on one mesh, three runs differing
 only in this:
 
-    zero flux, conditions present     max|T| = 2.307291e-03
-    flux on nodes, NO conditions      max|T| = 2.307291e-03   IDENTICAL
-    flux on nodes AND conditions      max|T| = 3.605675e-03
+    zero flux, conditions present     max|T| = T0
+    flux on nodes, NO conditions      max|T| = T0, IDENTICAL to all printed digits
+    flux on nodes AND conditions      a different field: the flux is applied
 
 numpy.allclose on the first two is True. Real runs have died here: two
-independent runs whose side A was correct to three digits reported a side-B
-peak of 2.367e-03 and 2.342e-03 against a true 3.670e-03 -- the no-flux
-answer -- with their interface FIELD matching across the seam to 0.000e+00 and
-only the flux jump betraying it, growing 8.139e-01, 9.066e-01, 9.530e-01 under
-refinement instead of shrinking.
+independent runs whose side A was correct to three digits reported the no-flux
+answer on side B, with their interface FIELD matching across the seam exactly and
+only the flux jump betraying it, growing under refinement instead of shrinking.
 
 TWO SIGNS, AND THEY ARE OPPOSITE.
   what you APPLY : FACE_HEAT_FLUX is the INWARD normal flux, so the partner's

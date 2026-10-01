@@ -61,10 +61,15 @@ def F_SRC(x, y):
     a 0-d object array and the source collapses to a constant), and do NOT wrap
     the function -- CoefficientFunction(F_SRC) is a TypeError ("incompatible
     constructor arguments", measured). Sample it at the mesh vertices instead,
-    np.array([v.point for v in mesh.vertices]), into a P1 GridFunction on your
-    space (gf.vec.FV().NumPy()[vertex_dofs] = F_SRC(vx, vy)); a GridFunction IS
-    a CoefficientFunction and integrates as gf * v * dx -- the P1 interpolant
-    of the source, quadrature error O(h^2), the order of the discretisation.
+    np.array([vert.point for vert in mesh.vertices]), into a P1 GridFunction on
+    your space (gf.vec.FV().NumPy()[vertex_dofs] = F_SRC(vx, vy)); a GridFunction
+    IS a CoefficientFunction and integrates as gf * v * dx, with v the test
+    function -- the P1 interpolant of the source, quadrature error O(h^2), the
+    order of the discretisation. A mesh vertex needs a name of its own: v is
+    the test function the served lines below use, and a loop over
+    mesh.vertices that names its variable v leaves v holding the last vertex
+    (measured: the served Neumann line then stops with TypeError ... Invoked
+    with: ..., V<n>).
     """
     return np.zeros_like(x)
 T_OUTER   = 320.0         # Dirichlet value on the held NON-interface boundary
@@ -134,9 +139,20 @@ if str(_cfg_all.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
     SIDE = str(_cfg_all["side"]).strip().lower()
 if str(_cfg_all.get("partner", "")).strip():
     PARTNER = str(_cfg_all["partner"]).strip()
+_K_TEXT = None
 for _nm, _key in (("K", "k"), ("REACTION", "reaction"), ("T_OUTER", "outer")):
     if _cfg_all.get(_key) is not None:
-        globals()[_nm] = float(_cfg_all[_key])
+        if _nm == "K" and isinstance(_cfg_all[_key], (list, tuple)):
+            # A TENSOR CONDUCTIVITY, [[kxx, kxy], [kyx, kyy]]: the form below reads
+            # K * grad(u) as the matrix times the gradient.
+            _flat = [float(_c) for _row in _cfg_all[_key] for _c in _row]
+            if len(_flat) != 4:
+                raise SystemExit(f"config.json's k is a matrix of {len(_flat)} entries; a 2-D "
+                                 f"conductivity tensor has four, [[kxx, kxy], [kyx, kyy]].")
+            K = ngsolve.CoefficientFunction(tuple(_flat), dims=(2, 2))
+            _K_TEXT = str(_cfg_all[_key])
+        else:
+            globals()[_nm] = float(_cfg_all[_key])
 if isinstance(_cfg_all.get("full_outer_dirichlet"), bool):
     FULL_OUTER_DIRICHLET = _cfg_all["full_outer_dirichlet"]
 _SOURCE_FROM = "code (the F_SRC body above)"
@@ -149,7 +165,7 @@ G_OUTER = ((lambda x, y, _g=_expr_fn(_cfg_all["outer_expr"]): _g(x, y))
            if _cfg_all.get("outer_expr") is not None else (lambda x, y: 0.0 * x + T_OUTER))
 print(f"SOURCES IN USE: from {_SOURCE_FROM}"
       + (f"; f = {str(_cfg_all.get('source_expr'))[:80]}" if _cfg_all.get("source_expr") is not None else "")
-      + f"; k = {K:g}; reaction = {REACTION:g}; outer value stated = "
+      + f"; k = {_K_TEXT if _K_TEXT else format(K, 'g')}; reaction = {REACTION:g}; outer value stated = "
       + (f"{str(_cfg_all.get('outer_expr'))[:60]}" if _cfg_all.get("outer_expr") is not None else
          f"{T_OUTER:g}" + ("" if _cfg_all.get("outer") is not None else " (T_OUTER in this file)")))
 if FULL_OUTER_DIRICHLET is None:
@@ -229,12 +245,13 @@ ngsolve.ngsglobals.msg_level = 3
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 # ── mesh: SplineGeometry.AddRectangle edge order is bottom, right, top, left ──
 geo = SplineGeometry()
-geo.AddRectangle((X0, Y0), (X1, Y1),
-                 bcs=(("bottom", "interface", "top", "outer") if ON_RIGHT else
-                      ("bottom", "outer", "top", "interface")))
+# the interface, the outer edge opposite it, and the two edges the interface ends on
+_names = (["ends", "outer", "ends", "outer"] if AX == 0 else ["outer", "ends", "outer", "ends"])
+_names[(1 if ON_RIGHT else 3) if AX == 0 else (2 if ON_RIGHT else 0)] = "interface"
+geo.AddRectangle((X0, Y0), (X1, Y1), bcs=tuple(_names))
 mesh = Mesh(geo.GenerateMesh(maxh=MAXH))
 
-_held = "outer" + ("|bottom|top" if FULL_OUTER_DIRICHLET else "")
+_held = "outer" + ("|ends" if FULL_OUTER_DIRICHLET else "")
 fes = H1(mesh, order=ORDER,
          dirichlet=(_held + "|interface" if SIDE == "dirichlet" else _held))
 u, v = fes.TnT()
@@ -243,13 +260,13 @@ u, v = fes.TnT()
 vdof = np.array([fes.GetDofNrs(NodeId(VERTEX, i))[0] for i in range(mesh.nv)], int)
 vxy = np.array([mesh.vertices[i].point for i in range(mesh.nv)], float)
 
-iface_v = np.where(np.abs(vxy[:, 0] - IFACE_X) < TOL)[0]
-iface_v = iface_v[np.argsort(vxy[iface_v, 1])]           # sorted by y
-y_if = vxy[iface_v, 1]
+iface_v = np.where(np.abs(vxy[:, AX] - IFACE_X) < TOL)[0]
+iface_v = iface_v[np.argsort(vxy[iface_v, AL])]          # sorted along the interface
+y_if = vxy[iface_v, AL]
 iface_dofs = vdof[iface_v]
-outer_v = np.where((np.abs(vxy[:, 0] - OUTER_X) < TOL)
-                   | (bool(FULL_OUTER_DIRICHLET) & ((np.abs(vxy[:, 1] - Y0) < TOL)
-                                                    | (np.abs(vxy[:, 1] - Y1) < TOL))))[0]
+outer_v = np.where((np.abs(vxy[:, AX] - OUTER_X) < TOL)
+                   | (bool(FULL_OUTER_DIRICHLET) & ((np.abs(vxy[:, AL] - ALO) < TOL)
+                                                    | (np.abs(vxy[:, AL] - AHI) < TOL))))[0]
 outer_dofs = vdof[outer_v]
 
 a = BilinearForm(fes)
@@ -340,7 +357,7 @@ if _bad or _missed or len(_ids) != y_if.size:
            if _missed else "")
         + ". The served lines below write the trace, read the flux and export the values "
           "through this list. The dof of vertex number i is fes.GetDofNrs(NodeId(VERTEX, i))[0], "
-          "with i the vertex's own number (v.nr for a mesh vertex v).")
+          "with i the vertex's own number (vert.nr for a mesh vertex vert).")
 # THE HELD EDGES ARE WHAT FULL_OUTER_DIRICHLET SAYS. A space whose dirichlet= set
 # leaves the two edges the interface ends on free while the problem holds them (or
 # the reverse) solves a different problem and converges cleanly to it (measured:

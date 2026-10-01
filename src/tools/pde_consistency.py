@@ -433,6 +433,178 @@ def check_levels_on_grid(raw_levels: dict, source_expr: str, coefficient, box: l
     return _decide(res)
 
 
+
+# ── THE DISCRETE RESIDUAL, ON THE SIDE'S OWN NODES ───────────────────────────
+#
+# WHY. The weak identity above integrates against a smooth test function, so it reads the
+# FALL of a residual that is O(h^2) for every right field; a wrong field is told apart only
+# once three levels show it flat. A field that IS the solution of its own discrete system is
+# told apart at once: rebuild the system on the nodes the side dumped and apply it to the
+# dumped values, and at every node inside the box the residual is round-off. Measured on a
+# coupled round with a 2x2 conductivity, on the sides' own dumps: the right sides read
+# 7e-12 .. 2e-9 of the load at every level (deal.II on its bilinear cells, NGSolve on its
+# nodes' triangles, which here are netgen's own), the same fields judged with the scalar
+# K[0][0] read 0.45 .. 1.0, and a side that had solved with K[0][0] read 0.59 .. 0.65.
+#
+# IT CONFIRMS, IT NEVER CONDEMNS. The rebuild is exact only when the side's mesh, element and
+# load are the ones rebuilt here (P1 on the nodes' Delaunay triangles, or on a tensor grid P1
+# with either diagonal or bilinear cells; the load the source's nodal interpolant). A side
+# with another element, a mesh that is not its nodes' Delaunay triangulation, or a source
+# integrated at quadrature points leaves more than round-off here while solving its equation,
+# so a residual above round-off is reported as measured and the weak identity decides.
+_DISCRETE_ROUNDOFF = 1e-6
+_GAUSS2 = (-1.0 / math.sqrt(3.0), 1.0 / math.sqrt(3.0))
+
+
+def _k_matrix(coefficient):
+    """A coefficient as a 2x2 matrix: k times the identity for one number."""
+    import numpy as np
+    if isinstance(coefficient, (int, float)):
+        return float(coefficient) * np.eye(2)
+    K = np.asarray(coefficient, dtype=float)
+    if K.size != 4:
+        raise ValueError("the coefficient is neither one number nor a 2x2 matrix")
+    return K.reshape(2, 2)
+
+
+def _p1_system(P, T, K, c):
+    """(A, M) of P1 triangles T on nodes P: A carries (K grad u) . grad v + c u v, M the mass."""
+    import numpy as np
+    import scipy.sparse as sp
+    X = P[T]
+    e1, e2 = X[:, 1] - X[:, 0], X[:, 2] - X[:, 0]
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    span = max(float(np.ptp(P[:, 0])), float(np.ptp(P[:, 1])), 1e-300)
+    ok = np.abs(det) > 1e-14 * span * span                       # a sliver of collinear nodes
+    T, e1, e2, det = T[ok], e1[ok], e2[ok], det[ok]
+    area = 0.5 * np.abs(det)
+    g1 = np.stack([e2[:, 1], -e2[:, 0]], 1) / det[:, None]
+    g2 = np.stack([-e1[:, 1], e1[:, 0]], 1) / det[:, None]
+    G = np.stack([-(g1 + g2), g1, g2], 1)                        # the three hats' gradients
+    Ke = area[:, None, None] * np.einsum("mai,ij,mbj->mab", G, K, G)
+    Me = area[:, None, None] * (np.ones((3, 3)) + np.eye(3))[None] / 12.0
+    r, q, n = np.repeat(T, 3, axis=1).ravel(), np.tile(T, (1, 3)).ravel(), len(P)
+    return (sp.csr_matrix(((Ke + c * Me).ravel(), (r, q)), (n, n)),
+            sp.csr_matrix((Me.ravel(), (r, q)), (n, n)))
+
+
+def _q1_system(xs, ys, K, c):
+    """(A, M) of bilinear cells on the tensor grid xs x ys, node (i, j) numbered i*(ny+1)+j; two
+    Gauss points a direction, exact for a constant K."""
+    import numpy as np
+    import scipy.sparse as sp
+    nx, ny = len(xs) - 1, len(ys) - 1
+    I, J = (a.ravel() for a in np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij"))
+    hx, hy = np.diff(xs)[I], np.diff(ys)[J]
+    ids = np.stack([I * (ny + 1) + J, (I + 1) * (ny + 1) + J, I * (ny + 1) + J + 1,
+                    (I + 1) * (ny + 1) + J + 1], 1)
+    Ke, Me = np.zeros((len(I), 4, 4)), np.zeros((len(I), 4, 4))
+    for s in _GAUSS2:
+        for t in _GAUSS2:
+            a, b = 0.5 * (s + 1.0), 0.5 * (t + 1.0)
+            N = np.array([(1 - a) * (1 - b), a * (1 - b), (1 - a) * b, a * b])
+            dN = np.stack([np.stack([-(1 - b) / hx, -(1 - a) / hy], 1),
+                           np.stack([(1 - b) / hx, -a / hy], 1),
+                           np.stack([-b / hx, (1 - a) / hy], 1),
+                           np.stack([b / hx, a / hy], 1)], 1)
+            w = 0.25 * hx * hy
+            Ke += w[:, None, None] * np.einsum("mai,ij,mbj->mab", dN, K, dN)
+            Me += w[:, None, None] * np.outer(N, N)[None]
+    r, q, n = np.repeat(ids, 4, axis=1).ravel(), np.tile(ids, (1, 4)).ravel(), (nx + 1) * (ny + 1)
+    return (sp.csr_matrix(((Ke + c * Me).ravel(), (r, q)), (n, n)),
+            sp.csr_matrix((Me.ravel(), (r, q)), (n, n)))
+
+
+def check_levels_discrete(raw_levels: dict, source_expr: str, coefficient, box: list,
+                          reaction: float = 0.0) -> ConsistencyResult:
+    """Does each level's dumped field solve the discrete system of -div(K grad u) + c u = f
+    rebuilt on its own nodes? `raw_levels` maps a level to (x, y, u) rows at the side's mesh
+    nodes; `coefficient` is one number or a 2x2 matrix, used as given (inside the box only its
+    symmetric part acts). The residual is taken at the nodes strictly inside the box -- free
+    whatever the boundary conditions -- relative to the load there; on a tensor grid the
+    smallest of the three rebuilds (bilinear cells, triangles cut along either diagonal)
+    counts. CONSISTENT when every level is at round-off (see _DISCRETE_ROUNDOFF); otherwise
+    NOT_APPLICABLE with the residuals measured, because only an exact rebuild can condemn."""
+    import numpy as np
+    from scipy.spatial import Delaunay
+    K = _k_matrix(coefficient)
+    c = float(reaction or 0.0)
+    (x0, x1), (y0, y1) = box
+    tol = 1e-7 * max(x1 - x0, y1 - y0)
+    res = ConsistencyResult()
+    hows = set()
+    for lvl in sorted(raw_levels):
+        a = np.asarray(raw_levels[lvl], dtype=float)
+        if a.ndim != 2 or a.shape[0] < 9 or a.shape[1] < 3 or not np.isfinite(a[:, :3]).all():
+            res.levels.append(LevelResult(lvl, len(a), float("nan"), "no finite rows of x, y and the field"))
+            continue
+        g = tensor_grid(a[:, :3])
+        if g is not None:
+            xs, ys, U = g
+            P = np.stack(np.meshgrid(xs, ys, indexing="ij"), -1).reshape(-1, 2)
+            u = U.ravel()
+            ny = len(ys) - 1
+            I, J = (q.ravel() for q in np.meshgrid(np.arange(len(xs) - 1), np.arange(ny), indexing="ij"))
+            p00, p10 = I * (ny + 1) + J, (I + 1) * (ny + 1) + J
+            p01, p11 = p00 + 1, p10 + 1
+            cands = {"bilinear cells": lambda: _q1_system(xs, ys, K, c),
+                     "triangles cut along one diagonal": lambda: _p1_system(
+                         P, np.concatenate([np.stack([p00, p10, p11], 1), np.stack([p00, p11, p01], 1)]), K, c),
+                     "triangles cut along the other diagonal": lambda: _p1_system(
+                         P, np.concatenate([np.stack([p00, p10, p01], 1), np.stack([p10, p11, p01], 1)]), K, c)}
+        else:
+            _, first = np.unique(np.round(a[:, :2], 12), axis=0, return_index=True)
+            a = a[np.sort(first)]
+            P, u = a[:, :2], a[:, 2]
+            cands = {"P1 triangles of its nodes' Delaunay triangulation":
+                     lambda: _p1_system(P, Delaunay(P).simplices, K, c)}
+        inner = (P[:, 0] > x0 + tol) & (P[:, 0] < x1 - tol) & (P[:, 1] > y0 + tol) & (P[:, 1] < y1 - tol)
+        if inner.sum() < 4:
+            res.levels.append(LevelResult(lvl, len(P), float("nan"), "fewer than four nodes inside the box"))
+            continue
+        f = np.asarray(_eval_source(source_expr, P.tolist(), 2), dtype=float)
+        best = None
+        for how, build in cands.items():
+            try:
+                A, M = build()
+            except Exception:                                   # noqa: BLE001 -- not rebuildable
+                continue
+            b = M @ f
+            scale = float(np.abs(b[inner]).max())
+            if not scale > 0:
+                continue
+            rel = float(np.abs((A @ u - b)[inner]).max()) / scale
+            if best is None or rel < best[0]:
+                best = (rel, how)
+        if best is None:
+            res.levels.append(LevelResult(lvl, len(P), float("nan"),
+                                          "no rebuild with a nonzero load inside the box"))
+            continue
+        hows.add(best[1])
+        res.levels.append(LevelResult(lvl, len(P), best[0], best[1], umax=float(np.abs(u).max())))
+    good = [r for r in res.levels if math.isfinite(r.residual)]
+    seq = ", ".join(f"{r.residual:.1e}" for r in good)
+    how = " / ".join(sorted(hows))
+    if good and all(r.residual <= _DISCRETE_ROUNDOFF for r in good):
+        res.verdict = "CONSISTENT"
+        res.explanation = (
+            f"rebuilt on its own nodes ({how}) with the full coefficient and the source at the "
+            f"nodes, the discrete system of this equation leaves round-off at every node inside "
+            f"the box, at every level ({seq} of the load): the field is that system's solution. "
+            f"That says nothing about the values it holds on its boundary and interface, which "
+            f"the interface and outer-boundary checks judge.")
+    else:
+        res.verdict = "NOT_APPLICABLE"
+        res.explanation = (
+            (f"rebuilt on its own nodes ({how}) with the full coefficient and the source at the "
+             f"nodes, the discrete system of this equation leaves {seq} of the load at the nodes "
+             f"inside the box, level by level; round-off would confirm the field solves it, and "
+             f"more than that condemns nothing on its own (another element, mesh or load rule "
+             f"leaves more)." if good else
+             "no level could be rebuilt: " + "; ".join(r.detail for r in res.levels if r.detail)[:300]))
+    return res
+
+
 def _decide(res: ConsistencyResult) -> ConsistencyResult:
     """Turn per-level residuals into a verdict.
 
@@ -523,6 +695,30 @@ def _decide(res: ConsistencyResult) -> ConsistencyResult:
             f"turns: a field one percent off its equation was measured falling "
             f"tenfold between its first two levels and rising at the third. The "
             f"check needs a third level.")
+    elif (lambda z: len(z) >= 2 and max(z) > 2.0 * min(z))([r.umax for r in good if r.umax > 0]):
+        # A FIELD THAT CHANGES SIZE BETWEEN LEVELS IS A DIFFERENT PROBLEM AT EACH.
+        # Measured on a coupled run: a Neumann side fed a partner flux that grew
+        # about fourfold per level read a flat residual and was called wrong; held
+        # at one level's data, its residual fell at every step. This side cannot be
+        # judged until its data settles -- which is not a clean bill either.
+        # READ BEFORE THE FALL, NOT AFTER IT: placed after the branch below, this was
+        # reached only when the residual did not fall. Measured: the solution scaled
+        # by 3.0, 1.5 and 1.1 on three levels -- right at no level -- fell 1.94 ->
+        # 0.49 -> 0.099 and was called CONSISTENT.
+        sizes = " -> ".join(f"{r.umax:.3g}" for r in good if r.umax > 0)
+        seq = " -> ".join(f"{r.residual:.3e}" for r in good)
+        falls = all(b.residual < 0.8 * a.residual for a, b in zip(good, good[1:]))
+        res.verdict = "UNSETTLED"
+        res.explanation = (
+            f"the field itself changes size across the levels (largest value "
+            f"{sizes}) and the weak residual "
+            + (f"falls ({seq}), but between fields of different size a fall is no "
+               f"refinement study of one problem. "
+               if falls else f"does not fall ({seq}). ")
+            + "A side handed different data at each level solves a different "
+              "problem at each, so this check cannot say whether it solves its "
+              "equation: judge the data it imports first -- a partner whose exports "
+              "grow or shrink like that is the likelier defect -- then this side.")
     elif all(b.residual < 0.8 * a.residual for a, b in zip(good, good[1:])):
         # EVERY STEP FALLS, not only the first against the last. Measured on 73
         # correct coupled sides (their own mesh dumps, three levels): every step
@@ -544,22 +740,6 @@ def _decide(res: ConsistencyResult) -> ConsistencyResult:
             f"the values it holds on its boundary and interface -- a field "
             f"solving the right equation with the wrong boundary data passes "
             f"here -- which the interface and outer-boundary checks judge.")
-    elif (lambda z: len(z) >= 2 and max(z) > 2.0 * min(z))([r.umax for r in good if r.umax > 0]):
-        # A FIELD THAT CHANGES SIZE BETWEEN LEVELS IS A DIFFERENT PROBLEM AT EACH.
-        # Measured on a coupled run: a Neumann side fed a partner flux that grew
-        # about fourfold per level read a flat residual and was called wrong; held
-        # at one level's data, its residual fell at every step. This side cannot be
-        # judged until its data settles -- which is not a clean bill either.
-        sizes = [r.umax for r in good if r.umax > 0]
-        seq = " -> ".join(f"{r.residual:.3e}" for r in good)
-        res.verdict = "UNSETTLED"
-        res.explanation = (
-            f"the field itself changes size across the levels (largest value "
-            f"{sizes[0]:.3g} -> {sizes[-1]:.3g}) and the weak residual does not fall "
-            f"({seq}). A side handed different data at each level solves a different "
-            f"problem at each, so this check cannot say whether it solves its "
-            f"equation: judge the data it imports first -- a partner whose exports "
-            f"grow or shrink like that is the likelier defect -- then this side.")
     else:
         res.verdict = "INCONSISTENT"
         seq = " -> ".join(f"{r.residual:.3e}" for r in good)

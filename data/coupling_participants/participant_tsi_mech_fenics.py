@@ -46,12 +46,10 @@ import numpy as np
 # while everything beside the level rule survived in all of them.
 dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO)
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 import ufl
 from dolfinx import default_scalar_type, fem, mesh as dmesh
 from dolfinx.fem.petsc import LinearProblem
 from mpi4py import MPI
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 

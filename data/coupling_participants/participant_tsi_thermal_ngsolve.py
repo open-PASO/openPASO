@@ -55,11 +55,9 @@ import numpy as np
 # while everything beside the level rule survived in all of them.
 ngsolve.ngsglobals.msg_level = 3
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 from netgen.geom2d import SplineGeometry
 from ngsolve import (VERTEX, BilinearForm, CoefficientFunction, GridFunction,
                      H1, LinearForm, Mesh, NodeId, TaskManager, dx, grad)
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 

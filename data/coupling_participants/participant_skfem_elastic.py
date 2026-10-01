@@ -74,7 +74,7 @@ IFACE_X   = 0.55          # WHERE that line sits: equal to X0 or X1 for axis "x"
 E_MOD     = 1000.0        # Young's modulus
 NU        = 0.3           # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 # The two subdomains must agree at the two interface corners, or the coupled
@@ -279,23 +279,24 @@ basis = Basis(mesh, elem)
 nd = basis.nodal_dofs                      # (2, nnodes): node -> (x, y) dof
 
 px, py = mesh.p[0], mesh.p[1]
-iface_n = np.where(np.abs(px - IFACE_X) < TOL)[0]
-iface_n = iface_n[np.argsort(py[iface_n])]             # sorted by y
-y_if = py[iface_n]
-outer_n = np.where((np.abs(px - OUTER_X) < TOL) |
-                   (np.abs(py - Y0) < TOL) | (np.abs(py - Y1) < TOL))[0]
+pa, pl = mesh.p[AX], mesh.p[AL]            # across the interface, and along it
+iface_n = np.where(np.abs(pa - IFACE_X) < TOL)[0]
+iface_n = iface_n[np.argsort(pl[iface_n])]             # sorted along the interface
+y_if = pl[iface_n]
+outer_n = np.where((np.abs(pa - OUTER_X) < TOL) |
+                   (np.abs(pl - ALO) < TOL) | (np.abs(pl - AHI) < TOL))[0]
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES.
-# (IFACE_X, Y0) and (IFACE_X, Y1) sit on a y-face, which carries a prescribed
-# displacement in the un-split problem, so they are Dirichlet nodes there and
-# must stay Dirichlet in BOTH subproblems. Handing them to the interface
-# instead leaves them unconstrained on the Neumann side: that subproblem is
-# still well posed, still converges, and lands a few percent off — measured
-# here, 4.7% in the interface displacement and 28% in the interface traction,
-# on a coupling whose residual reached 1e-10 and whose flux balanced. So the
-# interface Dirichlet set EXCLUDES them; they are still exported, because they
-# are still points of the interface.
-iface_bc_n = iface_n[(np.abs(py[iface_n] - Y0) > TOL) &
-                     (np.abs(py[iface_n] - Y1) > TOL)]
+# The two ends of the interface sit on the faces it ends on, which carry a
+# prescribed displacement in the un-split problem, so they are Dirichlet nodes
+# there and must stay Dirichlet in BOTH subproblems. Handing them to the
+# interface instead leaves them unconstrained on the Neumann side: that
+# subproblem is still well posed, still converges, and lands a few percent off
+# — measured here, 4.7% in the interface displacement and 28% in the interface
+# traction, on a coupling whose residual reached 1e-10 and whose flux balanced.
+# So the interface Dirichlet set EXCLUDES them; they are still exported,
+# because they are still points of the interface.
+iface_bc_n = iface_n[(np.abs(pl[iface_n] - ALO) > TOL) &
+                     (np.abs(pl[iface_n] - AHI) > TOL)]
 iface_bc_dofs = np.concatenate([nd[0, iface_bc_n], nd[1, iface_bc_n]])
 outer_dofs = np.concatenate([nd[0, outer_n], nd[1, outer_n]])
 
@@ -341,7 +342,7 @@ b = body_force.assemble(basis)         # not modify A or b in place
 b_vol = b
 fbi = FacetBasis(mesh, elem,
                  facets=mesh.facets_satisfying(
-                     lambda p: np.abs(p[0] - IFACE_X) < TOL))
+                     lambda p: np.abs(p[AX] - IFACE_X) < TOL))
 
 sol = basis.zeros()
 ux_d, uy_d = u_dirichlet(px[outer_n], py[outer_n])
@@ -356,7 +357,8 @@ D = outer_dofs
 #    nodes, in the same order. And fbi must sit on the interface line: a
 #    FacetBasis over facets that match nothing integrates over NOTHING (skfem
 #    only prints "with no facets"), so the Neumann load and the traction
-#    weights come out zero.
+#    weights come out zero. It must carry basis's own element: the served lines
+#    interpolate a dof vector of basis on it.
 y_if = np.asarray(y_if, float)
 if (y_if.size != len(iface_n) or y_if.size < 2 or np.any(np.diff(y_if) <= 0)
         or abs(y_if[0] - ALO) > TOL or abs(y_if[-1] - AHI) > TOL):
@@ -384,6 +386,11 @@ if (not len(_fb_pts) or np.abs(_fb_pts[:, AX] - IFACE_X).max() > TOL
                         "fbi's facets are not exactly the whole interface line")
                      + f". Build it on the facets of the line {'xy'[AX]} = {IFACE_X:g}, and only those: "
                      f"facets_satisfying hands its test the facet midpoints p, with p[0] = x and p[1] = y.")
+if fbi.N != basis.N:
+    raise SystemExit(f"INTERFACE FACETS: fbi is built on another element than basis (fbi.N = {fbi.N}, "
+                     f"basis.N = {basis.N}). The served lines interpolate a dof vector of basis on fbi, and "
+                     f"FacetBasis.interpolate takes fbi.N values ('Input array has wrong size.'): build fbi "
+                     f"on basis's element, FacetBasis(mesh, basis.elem, facets=...).")
 
 if SIDE == "dirichlet":
     u_if = sample(imp, "values", (UI_X, UI_Y), y_if)

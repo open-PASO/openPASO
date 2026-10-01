@@ -8,8 +8,8 @@ Group: Two solvers on one problem.
 
 | Parameter | Type | Required | Default |
 |---|---|---|---|
-| `participants` | string | yes |  |
-| `levels` | string | yes |  |
+| `participants` | string or array | yes |  |
+| `levels` | string or array | yes |  |
 | `critic_approved` | boolean | no | `False` |
 | `max_iter` | integer | no | `150` |
 | `tol` | number | no | `1e-06` |
@@ -43,12 +43,17 @@ The text below is the tool's own description, exactly as the AI model receives i
         where the keys under each participant's NAME, plus "level", are
         handed to that participant's PROCESS in the environment variable
         OPENPASO_CONFIG_JSON (a JSON object; OPENPASO_LEVEL carries the level
-        alone). openPASO writes NO file into your directories: the served
+        alone). openPASO writes NO file into your directories: most served
         contracts merge OPENPASO_CONFIG_JSON over their own ./config.json, and
-        a participant you wrote yourself must read it the same way
+        any script must read it the same way
         (json.loads(os.environ.get("OPENPASO_CONFIG_JSON", "{}")) merged over
-        its config) or use one couple() call per level instead. Halve h per
-        level as the task prescribes, i.e. double every cell count;
+        its config) or be run with one couple() call per level instead; a
+        level that hands keys to a script that never reads them is refused
+        before anything runs. Halve h per
+        level as the task prescribes, i.e. double every cell count; a
+        transient side's step count travels the same way ("n_steps", which
+        the served transient contracts read), so both sides change it
+        together;
       * each level starts from the previous level's converged interface
         state (the driver's warm start), which is why the levels must run in
         the same work directories;

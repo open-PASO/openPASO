@@ -58,7 +58,7 @@ IFACE_X   = 0.55          # WHERE that line sits: equal to X0 or X1 for axis "x"
 E_MOD     = 1000.0        # Young's modulus
 NU        = 0.3           # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 UDX = (0.0, 0.0, 0.0, 0.0)
@@ -86,10 +86,13 @@ def B_SRC(x, y):
     a 0-d object array and the source collapses to a constant), and do NOT wrap
     the function -- CoefficientFunction(B_SRC) is a TypeError ("incompatible
     constructor arguments", measured). Sample it at the mesh vertices instead,
-    np.array([v.point for v in mesh.vertices]), into one P1 GridFunction per component on your
-    space (gf.vec.FV().NumPy()[vertex_dofs] = B_SRC(vx, vy)[i]); a GridFunction IS
-    a CoefficientFunction and integrates as gf_x * v[0] * dx + gf_y * v[1] * dx -- the P1 interpolant
-    of the source, quadrature error O(h^2), the order of the discretisation.
+    np.array([vert.point for vert in mesh.vertices]), into one P1 GridFunction per component on
+    your space (gf.vec.FV().NumPy()[vertex_dofs] = B_SRC(vx, vy)[i]); a GridFunction IS
+    a CoefficientFunction and integrates as gf_x * v[0] * dx + gf_y * v[1] * dx, with v the test
+    function -- the P1 interpolant of the source, quadrature error O(h^2), the order of the
+    discretisation. A mesh vertex needs a name of its own: a loop over mesh.vertices that names
+    its variable v leaves v holding the last vertex where the served lines below need the test
+    function.
     """
     return np.zeros_like(x), np.zeros_like(y)
 NX, NY    = 24, 16        # this subdomain's own mesh (netgen maxh derived below)
@@ -258,9 +261,9 @@ ngsolve.ngsglobals.msg_level = 3
 # Everything that is not the interface carries the prescribed displacement, so
 # it all gets the same boundary name.
 geo = SplineGeometry()
-geo.AddRectangle((X0, Y0), (X1, Y1),
-                 bcs=(("outer", "interface", "outer", "outer") if ON_RIGHT else
-                      ("outer", "outer", "outer", "interface")))
+_names = ["outer"] * 4                     # the edges in AddRectangle's order
+_names[(1 if ON_RIGHT else 3) if AX == 0 else (2 if ON_RIGHT else 0)] = "interface"
+geo.AddRectangle((X0, Y0), (X1, Y1), bcs=tuple(_names))
 mesh = Mesh(geo.GenerateMesh(maxh=MAXH))
 
 fes = VectorH1(mesh, order=ORDER,
@@ -271,18 +274,19 @@ u, v = fes.TnT()
 vdof = np.array([fes.GetDofNrs(NodeId(VERTEX, i))[:2] for i in range(mesh.nv)], int)
 vxy = np.array([mesh.vertices[i].point for i in range(mesh.nv)], float)
 
-iface_v = np.where(np.abs(vxy[:, 0] - IFACE_X) < TOL)[0]
-iface_v = iface_v[np.argsort(vxy[iface_v, 1])]           # sorted by y
-y_if = vxy[iface_v, 1]
-outer_v = np.where((np.abs(vxy[:, 0] - OUTER_X) < TOL) |
-                   (np.abs(vxy[:, 1] - Y0) < TOL) |
-                   (np.abs(vxy[:, 1] - Y1) < TOL))[0]
+iface_v = np.where(np.abs(vxy[:, AX] - IFACE_X) < TOL)[0]
+iface_v = iface_v[np.argsort(vxy[iface_v, AL])]          # sorted along the interface
+y_if = vxy[iface_v, AL]
+outer_v = np.where((np.abs(vxy[:, AX] - OUTER_X) < TOL) |
+                   (np.abs(vxy[:, AL] - ALO) < TOL) |
+                   (np.abs(vxy[:, AL] - AHI) < TOL))[0]
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES: they
-# sit on a y-face, which carries a prescribed displacement in the un-split
-# problem. Leaving them to the interface leaves them unconstrained on the
-# Neumann side — the subproblem is still well posed, still converges, and lands
-# a few percent off. They are still EXPORTED, just not interface-imposed.
-corner = (np.abs(y_if - Y0) < TOL) | (np.abs(y_if - Y1) < TOL)
+# sit on the faces the interface ends on, which carry a prescribed displacement
+# in the un-split problem. Leaving them to the interface leaves them
+# unconstrained on the Neumann side — the subproblem is still well posed, still
+# converges, and lands a few percent off. They are still EXPORTED, just not
+# interface-imposed.
+corner = (np.abs(y_if - ALO) < TOL) | (np.abs(y_if - AHI) < TOL)
 
 
 def eps_of(g):
@@ -381,7 +385,7 @@ if _bad or _missed or len(_ids) != y_if.size:
         + (f"; {_missed} of the {len(_line)} vertices on the interface line have no entry"
            if _missed else "")
         + ". The served lines below write the partner's data, read the traction and export the "
-          "values through these two. A vertex's number is its own (v.nr for a mesh vertex v), "
+          "values through these two. A vertex's number is its own (vert.nr for a mesh vertex vert), "
           "not its place in a list.")
 
 if SIDE == "dirichlet":

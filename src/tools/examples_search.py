@@ -928,18 +928,24 @@ int main()
 ## Build (CMakeLists.txt)
 ```cmake
 cmake_minimum_required(VERSION 3.13.4)
-find_package(deal.II 9.0 REQUIRED)
+find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR} $ENV{DEAL_II_DIR})
 deal_ii_initialize_cached_variables()
 project(my_problem)
 add_executable(my_problem main.cpp)
 deal_ii_setup_target(my_problem)
 ```
+Configure with `cmake -S . -B build -DDEAL_II_DIR=<the tree discover(query='list') names for deal.II>`.
+Without the HINTS, find_package ignores -DDEAL_II_DIR and takes any system deal.II it finds
+(measured: "Using the deal.II-9.1.1 installation found at /usr" beside a 9.8 tree); a
+compile that reads /usr/include/deal.II is building against that package.
 
 ## Key Rules
 1. Always refine BEFORE distributing DOFs
 2. Use DynamicSparsityPattern → copy_from → SparsityPattern
 3. Vector FE: FESystem<dim>(FE_Q<dim>(1), dim)
-4. Boundary IDs depend on GridGenerator (hyper_cube: all=0, hyper_rectangle: 0-3)
+4. Boundary IDs depend on GridGenerator: hyper_cube and hyper_rectangle give every face id 0;
+   with colorize = true as their last argument, hyper_rectangle (and subdivided_hyper_rectangle)
+   give 0 at x = x0, 1 at x = x1, 2 at y = y0, 3 at y = y1
 5. DataOut for VTU output
 """
 

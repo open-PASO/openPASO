@@ -735,8 +735,8 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
      * NGSolve: after `from ngsolve import *`, ANY loop that assigns `x` or
        `y` rebinds the symbolic coordinates to floats, so your source becomes
        a CONSTANT. Verified: `type(f)` is CoefficientFunction before the
-       probe-point loop and `float` after, value 0.02514662, with x and y
-       both left at 0.9886363636 -- the last probe the loop visited. `CoefficientFunction((float, float))` is
+       probe-point loop and `float` after, with x and y both left at the
+       last probe the loop visited. `CoefficientFunction((float, float))` is
        accepted silently. A constant body force on a fully-Dirichlet
        incompressible domain gives u identically 0 -- measured 7.16e-17,
        3.60e-17, 1.30e-17 at the three levels, order 0.0000 -- against
@@ -759,8 +759,8 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
        max|T| = 0.000000000e+00 with exit 0; the PLAIN sections work and match
        an independent assembly to 1.08e-15.
      * Kratos: FACE_HEAT_FLUX set on interface nodes with no ThermalFace2D2N
-       condition to integrate it is discarded. Measured 2.307291e-03 ignored
-       against 3.605675e-03 applied, bit-identical to a zero-flux run. Create
+       condition to integrate it is discarded: measured, the field is
+       bit-identical to a zero-flux run's. Create
        it BY NAME -- `mp.CreateNewCondition("ThermalFace2D2N", cid, [n1, n2],
        prop)`. Registered components are not Python attributes, so
        `SomeApplication.ThermalFace2D2N(...)` raises `has no attribute` for
@@ -1114,7 +1114,7 @@ the ingredient.
 #
 # WHAT IS CUT IS ONLY ELABORATION. The core carries ALL TEN numbered rules and
 # ALL SIXTEEN of the decisive measurements and API calls -- 0.000000000e+00,
-# 1.08e-15, 2.307291e-03 vs 3.605675e-03, 8.875850e-02, 0.02514662,
+# 1.08e-15, a Kratos field bit-identical to a zero-flux run's, 8.875850e-02, a float source,
 # 1.2229e-02, 1.115344e+00, 2.36e-16, 1.9796 vs 0.9815, (N-1)^2+1,
 # 50/226/962, basis.interpolator, bb_tree, find_containing_cell -- none of
 # which appears only in the tail. The tail's own numbered list is a

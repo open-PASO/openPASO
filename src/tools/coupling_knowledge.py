@@ -78,8 +78,27 @@ def _code_lines(text: str) -> str:
                      if ln.strip() and not ln.strip().startswith("#"))
 
 
-def _hole_banner(k: int, n: int, m: int | None) -> str:
+# A deal.II WRAPPER'S HOLE IS THE I/O WITH ITS PROGRAM, NOT A PYTHON SOLVE. The
+# generic banner told the transient wrapper's worker to "build the mesh, the
+# function space, the weak form" in Python and promised a flux recovery below
+# that the wrapper does not have (measured on a coupled round).
+_PROGRAM_IO_ELIDED = """\
+# ─────────────────────────────────────────────────────────────────────────
+# THE SOLVE ITSELF IS YOURS AND IS NOT SERVED HERE.
+# HOLE {k} OF {n}: THE I/O WITH YOUR PROGRAM GOES HERE. The finite element solve
+# is your C++ program (DEALII_EXE); this hole writes the input file it reads,
+# runs it with subprocess.run on DEALII_EXE, its console captured and passed
+# through, and reads its output back into the names listed at the end of this
+# file. The flux it exports must be the program's CONSISTENT recovery: the
+# residual of the system it assembled with no boundary condition applied,
+# divided by the nodal interface weight.
+# ─────────────────────────────────────────────────────────────────────────"""
+
+
+def _hole_banner(k: int, n: int, m: int | None, program_io: bool = False) -> str:
     """The banner for hole k of n when hole m holds the solve (None: unknown)."""
+    if program_io and k == m:
+        return _PROGRAM_IO_ELIDED.replace("{k}", str(k)).replace("{n}", str(n))
     if m is None:
         return _SOLVE_ELIDED
     if k == m:
@@ -172,6 +191,8 @@ def _serve_participant(p: Path) -> str:
         return (f"[openPASO] participant script for '{p.stem}' is missing from "
                 f"the install (expected data/coupling_participants/{p.name}).")
     text = p.read_text()
+    if _SOLVE_BEGIN not in text and _glue_beside_program(p, text):
+        return text                    # no solve here: its holes are the program's
     if _SOLVE_BEGIN not in text:
         doc = ""
         try:
@@ -224,6 +245,155 @@ def _serve_participant(p: Path) -> str:
     return served
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# A PARTICIPANT WHOSE SOLVE IS A COMPILED PROGRAM: deal.II
+# ══════════════════════════════════════════════════════════════════════════
+#
+# deal.II has no Python API, so its participant is a Python wrapper around a
+# C++ program. Measured on two coupled rounds (10 cells whose deal.II side was
+# a Dirichlet or Neumann heat subdomain): the served contract was the wrapper
+# alone, the model had to write the whole program -- input parsing, mesh,
+# assembly, boundary conditions, solve, the consistent flux recovery, the
+# output -- and one of eight deal.II sides ever wrote exports.json; the rest
+# died on compile errors or on programs that built and never exported.
+#
+# So the program is served the way the Python contracts are: a scaffold whose
+# marked holes (mesh and boundary ids, coefficient and source, assembly,
+# boundary data, solve) are elided, around a served input reader, interface
+# node set, checks, consistent flux recovery and output. The markers are C++
+# comments carrying the same text as the Python markers. The complete program
+# (data/coupling_participants/dealii_side.cc, holes filled) is what the suite
+# builds; it is not served and need not ship, so the served text is kept
+# elided in tools/dealii_program_scaffold.py, generated from it and pinned to it
+# by a test. The wrapper then has no solve of its own: it is served whole, and
+# only while it is named below, its served program still has its five holes and
+# no hole body, and it imports nothing that could solve.
+#
+# THE TRANSIENT CONTRACT IS SERVED THE SAME WAY. Measured on a transient coupled
+# round: its wrapper alone was served, saying "No C++ source ships ... write and
+# build it yourself", three of four give-ups named the transient C++ program as
+# the reason to stop, and two cells spent 9 to 10 minutes each on programs that
+# never linked. dealii_side_transient.cc is its scaffold: the loop over the steps,
+# the last step's field, the per-step recovery and output are served; the holes
+# are the mesh, the coefficient and source, the step's system, the boundary data
+# at the new time and the step's solve.
+#
+# THE ELASTIC CONTRACT IS SERVED THE SAME WAY. Measured on a coupled elasticity
+# round: its wrapper alone was served, with one hole for the I/O with a program
+# "that you write and build yourself"; the one cell that reached its deal.II side
+# spent about 16 minutes on twelve builds and three heap-corruption crashes, and
+# its program indexed the two components past the end of the cell matrix.
+# dealii_side_elastic.cc is its scaffold: the two-component element, its dofs'
+# components, the interface nodes per component, the checks of the law and the
+# stiffness, the vector traction recovery and the output are served; the holes
+# are the mesh, the material law and body force, the assembly, the boundary data
+# and the solve.
+_CC_BEGIN = "// " + _SOLVE_BEGIN[2:]
+_CC_END = "// " + _SOLVE_END[2:]
+_CC_HOLE = "IS YOURS AND IS NOT SERVED HERE"
+_PROGRAM_OF = {"participant_dealii.py": "dealii_side.cc",
+               "participant_dealii_transient.py": "dealii_side_transient.cc",
+               "participant_dealii_elastic.py": "dealii_side_elastic.cc"}
+_SCAFFOLD_OF = {"dealii_side.cc": "SCAFFOLD", "dealii_side_transient.cc": "TRANSIENT_SCAFFOLD",
+                "dealii_side_elastic.cc": "ELASTIC_SCAFFOLD"}
+_GLUE_MODULES = {"json", "os", "subprocess", "sys", "pathlib", "numpy", "re", "shutil", "math", "time", "signal"}
+def _dealii_cmake(program: str) -> str:
+    """The six-line CMakeLists.txt that builds `program` into ./build/<its stem>."""
+    name = Path(program).stem
+    return (f"cmake_minimum_required(VERSION 3.13)\n"
+            f"find_package(deal.II 9.0 REQUIRED HINTS ${{DEAL_II_DIR}} $ENV{{DEAL_II_DIR}})\n"
+            f"deal_ii_initialize_cached_variables()\n"
+            f"project({name} CXX)\n"
+            f"add_executable({name} {program})\n"
+            f"deal_ii_setup_target({name})\n"
+            f"# target_compile_definitions({name} PRIVATE DEBUG)  # uncommented: deal.II names a silent crash\n")
+
+
+def _elide_cc(text: str) -> tuple:
+    """(served text, error): the C++ scaffold with every marked hole's lines cut
+    and a banner in their place. FAILS CLOSED, like `_serve_participant`: no
+    marker, an unbalanced one, or a hole body that survives is an error, never
+    a licence to serve the program whole."""
+    if _CC_BEGIN not in text or text.count(_CC_BEGIN) != text.count(_CC_END):
+        return "", "the program scaffold has no marked hole, or an unbalanced one"
+    spans, i = [], 0
+    while (a := text.find(_CC_BEGIN, i)) >= 0:
+        b = text.find(_CC_END, a)
+        if b < 0:
+            return "", "the program scaffold has an unterminated hole marker"
+        spans.append((text.rfind("\n", 0, a) + 1, a, b, text.find("\n", b) + 1 or len(text)))
+        i = b + len(_CC_END)
+    out, i, n = [], 0, len(spans)
+    for k, (line, a, b, end) in enumerate(spans, 1):
+        pad = " " * (a - line)
+        out.append(text[i:line])
+        out.append(f"{pad}// ── HOLE {k} OF {n} {_CC_HOLE}: write the code the comment\n"
+                   f"{pad}//    above asks for, in place of these two lines. ──\n")
+        i = end
+    served = "".join(out) + text[i:]
+    for _line, a, b, _end in spans:
+        body = text[a + len(_CC_BEGIN):b].strip().removesuffix("//").strip()
+        if (body and body in served) or _CC_BEGIN in served or _CC_END in served:
+            return "", "a marked hole of the program scaffold survived the elision"
+    return served, ""
+
+
+def served_program(name: str) -> tuple:
+    """(served text, error) for a wrapper's program scaffold, holes elided. FAILS
+    CLOSED: a served text that carries a hole marker, or lacks one of its hole
+    banners, is refused, never served."""
+    if name not in _SCAFFOLD_OF:
+        return "", f"no served program scaffold named {name}"
+    try:
+        from . import dealii_program_scaffold as _mod
+        scaffold = getattr(_mod, _SCAFFOLD_OF[name])
+    except (ImportError, AttributeError):
+        return "", "the served program scaffold is missing from the install"
+    import re
+    holes = [int(k) for k, n in re.findall(rf"HOLE (\d+) OF (\d+) {_CC_HOLE}", scaffold)]
+    if (_CC_BEGIN in scaffold or _CC_END in scaffold or not holes
+            or holes != list(range(1, len(holes) + 1))):
+        return "", "the served program scaffold is not elided as it must be"
+    return scaffold, ""
+
+
+def regenerate_dealii_scaffold() -> None:
+    """Rewrite tools/dealii_program_scaffold.py from the tested programs."""
+    mod = Path(__file__).with_name("dealii_program_scaffold.py")
+    text = mod.read_text()
+    blocks = []
+    for program, const in _SCAFFOLD_OF.items():
+        served, err = _elide_cc((_PARTICIPANT_DIR / program).read_text())
+        if err:
+            raise SystemExit(f"{program}: {err}")
+        blocks.append(f"{const} = r\'\'\'{served}\'\'\'\n")
+    mod.write_text(text[:text.index("SCAFFOLD = r\'\'\'")] + "\n\n".join(blocks))
+
+
+def program_of(p: Path):
+    """The complete program (holes filled) a wrapper participant's served
+    scaffold is made from, where the suite builds it; None for any other file."""
+    name = _PROGRAM_OF.get(p.name)
+    return p.parent / name if name else None
+
+
+def _glue_beside_program(p: Path, text: str) -> bool:
+    """True when `p` is a wrapper whose solve lives in its program's holes: it
+    is named in _PROGRAM_OF, its served program is elided, and it imports
+    nothing but glue (no finite-element library could solve inside it unseen)."""
+    name = _PROGRAM_OF.get(p.name)
+    if name is None or served_program(name)[1]:
+        return False
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    mods = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    mods |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    return mods <= _GLUE_MODULES
+
+
 def lean_view(served: str, keep: int = 2) -> str:
     """Thin every run of comment lines longer than `keep` down to its first
     `keep` lines plus an ellipsis line, leaving code, blanks, the elision
@@ -273,6 +443,18 @@ def lean_view(served: str, keep: int = 2) -> str:
     return "\n".join(out) + ("\n" if served.endswith("\n") else "")
 
 
+# A HOLE INSIDE A BLOCK GETS ITS BANNER AT THE BLOCK'S INDENTATION. The banner sat at
+# column 0 for every hole, and a hole inside a `for`, `with`, `def` or `if` body was
+# filled at column 0: the fill ended the block and the served lines after it stopped
+# with IndentationError (measured: four of five cells on the transient contract, three
+# of five on a `with TaskManager():` hole). The banner now sits where the fill goes.
+def _hole_indent(body: str) -> str:
+    """The leading whitespace of the least indented code line of a hole ('' if none)."""
+    pads = [ln[:len(ln) - len(ln.lstrip())] for ln in body.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    return min(pads, key=len) if pads else ""
+
+
 def _elide_solve(text: str) -> str:
     """Cut every marked SOLVE region out of a participant's source.
 
@@ -298,10 +480,12 @@ def _elide_solve(text: str) -> str:
     solving = [k for k, (a, b) in enumerate(spans, 1)
                if b > a and _SOLVE_CALL.search(_code_lines(text[a:b]))]
     m = solving[0] if len(solving) == 1 else None
+    program_io = "DEALII_EXE" in text           # a deal.II wrapper: its hole runs the program
     out, i = [], 0
     for k, (a, b) in enumerate(spans, 1):
         out.append(text[i:a])
-        out.append(_hole_banner(k, len(spans), m) + "\n")
+        pad = _hole_indent(text[a + len(_SOLVE_BEGIN):b]) if b > a else ""
+        out.append("\n".join(pad + ln for ln in _hole_banner(k, len(spans), m, program_io).splitlines()) + "\n")
         if b < 0:
             i = len(text)
             break
@@ -310,6 +494,114 @@ def _elide_solve(text: str) -> str:
             i += 1
     out.append(text[i:])
     return _append_reconstruction_contract("".join(out), text)
+
+
+def _cut_regions(original: str) -> list:
+    """The marked SOLVE regions of a participant's source, in order."""
+    cut, i = [], 0
+    while True:
+        a = original.find(_SOLVE_BEGIN, i)
+        if a < 0:
+            break
+        b = original.find(_SOLVE_END, a)
+        if b < 0:
+            cut.append(original[a:])
+            break
+        cut.append(original[a:b])
+        i = b + len(_SOLVE_END)
+    return cut
+
+
+def _cut_source(original: str) -> str:
+    """The cut regions joined, each read at its own indentation."""
+    # A HOLE INSIDE A BLOCK IS READ AT ITS OWN INDENTATION. Joined as they sit, an indented
+    # hole does not parse, and the fallback above sees `name = ...` lines only: `u, v = ...`
+    # in another hole dropped v from the list its served lines use.
+    def _dedented(region):
+        k = len(_hole_indent(region))
+        return "\n".join(ln[k:] if ln[:k].isspace() else ln.lstrip()
+                         for ln in region.splitlines()) if k else region
+    return "\n".join(_dedented(c) for c in _cut_regions(original))
+
+
+def _cut_definitions(cut: str) -> dict:
+    """{name: 'class' | 'function' | 'value'} for what the cut regions bind at their own level.
+
+    A CLASS OR A FUNCTION THE HOLE DEFINES IS A NAME THE HOLE LEAVES BEHIND. Measured on a
+    coupled elasticity round: the FEBio elastic contract's list named four variables and
+    left out `Mesh`, the class its served lines build and use through seven members, and
+    said "That is the whole contract"; five workers re-built a 339-line region against an
+    API with no name, and one quit on "the Mesh class". A name bound only inside a function
+    or class body of the hole is that body's, not the hole's (it listed a method's local `w`)."""
+    import ast
+    import re
+    try:
+        tree = ast.parse(cut)
+    except SyntaxError:
+        out = {n: "value" for n in re.findall(r"^\s*([A-Za-z_]\w*)\s*=", cut, re.M)}
+        out.update({n: ("class" if kind == "class" else "function")
+                    for kind, n in re.findall(r"^\s*(def|class)\s+([A-Za-z_]\w*)", cut, re.M)})
+        return out
+    out: dict = {}
+
+    def walk(node):
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[ch.name] = "function"
+                continue                                # its body is its own scope
+            if isinstance(ch, ast.ClassDef):
+                out[ch.name] = "class"
+                continue
+            if isinstance(ch, ast.Lambda):
+                continue
+            if isinstance(ch, (ast.Import, ast.ImportFrom)):
+                for al in ch.names:
+                    out.setdefault((al.asname or al.name).split(".")[0], "value")
+            if isinstance(ch, ast.Name) and isinstance(ch.ctx, ast.Store):
+                out.setdefault(ch.id, "value")
+            walk(ch)
+    walk(tree)
+    return out
+
+
+def _bound_before_every_use(tree, name: str) -> bool:
+    """True when every read of `name` in the served code comes after a line of the served
+    code that binds it, in the same block or one around it (the served lines then do not
+    need it from the hole: measured, `w = mesh.iface_weights()` sat right above its use and
+    `w` was listed as the hole's)."""
+    import ast
+    parent = {}
+    for node in ast.walk(tree):
+        for ch in ast.iter_child_nodes(node):
+            parent[ch] = node
+
+    def binds(stmt) -> bool:
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            return any(isinstance(t, ast.Name) and t.id == name for tg in targets for t in ast.walk(tg))
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return stmt.name == name
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            return any((al.asname or al.name).split(".")[0] == name for al in stmt.names)
+        return False
+
+    loads = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
+    if not loads:
+        return False
+    for load in loads:
+        cur, dominated = load, False
+        while cur in parent and not dominated:
+            up = parent[cur]
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                break
+            for field in ("body", "orelse", "finalbody"):
+                block = getattr(up, field, None)
+                if isinstance(block, list) and cur in block:
+                    dominated = any(binds(st) for st in block[:block.index(cur)])
+            cur = up
+        if not dominated:
+            return False
+    return True
 
 
 def _reconstruction_contract(served: str, original: str) -> list:
@@ -325,42 +617,85 @@ def _reconstruction_contract(served: str, original: str) -> list:
     dying in a write-run-error-rewrite loop on the participant script.
 
     Derived from the same markers that do the elision, so it cannot go stale.
-    It leaks no physics: it is the list of variable names the code below the
-    hole already mentions, which the agent can read off the script anyway --
-    just not without reverse-engineering it first.
+    It leaks no physics: it is the list of names (variables, and the classes and
+    functions the hole defines) the code below the hole already mentions, which
+    the agent can read off the script anyway -- just not without
+    reverse-engineering it first.
     """
     import ast
     import re
 
-    def _names(src, ctx):
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:
-            if ctx is ast.Store:
-                return set(re.findall(r"^\s*([A-Za-z_]\w*)\s*=", src, re.M))
-            return set(re.findall(r"\b([A-Za-z_]\w*)\b", src))
-        return {n.id for n in ast.walk(tree)
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ctx)}
-
-    cut = []
-    i = 0
-    while True:
-        a = original.find(_SOLVE_BEGIN, i)
-        if a < 0:
-            break
-        b = original.find(_SOLVE_END, a)
-        if b < 0:
-            cut.append(original[a:])
-            break
-        cut.append(original[a:b])
-        i = b + len(_SOLVE_END)
-    if not cut:
+    if not _cut_regions(original):
         return []
-    defined = _names("\n".join(cut), ast.Store)
+    defined = _cut_definitions(_cut_source(original))
     needed = _free_loads(served)
     if needed is None:
-        needed = _names(served, ast.Load)
-    return sorted(n for n in defined & needed if not n.startswith("_"))
+        needed = set(re.findall(r"\b([A-Za-z_]\w*)\b", served))
+        tree = None
+    else:
+        tree = ast.parse(served)
+    names = [n for n in sorted(set(defined) & needed) if not n.startswith("_")]
+    if tree is not None:
+        names = [n for n in names if not _bound_before_every_use(tree, n)]
+    return names
+
+
+def _definition_uses(served: str, original: str, names: list) -> list:
+    """Comment lines saying how the served code uses each class or function the hole
+    defines: a class's members as the served lines read them, a function's call.
+    Quoted from the served code itself, so they say nothing it does not."""
+    import ast
+    try:
+        tree = ast.parse(served)
+    except SyntaxError:
+        return []
+    kinds = _cut_definitions(_cut_source(original))
+    lines = served.splitlines()
+    forbidden = ("solve(", "assemble(", "LinearProblem", "spsolve", "factorized(", "splu(")
+
+    def quote(node) -> str:
+        seg = ast.get_source_segment(served, node) or ""
+        ln = lines[node.lineno - 1].strip() if 0 < node.lineno <= len(lines) else seg
+        text = ln if len(ln) <= 72 and not any(f in ln for f in forbidden) else seg
+        return " ".join(text.split())[:72]
+
+    import textwrap
+
+    def say(text: str) -> list:
+        import re as _re
+        kept = _re.sub(r"`[^`]*`", lambda m: m.group(0).replace(" ", "\x00"), text)   # a quote stays whole
+        return ["# " + ln.replace("\x00", " ")
+                for ln in textwrap.wrap(kept, 74, break_on_hyphens=False, break_long_words=False)]
+
+    out = []
+    for name in names:
+        kind = kinds.get(name)
+        if kind == "class":
+            made = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and isinstance(n.value.func, ast.Name) and n.value.func.id == name
+                    and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)]
+            owners = {m.targets[0].id for m in made} | {name}
+            members: dict = {}
+            for n in sorted((n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                             and isinstance(n.value, ast.Name) and n.value.id in owners),
+                            key=lambda n: (n.lineno, n.col_offset)):
+                members.setdefault(f"{n.value.id}.{n.attr}", n)
+            how = (f"make it as `{quote(made[0])}`" if made else "use it")
+            out += say(f"{name} is a class the hole defines: the served lines {how}"
+                       + (" and read these members of it, each quoted where first used:" if members else "."))
+            if members:
+                width = max(len(m) for m in members) + 2
+                out += [f"#     {m:<{width}}{quote(n)}" for m, n in members.items()]
+        elif kind == "function":
+            calls = sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                            and isinstance(n.func, ast.Name) and n.func.id == name),
+                           key=lambda n: (n.lineno, n.col_offset))
+            if calls:
+                seg = " ".join((ast.get_source_segment(served, calls[0]) or name).split())[:72]
+                out += say(f"{name} is a function the hole defines: the served lines call it as `{seg}`.")
+            else:
+                out += say(f"{name} is a function the hole defines, and the served lines pass it on as a value.")
+    return out
 
 
 def _free_loads(src: str):
@@ -393,6 +728,17 @@ def _free_loads(src: str):
                 if any(isinstance(t, ast.Name) and t.id == nm
                        for g in up.generators for t in ast.walk(g.target)):
                     return True
+            # A NAME A SERVED FUNCTION BINDS ITSELF (an argument, or assigned in its body)
+            # is that function's, not the hole's (measured: a local `d` of a served Kratos
+            # function was listed as a name the solve must leave behind).
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                _a = up.args
+                if nm in {x.arg for x in list(_a.args) + list(_a.posonlyargs) + list(_a.kwonlyargs)
+                          + [v for v in (_a.vararg, _a.kwarg) if v is not None]}:
+                    return True
+                if any(isinstance(t, ast.Name) and t.id == nm and isinstance(t.ctx, ast.Store)
+                       for t in ast.walk(up)):
+                    return True
             cur = up
         return False
 
@@ -404,6 +750,7 @@ def _append_reconstruction_contract(served: str, original: str) -> str:
     names = _reconstruction_contract(served, original)
     if not names:
         return served
+    uses = _definition_uses(served, original, names)
     return served + (
         "\n# ── WHAT YOUR SOLVE MUST LEAVE BEHIND ─────────────────────────\n"
         "# The code above and below the elided block uses these names. Your\n"
@@ -411,10 +758,12 @@ def _append_reconstruction_contract(served: str, original: str) -> str:
         "#\n"
         + "".join(f"#     {n}\n" for n in names) +
         "#\n"
+        + "".join(f"{ln}\n" for ln in uses)
+        + ("#\n" if uses else "") +
         "# That is the whole contract. Read the surviving lines to see the\n"
         "# shape each one has to have -- they are already indexed, assembled\n"
         "# or written out there. openPASO does not serve the solve itself, but\n"
-        "# it will not make you guess which variables the hole was filling.\n")
+        "# it will not make you guess which names the hole was filling.\n")
 
 # ══════════════════════════════════════════════════════════════════════════
 # CORE — served by knowledge(topic='coupling') with no solver
@@ -1017,8 +1366,7 @@ and it is worth saying why it changed. "Export opposite numbers" describes the
 RESULT — the two sides' outward normals point opposite ways, so two correctly
 computed fluxes carry opposite signs. It is not an instruction to negate your
 partner's array, and at least one run read it that way: it exported
-q_B = -q_A at every one of 44 interface points, q_A = -1.525074442746e+00
-against q_B = +1.525074442746e+00, summing to exactly 0.000e+00.
+q_B = -q_A at every interface point, so the two summed to exactly zero.
 
 DOING THAT DESTROYS THE ONLY QUANTITY THE COUPLING IS JUDGED ON. Two systems
 assembled from different meshes and different material data do not cancel to
@@ -1252,7 +1600,7 @@ equilibrium of both traction components, per-component conservation, and
 agreement with BOTH a closed form and an un-split monolithic solve. Shipped
 participant scripts:
 `participant_{fenics,skfem,ngsolve,dealii,dune,febio}_elastic.py`
-(the deal.II one needs `elast_iface_dealii` built from the same CMake tree).
+(the deal.II one runs a C++ program you write and build; no solver is served).
 
 DUNE-fem and FEBio were added on 2026-08-16 and both were measured, not
 assumed: DUNE displacement converged at the expected second order over four
@@ -1404,7 +1752,15 @@ late and confusingly.
 DEAL_II_DIR must point at the build/install prefix, not at include/ or lib/.
 If find_package cannot see it, cmake stops with a message naming deal.IIConfig
 .cmake, which is the file it is looking for -- check the prefix rather than
-the deal.II version.
+the deal.II version. Keep `HINTS $ENV{DEAL_II_DIR}` (or `${DEAL_II_DIR}` with
+-DDEAL_II_DIR) in find_package: without it cmake takes any system deal.II it
+finds. A compile that reads /usr/include/deal.II is building against such a
+system package, or ran without deal_ii_setup_target, whatever version line
+cmake printed. discover(query='list') names the tree this install has.
+
+For the heat coupling, write_participant_contract(solver='dealii', ...) writes
+a program scaffold and its CMakeLists.txt beside the wrapper, and the wrapper
+builds it.
 
 Compiling is not free: budget for it, and compile ONCE against a trivial main
 that prints its dof count before you build the real participant. A build error
@@ -2306,7 +2662,22 @@ def _transient_block(script_name: str) -> str:
         "theta-combined right-hand side needs. Exporting it as 'the flux at "
         "t^(n+1)' injects an O(dt) error that looks like a scheme stuck at "
         "first order.\n\n"
-        f"```python\n{_serve_participant(p)}```\n")
+        f"```python\n{_serve_participant(p)}```\n"
+        + _program_behind(script_name, "transient"))
+
+
+def _program_behind(script_name: str, request: str) -> str:
+    """The program a wrapper runs, with its CMakeLists.txt, to sit right behind the
+    wrapper's block ('' for a contract with no program). A deal.II transient side
+    was served its wrapper alone, and the steady program sat past the reply's cut
+    (measured on a transient coupled round)."""
+    files, err = participant_companions(script_name, request)
+    if not files and not err:
+        return ""
+    if err:
+        return f"\n[{err}]\n"
+    return ("\n" + _dealii_program_head(files[0][0]) + f"```cpp\n{files[0][1]}```\n\n"
+            + "".join(f"```cmake\n{tx}```\n" for _nm, tx in files[1:]))
 
 
 def _role_block(script_name: str) -> str:
@@ -2361,7 +2732,8 @@ def _vector_block(script_name: str) -> str:
         "reactions of the assembled residual), never by differencing the "
         "displacement field — a differenced traction converges one order too "
         "slowly and drags the coupled field order down with it.\n\n"
-        f"```python\n{_serve_participant(p)}```\n")
+        f"```python\n{_serve_participant(p)}```\n"
+        + _program_behind(script_name, "elastic"))
 
 
 
@@ -2884,6 +3256,7 @@ prepare_simulation(solver='fourc', physics='<your physics>').
 """
 import json
 import os
+import sys
 import numpy as np
 from pathlib import Path
 
@@ -3120,7 +3493,7 @@ import meshio
 #    output), never by the NDOF line alone (measured: run logs holding only the driver header and the
 #    NDOF line carried no evidence that this code ran at all).
 for _lg in sorted(glob.glob("*.log")):
-    if _lg.startswith("participant_output") or "level" in _lg:      # the coupling tool's own captures, never re-echoed
+    if _lg.startswith("participant_output"):                         # the coupling tool's own captures, never re-echoed
         continue
     try:
         _ltxt = open(_lg, errors="ignore").read()
@@ -3174,11 +3547,95 @@ _m = meshio.read(vtu)
 vpts = [(float(p[0]), float(p[1])) for p in _m.points]
 phi = [float(x) for x in _m.point_data["phi_1"].ravel()]   # the scalar is 'phi_1'
 # a 4C QUAD4 VTU repeats each node once per element; collapse by coordinate or
-# n_points comes out four times too large and changes with the mesh.
+# n_points comes out four times too large and changes with the mesh. One dict, O(N),
+# keyed on the coordinate in steps of a tolerance; a lookup also tries the steps
+# around it, so a deck that printed NODE COORDS with fewer digits than `nodes` holds
+# still finds its points (measured: keys rounded to 12 decimals raised KeyError).
+_qt = 1e-6 * max(X1 - X0, Y1 - Y0)
+def _key(x, y):
+    return (round(x / _qt), round(y / _qt))
+def _at(m, x, y):                          # the entry of m within one step of (x, y)
+    i, j = _key(x, y)
+    for _c in [(i + a, j + b) for a in (0, -1, 1) for b in (0, -1, 1)]:
+        if _c in m:
+            return m[_c]
+    raise SystemExit(f"READ-BACK: {vtu} has no point at ({x:g}, {y:g}), a point of `nodes`: `nodes` and "
+                     f"the deck's NODE COORDS are not the same mesh")
 val = {}
 for (x, y), _u in zip(vpts, phi):
-    val[(round(x, 12), round(y, 12))] = _u
-u = [val[(round(x, 12), round(y, 12))] for (x, y) in nodes]
+    val[_key(x, y)] = _u
+u = [_at(val, x, y) for (x, y) in nodes]
+# ── HELD EDGES AND THE HELD TRACE (served) ─ keep. The solved field against config.json, before
+#    anything is exported. Measured: one deck held its interface line at the constant outer value,
+#    another left part of a held outer edge free; both finished normally and coupled on unnoticed.
+#    An edge your deck holds (a DIRICH condition between its two ends) carries "outer" at each node
+#    off the interface; on the Dirichlet side each interior interface node carries partner_value,
+#    on the Neumann side none is held. Judged only when config.json states "iface" (and "outer").
+_dk = globals().get("DECK") or max(glob.glob("*.4C.yaml") or glob.glob("*.yaml") or [""],
+                                   key=lambda _q: os.path.getmtime(_q) if _q else 0)
+_dt = open(_dk, errors="ignore").read() if _dk and os.path.isfile(str(_dk)) else ""
+_tn, _held = {}, set()
+for _n, _k, _e in _re.findall(r'"NODE\\s+(\\d+)\\s+(DNODE|DLINE)\\s+(\\d+)"', _dt):
+    _tn.setdefault((_k, _e), set()).add(int(_n))
+for _b in _re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\\s*$)", _dt, flags=_re.M):
+    _g = _re.match(r"DESIGN (POINT|LINE) (?:TRANSPORT )?DIRICH CONDITIONS:", _b)
+    for _en in _re.split(r"^\\s*-\\s", _b, flags=_re.M)[1:] if _g else []:
+        _e = _re.search(r"\\bE:\\s*(\\d+)", _en)
+        if _e and not _re.search(r"ONOFF:\\s*\\[\\s*0\\s*\\]", _en):
+            _held |= _tn.get(("DNODE" if _g.group(1) == "POINT" else "DLINE", _e.group(1)), set())
+_hxy = [(float(_x), float(_y)) for _n, _x, _y in _re.findall(r'"NODE\\s+(\\d+)\\s+COORD\\s+(\\S+)\\s+(\\S+)\\s+\\S+"', _dt)
+        if int(_n) in _held]
+_E = {"left": (0, X0), "right": (0, X1), "bottom": (1, Y0), "top": (1, Y1)}
+_tl = _qt                                  # the read-back's step: the deck's own digits
+def _on(p, e):                             # p on box edge e; _mid: strictly between its two ends
+    return abs(p[_E[e][0]] - _E[e][1]) <= _tl
+def _mid(p, e):
+    _r = (Y0, Y1) if _E[e][0] == 0 else (X0, X1)
+    return _on(p, e) and _r[0] + _tl < p[1 - _E[e][0]] < _r[1] - _tl
+if "iface" in CFG and IF in _E:
+    try:
+        _o = float(CFG["outer"]) if "outer" in CFG else None
+    except (TypeError, ValueError):
+        _o = None
+    _pk = max((abs(_v) for _v in u), default=0.0)
+    for _ed in [e for e in _E if e != IF and _o is not None and any(_mid(p, e) for p in _hxy)]:
+        _nn = sum(1 for p in nodes if _on(p, _ed))           # its nodes, both ends included
+        _hn = sum(1 for p in _hxy if _on(p, _ed))
+        _all = [k for k, p in enumerate(nodes) if _on(p, _ed) and not _on(p, IF)]   # judged against "outer"
+        _bad = [k for k in _all if abs(u[k] - _o) > 1e-5 * max(abs(_o), _pk)]
+        if _bad or _hn < _nn:
+            raise SystemExit(
+                f"OUTER BOUNDARY: your deck holds the {_ed} edge ({'xy'[_E[_ed][0]]} = {_E[_ed][1]:g}), config.json "
+                f"states outer = {_o:g}, and its DIRICH conditions reach {_hn} of the {_nn} nodes of that edge, "
+                f"both ends included" + (f"; the other {_nn - _hn} carr{'ies' if _nn - _hn == 1 else 'y'} none (natural, zero flux, in 4C)"
+                                         if _hn < _nn else "")
+                + (f"; {len(_bad)} of the {len(_all)} off the interface hold{'s' if len(_bad) == 1 else ''} another value in the solved field "
+                   f"(the first at ({nodes[_bad[0]][0]:g}, {nodes[_bad[0]][1]:g}): {u[_bad[0]]:.6g})" if _bad else "")
+                + ("; so the deck's VAL there or config.json's outer is not your problem's"
+                   if _bad and _hn >= _nn else "")
+                + ". Hold every node of that edge. Nothing was exported.")
+    _iv = [(k, p) for k, p in enumerate(nodes) if _mid(p, IF)]
+    if SIDE == "dirichlet" and _iv and any(isinstance(_d, dict) and _d.get("coordinates") and _d.get("values") and
+                                           len(_d["values"]) == len(_d["coordinates"]) for _d in imp.values()):
+        _tr = [(k, p, partner_value(p[1 - _E[IF][0]])) for k, p in _iv]
+        _sc = max([abs(_t) for _, _, _t in _tr] + [abs(u[k]) for k, _ in _iv])
+        _off = [(k, p, _t) for k, p, _t in _tr if abs(u[k] - _t) > 1e-3 * _sc]
+        if _off:
+            _k, _p, _t = _off[0]
+            raise SystemExit(
+                f"INTERFACE TRACE: on this Dirichlet side {len(_off)} of the {len(_iv)} interior nodes of the {IF} "
+                f"edge do not hold the imported trace in the solved field (the first at ({_p[0]:g}, {_p[1]:g}): "
+                f"{u[_k]:.6g}, partner_value {_t:.6g})"
+                + (f"; they all hold one value, {u[_iv[0][0]]:.6g}" if len({round(u[k], 12) for k, _ in _iv}) == 1 else "")
+                + ". Give each interior interface node its own DESIGN POINT DIRICH with VAL = partner_value(its "
+                  "coordinate). Nothing was exported.")
+    _hi = [p for p in _hxy if _mid(p, IF)]
+    if SIDE == "neumann" and _hi:
+        raise SystemExit(
+            f"INTERFACE HELD: on this Neumann side your deck's DIRICH conditions hold {len(_hi)} of the {len(_iv)} "
+            f"interior nodes of the {IF} edge (the first at ({_hi[0][0]:g}, {_hi[0][1]:g})), and a held node takes "
+            f"no load. A Neumann side leaves them free and loads each with its own DESIGN POINT NEUMANN. Nothing "
+            f"was exported.")
 # CONSISTENT flux = 4C's CALCFLUX_BOUNDARY output (assembly-consistent by
 # construction, from 4C's true residual -- the same reaction recovery every
 # other backend in this corpus uses). flux_boundary_phi_1 is the flux VECTOR;
@@ -3193,8 +3650,8 @@ fb = _m.point_data[fbname]
 nrm = {"left": (-1, 0), "right": (1, 0), "bottom": (0, -1), "top": (0, 1)}[IF]
 fbmap = {}
 for (x, y), vec in zip(vpts, fb):
-    fbmap[(round(x, 10), round(y, 10))] = float(vec[0] * nrm[0] + vec[1] * nrm[1])
-q_own = [fbmap[(round(nodes[n-1][0], 10), round(nodes[n-1][1], 10))] for n in interior]
+    fbmap[_key(x, y)] = float(vec[0] * nrm[0] + vec[1] * nrm[1])
+q_own = [_at(fbmap, *nodes[n-1]) for n in interior]
 co = [list(nodes[n-1]) for n in interior]
 vals = [u[n-1] for n in interior]
 # exports.json LAST, only after the solve succeeded (the driver takes its
@@ -3607,10 +4064,47 @@ def resolve_participant(solver: str, request: str = "") -> tuple:
       p.stem.removeprefix(f"participant_{key}").lstrip("_") or "base"
       for p in sorted(_PARTICIPANT_DIR.glob(f"participant_{key}*.py"))
     ]
+    # THE BASE CONTRACT TAKES BOTH ROLES where it carries a SIDE switch: a request for
+    # its Neumann side is answered with it, said, rather than with a bare "none".
+    both = suffix == "_neumann" and _base_takes_both_sides(key)
     return None, "", (f"# No {_PARTICIPANT_LABELS.get(suffix.lstrip('_'), suffix or 'base')} "
                       f"participant for solver={solver!r}\n\n"
-                      f"Available variants: {', '.join(available) or 'none'}.")
+                      + (f"The base contract (variant='') serves BOTH sides: set SIDE = \"neumann\" "
+                         f"in it, or \"side\": \"neumann\" in config.json where it reads config. "
+                         if both else "")
+                      + f"Available variants: {', '.join(available) or 'none'}.")
   return path, _PARTICIPANT_LABELS.get(suffix.lstrip("_"), "base"), ""
+
+
+def _base_takes_both_sides(key: str) -> bool:
+  """True when the base contract of `key` carries a SIDE switch that names the Neumann side."""
+  import re
+  base = _PARTICIPANT_DIR / f"participant_{key}.py"
+  return bool(base.is_file() and re.search(r'^SIDE\s*=.*"neumann"', base.read_text(), re.M))
+
+
+def participant_variants() -> dict:
+  """{solver: the variant words resolve_participant finds a contract for on this install}, the
+  base contract ('') first. Read through the resolver, so the writer's docstring cannot list a
+  variant the resolver refuses (measured: 'neumann' was listed for every solver, three FEniCSx
+  workers asked for it first, and FEniCSx has none)."""
+  return {key: [w for w in [""] + list(_PARTICIPANT_LABELS) if resolve_participant(key, w)[0] is not None]
+          for key in _BACKEND_ORDER}
+
+
+def participant_variants_text() -> str:
+  """What each solver's contract writer accepts as `variant`, in plain words, from
+  participant_variants(), and which base contracts serve both sides."""
+  table = participant_variants()
+  words = "; ".join(f"{key} " + (", ".join(f"'{w}'" for w in ws if w) or "none")
+                    for key, ws in table.items())
+  both = [key for key, ws in table.items() if "neumann" not in ws and _base_takes_both_sides(key)]
+  own = [key for key, ws in table.items() if "neumann" in ws]
+  return (f"`variant` is '' for the base contract, or one of the words this install's contracts "
+          f"carry: {words}. The base contract serves both the Dirichlet and the Neumann side for "
+          f"{', '.join(both)} (SIDE in its edit block, or \"side\" in config.json where it reads "
+          f"config)" + (f"; {', '.join(own)} {'has' if len(own) == 1 else 'have'} a 'neumann' variant "
+                        f"for that side" if own else "") + ".")
 
 
 def _participant_key_suffix(solver: str, request: str = "") -> tuple:
@@ -3635,6 +4129,24 @@ def _door_scaffold(key: str) -> str:
     return ""
   block = payload[j + len("```python"):k].lstrip("\n")
   return block if ("config.json" in block and "exports.json" in block) else ""
+
+
+def participant_companions(solver: str, request: str = "") -> tuple:
+  """([(file name, text), ...], error): the files served BESIDE a participant
+  contract -- for the deal.II wrapper, its program scaffold (holes elided) and
+  the six-line CMakeLists.txt that builds it. The knowledge door shows these
+  texts and write_participant_contract writes them next to the wrapper; both
+  come from here, so they cannot differ."""
+  path, _label, err = resolve_participant(solver, request)
+  if path is None:
+    return [], ""
+  name = _PROGRAM_OF.get(path.name)
+  if name is None:
+    return [], ""
+  text, err = served_program(name)
+  if err:
+    return [], f"[openPASO WITHHOLDS {name}] {err}; refusing rather than serving it."
+  return [(name, text), ("CMakeLists.txt", _dealii_cmake(name))], ""
 
 
 def participant_contract_text(solver: str, request: str = "") -> tuple:
@@ -3673,10 +4185,16 @@ def coupling_participant(solver: str, request: str = "") -> str:
     return err
   key, suffix = _participant_key_suffix(solver, request)
   requested = (request or "").strip().lower().replace("_", "-")
-  source, _ = participant_contract_text(solver, request)   # the writer's text, part by part
-  chunks = _participant_chunks(source)
   match = re.search(r"(?:^|:)part(\d+)(?:$|:)", requested)
   part = int(match.group(1)) if match else 1
+  companions, cerr = participant_companions(solver, request)
+  # A VARIANT'S PROGRAM PARTS NAME THEIR VARIANT: the NEXT signal of the transient
+  # program named 'participant:program:part2', which is the steady program's part 2.
+  prog_role = f"{suffix.lstrip('_')}:" if suffix else ""
+  if "program" in requested.split(":") and (companions or cerr):
+    return cerr or _program_part(key, companions, part, prog_role)
+  source, _ = participant_contract_text(solver, request)   # the writer's text, part by part
+  chunks = _participant_chunks(source)
   if not 1 <= part <= len(chunks):
     return (f"# Invalid participant part {part}\n\n"
             f"{path.name} has {len(chunks)} parts; request part1 through "
@@ -3687,17 +4205,56 @@ def coupling_participant(solver: str, request: str = "") -> str:
     next_call = (
       "\nNEXT: request "
       f"`signal='participant{role}:part{part + 1}'`. ")
+  elif companions:
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    next_call = (f"\nFINAL PART. SHA-256 of the served wrapper text: `{digest}`. The wrapper has "
+                 f"no hole: its solve is the program {companions[0][0]} beside it, whose holes "
+                 f"are yours. write_participant_contract writes both files and its "
+                 f"CMakeLists.txt; the program is also `signal='participant:{prog_role}program:part1'`. ")
   else:
     digest = hashlib.sha256(source.encode()).hexdigest()
     next_call = (f"\nFINAL PART. SHA-256 of the served contract text: `{digest}`. "
                  "It is the contract with the solve elided, not a complete "
                  "program: write the solve where the elision banner sits. ")
+  # THE HEADER NAMES THE ONE CALL THAT WRITES THE FILE, AND WHERE THE FACTS ARE. Measured: two
+  # workers whose briefs dropped the writer fetched their contracts as parts and retyped them
+  # (74k characters, about seven minutes), then hit API errors the served facts for their codes
+  # name -- facts neither fetched. The header said only "Concatenate only the fenced code".
+  variant = f"variant='{suffix.lstrip('_')}', " if suffix else ""
   return (
     f"# {key} {label} participant CONTRACT (solve elided): part {part} of {len(chunks)}\n\n"
-    "Concatenate only the fenced code contents in part order; do not add "
-    "the headings. Then edit `EDIT THIS BLOCK` and write the solve where the "
-    "elision banner sits.\n\n"
-    f"```python\n{chunks[part - 1]}```\n{next_call}\n")
+    f"ONE CALL WRITES THIS WHOLE FILE, byte for byte: write_participant_contract(solver='{key}', "
+    f"{variant}path='<absolute path of the .py file in your working directory>'); use it rather "
+    f"than retyping the parts. The API facts measured for {key} on this install -- the calls that "
+    f"work and what a wrong one prints -- come with knowledge(topic='coupling', solver='{key}'); "
+    "read them before you fill a hole. Assembling the parts instead: concatenate only the fenced "
+    "code contents in part order, without the headings. Then edit `EDIT THIS BLOCK` and "
+    + (f"fill the holes of the program {companions[0][0]} beside it.\n\n" if companions else
+       "write the solve where the elision banner sits.\n\n")
+    + f"```python\n{chunks[part - 1]}```\n{next_call}\n")
+
+
+def _program_part(key: str, companions: list, part: int, role: str = "") -> str:
+  """One bounded chunk of a wrapper's program scaffold (holes elided); the last
+  part carries the CMakeLists.txt that builds it. `role` is the variant's word and a
+  colon ('transient:', 'elastic:'), '' for the base contract."""
+  import hashlib
+  (name, text), extra = companions[0], companions[1:]
+  chunks = _participant_chunks(text)
+  if not 1 <= part <= len(chunks):
+    return (f"# Invalid program part {part}\n\n{name} has {len(chunks)} parts; request "
+            f"participant:{role}program:part1 through participant:{role}program:part{len(chunks)}.")
+  tail = (f"\nNEXT: request `signal='participant:{role}program:part{part + 1}'`. " if part < len(chunks) else
+          f"\nFINAL PART. SHA-256 of the served {name}: `{hashlib.sha256(text.encode()).hexdigest()}`. "
+          f"Its holes are yours; it does not compile until each is filled."
+          + "".join(f"\n\n{nm}, beside it:\n\n```cmake\n{tx}```" for nm, tx in extra) + "\n")
+  return (f"# {key} program scaffold {name} (holes elided): part {part} of {len(chunks)}\n\n"
+          f"write_participant_contract(solver='{key}', path='<absolute path of the wrapper .py>') "
+          f"writes this same text beside its wrapper, byte for byte, with its CMakeLists.txt. The "
+          f"API facts measured for {key} on this install come with knowledge(topic='coupling', "
+          f"solver='{key}'). Assembling the parts instead: concatenate only the fenced code "
+          "contents in part order into one file.\n\n"
+          f"```cpp\n{chunks[part - 1]}```\n{tail}\n")
 
 
 def coupling_knowledge(solver: str = "", signal: str = "") -> str:
@@ -4130,12 +4687,14 @@ at all:
                     "(fixture: precice_can_verdicts_for_the_other_four)"),
         "body": '''\
 deal.II has no Python API, so the participant is a compiled C++ executable that
-links `libprecice` directly. One is SHIPPED here —
-`data/coupling_participants/precice_heat_dealii.cc`, with an optional CMake
-target beside the `couple` participant's — and it was built and coupled to a
+links `libprecice` directly. Such a program was built here and coupled to a
 scikit-fem Python participant end to end, non-matching interface meshes,
 serial-implicit, interface temperature and flux checked against a closed form.
-Start from that file rather than from this description.
+No solver is served for it: the program is yours to write. Its finite element
+part can start from the `couple` participant's served program scaffold
+(knowledge(topic='coupling', solver='dealii'): the mesh, assembly, boundary
+data and solve are holes you fill; the consistent flux recovery is served),
+with the file exchange replaced by the preCICE calls below.
 
   * Build through CMake with `DEAL_II_SETUP_TARGET` and add
     `target_include_directories(<target> PRIVATE <precice>/include)` plus
@@ -4349,7 +4908,9 @@ def _febio() -> str:
   looks exactly like a corrupted deck.
 * PER-POINT interface data is possible and is the whole reason this works:
   - a prescribed field is `<MeshData><NodeData name="..." node_set="...">` plus
-    `<bc type="prescribed displacement"><value type="map">...`;
+    `<bc type="prescribed displacement" node_set="..."><dof>x</dof><value lc="1"
+    type="map">...</value><relative>0</relative></bc>`, ONE bc per dof (`<x_dof>`
+    belongs to `zero displacement` only; measured on 4.12);
   - a prescribed traction is `<MeshData><SurfaceData data_type="vec3">` plus
     `<surface_load type="traction"><traction type="map">...`.
   In BOTH, `lid` is the 1-based index INTO THAT SET, not the node or face id.
@@ -4489,9 +5050,8 @@ def _kratos() -> str:
   props)` -- by NAME through the factory, never as a Python attribute). A
   nodal FACE_HEAT_FLUX is only ever integrated BY a condition: with none,
   Kratos runs, converges, exits 0 and returns exactly the no-flux field
-  (measured on one mesh: max|T| 2.307291e-03 with the flux on the nodes and
-  no condition, identical to the zero-flux run, against 3.605675e-03 with
-  the conditions). Check it in one step: solve once with the imported flux
+  (measured on one mesh: with the flux on the nodes and no condition the
+  field is identical to the zero-flux run's; with the conditions it is not). Check it in one step: solve once with the imported flux
   zeroed and once with it real; if the two fields match, the load never
   arrived. Everything else, the mesh, the material and the export, is
   unchanged.
@@ -4866,67 +5426,101 @@ print(f"DUNE Dirichlet participant: NDOF = {len(u_vert)}  "
 
 
 def _dealii_sources() -> str:
-    """What the deal.II participant needs, WITHOUT the C++ solver itself.
+    """What is served in the deal.II program and what is the agent's.
 
-    This function used to inline the complete solvers — heat_iface_dealii.cc,
-    its transient sibling, elast_iface_dealii.cc and the CMakeLists — under the
-    heading "save these to disk, then build". That made the deal.II payload
-    103 kB and handed the agent a working finite element program, which is
-    exactly what openPASO is not for. The Python wrapper's own solve was elided at
-    the same time; leaving the C++ in place would have made that pointless,
-    since the input format the wrapper writes is readable straight off the .cc.
-
-    THE FAILURE THIS MUST NOT REINTRODUCE. Ten passages once promised the
-    sources were "in the same directory the payload came from". A payload comes
-    from a tool call; there is no directory, and no tool returned the source.
-    Measured in one recorded run's transcript: the agent hunted the
-    filesystem, found a scalar solver, discovered it could not do its
-    anisotropic case, hand-wrote a replacement, segfaulted and spent the
-    session there. So this says plainly that writing the solver is the agent's
-    job, and promises nothing.
+    This function once inlined the complete solvers -- heat_iface_dealii.cc and
+    its siblings -- under "save these to disk, then build": a 103 kB payload
+    that handed over a working finite element program. Then it served nothing
+    of the program at all, and the model wrote the whole thing: measured on two
+    coupled rounds, one of eight deal.II sides ever wrote exports.json. The
+    program is now served as a scaffold whose holes are elided, the way every
+    Python contract is served; this says what the served part does for you.
     """
     return (
-        "\n## THE C++ SOLVER IS YOURS TO WRITE\n\n"
-        "deal.II is a C++ library, so a participant here is TWO files: a "
-        "compiled solver and the thin Python wrapper above. openPASO does not "
-        "supply the solver and there is no copy of one to find on this "
-        "install — do not go looking for it. Write it, build it against your "
-        "deal.II, and point `DEALII_EXE` at YOUR binary.\n\n"
-        "What openPASO does specify is the part that is its own: the wrapper must "
-        "implement the imports.json/exports.json handshake exactly as shown, "
-        "and the interface flux or traction it exports must be the CONSISTENT "
-        "one — the residual of the assembled system with NO boundary condition "
-        "applied, divided by the nodal interface weight. In deal.II that is "
-        "two lines against a matrix you assembled without constraints "
-        "(`free_matrix.vmult(residual, solution); residual -= free_rhs;`), and "
-        "it is the same recovery every backend in this corpus uses. It is also "
-        "what the interface check compares: a boundary-gradient projection is "
-        "only order ~1 on the boundary trace and does not converge at all in "
-        "the max norm, so a solver that recovers the flux that way will fail "
-        "an independent check however good its field is.\n\n"
-        "The solver and the wrapper exchange plain text on argv and files of "
-        "your own choosing — that pair is private to you, and nothing in the "
-        "coupling contract constrains it.\n")
+        "\n## THE PROGRAM: WHAT IS SERVED AND WHAT IS YOURS\n\n"
+        "Yours, in dealii_side.cc's five holes: the mesh and its boundary ids, the "
+        "coefficient and the source, the assembly, the boundary data, the solve. "
+        "The transient program, dealii_side_transient.cc, has the same five, its "
+        "last three run once per time step (the step's system, the boundary data at "
+        "the new time, the step's solve); its loop over the steps with the last "
+        "step's field kept, the partner's data for each step, the recovery of each "
+        "step's theta-averaged flux and the per-step output are served. "
+        "The elastic program, dealii_side_elastic.cc (physics='elasticity', a "
+        "displacement with two components), has five of its own: the mesh and its "
+        "boundary ids, the material law and the body force, the assembly of the "
+        "stiffness and load, the boundary data per component, the solve; its "
+        "two-component element and each dof's component, the interface nodes per "
+        "component, the traction recovery per component and checks of the law (three "
+        "unit strains) and of the stiffness (zero on the rigid motions, the energy "
+        "of the uniform strains) are served. "
+        "Served, and running as it stands once the holes are filled: reading the "
+        "wrapper's input; `NDOF = <n>` and `VOLUME_SOURCE on` on the console; the "
+        "interface nodes in order along the interface; the CONSISTENT outward flux "
+        "q_i = -(A u - b_volume)_i / w_i, from the matrix and volume load your holes "
+        "assembled with no boundary condition in them (w_i = the integral of phi_i "
+        "over the interface; an interface end that the outer condition also holds "
+        "takes its nearest interior neighbour's value), the same recovery every "
+        "served contract uses; and the two output files the wrapper turns into "
+        "exports.json and the per-level dumps. Between the holes the program checks "
+        "your fills and stops with the reason: interface boundary ids that are not "
+        "exactly the interface line; a `source` that is not the source the wrapper "
+        "passed; a volume load with no source in it; held edges that are not the "
+        "ones the input names; an interface that is free on the Dirichlet role or "
+        "held on the Neumann role; a Neumann load that is missing, or entered with "
+        "the opposite sign; boundary values applied to system_matrix itself (the "
+        "recovery reads it); and a solution that does not solve the system.\n")
+
+
+def _dealii_program_head(program: str = "dealii_side.cc") -> str:
+    """The heading and paragraph served above a wrapper's program, for that program."""
+    if program == "dealii_side.cc":
+        return _DEALII_PROGRAM_HEAD
+    variant, word = (("transient", "transient") if "transient" in program else ("elasticity", "elastic"))
+    return (_DEALII_PROGRAM_HEAD.replace("dealii_side.cc", program, 1)
+            .replace("The same write_participant_contract call",
+                     f"The same write_participant_contract(..., variant='{variant}') call", 1)
+            .replace("signal='participant:program:part1'", f"signal='participant:{word}:program:part1'", 1))
+
+
+_DEALII_PROGRAM_HEAD = (
+    "## THE PROGRAM THE WRAPPER RUNS: dealii_side.cc and its CMakeLists.txt\n\n"
+    "The same write_participant_contract call writes both beside the wrapper, "
+    "byte for byte as shown here (for a client that truncates long replies they "
+    "are also `signal='participant:program:part1'` and on). The wrapper builds "
+    "the program into ./build on its first run and whenever the .cc is newer "
+    "than the binary, and prints the first compiler errors when the build fails. "
+    "AS SERVED IT DOES NOT COMPILE: fill its five holes. The comment above each "
+    "is its contract -- the names it may use, what it must leave set, and what "
+    "the lines after it check -- and the deal.II calls are the facts in this "
+    "reply (WHAT DECIDES THIS RUN), one call each. Everything else in it is "
+    "served and runs as it stands.\n\n")
 
 
 def _dealii() -> str:
-    return _payload(
+    text = _payload(
         "deal.II",
-        "**Either side, in either subdomain.** All four role/position "
-        "combinations were run as real couplings on this install — against "
-        "FEniCSx and against DUNE-fem, with non-matching interface meshes — and "
-        "all converged.\n\n"
-        "THE C++ SOLVER IS YOURS TO WRITE AND BUILD. No .cc ships with this "
-        "contract and none is on this install — do not go looking for one. The "
-        "Python wrapper below is the contract (the handshake, the sign "
-        "convention, the exports schema, the self-check); the compiled program "
-        "it runs is your solve, exchanging a plain-text input and output file "
-        "of your own design with the wrapper.",
+        "**Either side, in either subdomain.** The served program, its holes "
+        "filled for a manufactured problem, was run through `couple` in both "
+        "roles against the served NGSolve contract with non-matching interface "
+        "meshes, and converged; standalone, its consistent interface flux (the "
+        "Dirichlet role) and its interface trace (the Neumann role) converge at "
+        "second order in h. Earlier deal.II programs were coupled against "
+        "FEniCSx and DUNE-fem in all four role/position combinations.\n\n"
+        "THE PARTICIPANT IS TWO FILES AND ONE BUILD, steady, transient or elastic. "
+        "The Python wrapper below has no hole: it writes the program's input, "
+        "builds the program, runs it and exports. The program is the solve, and its "
+        "five holes are YOURS TO WRITE; everything around them is served. The "
+        "steady program is dealii_side.cc (mesh, coefficient and source, assembly, "
+        "boundary data, solve); a time-dependent problem has "
+        "dealii_side_transient.cc, which marches the whole window per run through "
+        "the same five; a displacement field has dealii_side_elastic.cc (mesh, "
+        "material law and body force, assembly, boundary data, solve), served with "
+        "physics='elasticity'.",
         "dealii", _launch_py(_interp_wrapper(
             "deal.II", "DEALII_EXE",
-            extra="\n   BUILD THE SOLVER FIRST (see the traps below): the wrapper runs\n"
-                  "   an executable that does not exist until you have built it, and\n"
-                  "   `DEALII_EXE` is the path to YOUR build, not to a deal.II install.")),
+            extra="\n   The wrapper BUILDS the program itself (cmake + make into ./build)\n"
+                  "   from dealii_side.cc and CMakeLists.txt beside it; set DEAL_II_DIR in\n"
+                  "   its edit block to the deal.II tree discover(query='list') names.")),
         '''\
 * A deal.II INTERFACE INTEGRAL CAN EVALUATE TO EXACTLY 0.0 ON A NON-HYPERCUBE
   MESH, with nothing raised and the solve reporting success. Two independent
@@ -4949,40 +5543,46 @@ def _dealii() -> str:
   `reference_cell().volume()` -- they agree to roundoff when the rule and the
   mapping are both right, and disagree by a constant factor, or give exactly
   0.0, when either is wrong. Neither bites a hypercube mesh built with
-  `subdivided_hyper_rectangle` and plain `QGauss`, which is what the contracts
-  here use; both become live the moment a participant is written on simplices.
-
-* THE PARTICIPANT IS TWO FILES: a compiled C++ solver and a thin Python
-  wrapper. The wrapper converts imports.json into the solver's plain-text input
-  file, runs the executable, and converts its output into exports.json. NEITHER
-  FILE IS SHIPPED: copy the wrapper contract above, write the C++ solver
-  yourself (see THE C++ SOLVER IS YOURS TO WRITE below), and build it once:
-
-```
-cmake -S <dir with the .cc and CMakeLists> -B <build dir> \\
-      -DDEAL_II_DIR=<deal.II build or install tree> -DCMAKE_BUILD_TYPE=Release
-make -C <build dir> -j8
-```
-
-* `DEAL_II_DIR` MUST BE THE BUILD OR INSTALL TREE that contains
-  `lib/cmake/deal.II/deal.IIConfig.cmake`. Pointing it at the source checkout
-  silently configures against whatever system deal.II happens to exist, which
-  is usually an older version, and the build then fails in confusing ways.
+  `subdivided_hyper_rectangle` and plain `QGauss`, which is what the served
+  program uses; both become live the moment a participant is written on
+  simplices.
+* `DEAL_II_DIR` MUST BE THE BUILD OR INSTALL TREE that discover(query='list')
+  names for deal.II (it contains `lib/cmake/deal.II/deal.IIConfig.cmake`). A
+  COMPILE THAT READS /usr/include/deal.II IS BUILDING AGAINST A SYSTEM PACKAGE,
+  whatever cmake's "Using the deal.II-..." line said: measured, a find_package
+  without HINTS ignores -DDEAL_II_DIR and takes the /usr package, and a
+  CMakeLists that links dealii::dealii in place of deal_ii_setup_target, with
+  no build type, dies there on "mpi.h". The served six lines do neither, and
+  the program's version check stops an older deal.II at its first line.
 * DO NOT try to compile with a bare `g++ -I<dealii>/include`. deal.II's bundled
   headers (Kokkos and friends) are only found through CMake's
-  `DEAL_II_SETUP_TARGET`.
-* PASS THE PROBLEM THROUGH THE INPUT FILE, not through recompilation. Write
-  your solver to read side, geometry, conductivity, mesh size, the source
-  samples and the imported interface samples from one text file, so a coupling
-  iteration is a re-run, not a rebuild.
-* THE NODAL FLUX MUST BE AVERAGED OVER BOTH ADJACENT CELLS. Assembling the
-  interface flux cell by cell and writing it into a per-node array is
-  last-writer-wins, which silently biases every interior interface node toward
-  one cell. Accumulate and divide by the count.
-* Neumann side: assemble `+ integral(g * v) ds` over the interface FACES only,
-  selected by the boundary id you set from the interface coordinate. deal.II
-  will happily integrate over every boundary face if you do not restrict it.''',
+  `DEAL_II_SETUP_TARGET`, which the served CMakeLists.txt calls.
+* THE RECOVERY READS system_matrix AS YOUR ASSEMBLY LEFT IT. deal.II's own
+  tutorials apply the boundary values to the system matrix in place
+  (`MatrixTools::apply_boundary_values(boundary_values, system_matrix, ...)`),
+  which empties every held row but its diagonal; the reaction those rows carry
+  is then gone. Keep system_matrix as assembled and apply them to a copy; the
+  program stops if a held row of system_matrix has lost its off-diagonal
+  entries.
+* Neumann side: the partner's flux is `+ integral(g * phi_i) ds` over the
+  interface FACES only, the ones with boundary id INTERFACE_ID. deal.II will
+  integrate over every boundary face if the loop does not select them.''',
         extra=_dealii_sources())
+    # "write the solve where the banner sits" is the Python contracts' step; this
+    # wrapper has no banner, its program has the holes. Stale text raises here.
+    step = "Then edit the marked block IN PLACE and write the solve where the banner sits."
+    assert step in text, "the deal.II door lost the contract heading it rewrites"
+    text = text.replace(step, "Then edit the marked block IN PLACE, and fill the five holes of the "
+                              "program the same call writes beside it, dealii_side.cc.", 1)
+    # THE PROGRAM RIGHT BEHIND THE WRAPPER, so the reply that carries the one
+    # carries the other.
+    files, err = participant_companions("dealii")
+    i = text.find("## PARTICIPANT CONTRACT")
+    j = text.find("```python", i)
+    k = text.find("```", j + 9) + 3
+    block = (f"```cpp\n{files[0][1]}```\n\n```cmake\n{files[1][1]}```\n" if files and not err
+             else f"[{err or 'the program scaffold is missing from the install'}]\n")
+    return text[:k] + "\n\n" + _dealii_program_head() + block + text[k:]
 
 
 _BACKENDS.update({"dune": _dune, "dune-fem": _dune, "dunefem": _dune,

@@ -26,7 +26,6 @@ The text below is the tool's own description, exactly as the AI model receives i
     signal='participant[:<variant>]:part<k>')` serves in parts, concatenated:
     the contract with its handshake, its checks and its recovery, and the
     SOLVE elided where the banner sits. It is not a runnable program; fill the
-    marked hole(s) yourself. `variant` is one of thermoelastic, neumann,
-    elastic, transient, 3d (the same words the knowledge door takes).
+    marked hole(s) yourself. `variant` is '' for the base contract, or one of the words this install's contracts carry: fenics 'thermoelastic', 'elastic', 'transient'; fourc 'thermoelastic'; ngsolve 'elastic'; skfem 'elastic'; dune 'elastic', '3d'; dealii 'elastic', 'transient'; febio 'elastic'; kratos 'neumann', '3d'; sparta none. The base contract serves both the Dirichlet and the Neumann side for fenics, fourc, ngsolve, skfem, dune, dealii, febio (SIDE in its edit block, or "side" in config.json where it reads config); kratos has a 'neumann' variant for that side. The knowledge door takes the same words.
     Refuses to overwrite an existing file unless overwrite=True.
     ```

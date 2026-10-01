@@ -9,6 +9,20 @@ project(heat_iface_dealii CXX)
 add_executable(heat_iface_dealii heat_iface_dealii.cc)
 deal_ii_setup_target(heat_iface_dealii)
 
+# ── the served program scaffold, its holes filled: what participant_dealii.py runs ──
+# Served with the holes elided (knowledge(topic='coupling', solver='dealii') and
+# write_participant_contract); this unserved copy is what the suite executes.
+add_executable(dealii_side dealii_side.cc)
+deal_ii_setup_target(dealii_side)
+
+# ── the served TRANSIENT program scaffold, its holes filled: what participant_dealii_transient.py runs ──
+add_executable(dealii_side_transient dealii_side_transient.cc)
+deal_ii_setup_target(dealii_side_transient)
+
+# ── the served ELASTIC program scaffold, its holes filled: what participant_dealii_elastic.py runs ──
+add_executable(dealii_side_elastic dealii_side_elastic.cc)
+deal_ii_setup_target(dealii_side_elastic)
+
 # ── the TRANSIENT scalar participant: theta-scheme heat, waveform exchange ──
 # The deal.II side of a time-dependent coupling. Needs nothing beyond deal.II
 # itself (the three problem functions arrive as muparser expressions, and

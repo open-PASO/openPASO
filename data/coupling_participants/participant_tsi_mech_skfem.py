@@ -146,16 +146,6 @@ def thermal_load(v, w):
     return BETA * w["th"] * trace(sym_grad(v))
 
 
-@BilinearForm
-def mass(p, q, w):
-    return p * q
-
-
-@LinearForm
-def evol_rhs(q, w):
-    return trace(sym_grad(w["uh"])) * q
-
-
 K = asm(elasticity, ub)
 f = asm(thermal_load, ub, th=tb.interpolate(theta))
 
@@ -169,6 +159,16 @@ u = solve(*condense(K, f, D=D))
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 # volumetric strain, L2-projected onto P1 so it lives on the exchange nodes
+@BilinearForm
+def mass(p, q, w):
+    return p * q
+
+
+@LinearForm
+def evol_rhs(q, w):
+    return trace(sym_grad(w["uh"])) * q
+
+
 evol = solve(asm(mass, tb), asm(evol_rhs, tb, uh=ub.interpolate(u)))
 
 ix, iy = ub.split_indices()

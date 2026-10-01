@@ -60,11 +60,9 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 # while everything beside the level rule survived in all of them.
 logging.basicConfig(level=logging.INFO)
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 from skfem import (Basis, BilinearForm, ElementTriP1, LinearForm, MeshTri,
                    asm, condense, solve)
 from skfem.helpers import dot, grad
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 
 # ── EDIT THIS BLOCK ─ every number below is an ARBITRARY PLACEHOLDER.

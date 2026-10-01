@@ -60,10 +60,8 @@ import KratosMultiphysics.ConvectionDiffusionApplication  # noqa: F401
 PARTNER   = "left"        # the partner's `name` in your couple(...) call
 X0, X1    = 0.6, 1.0      # this subdomain's x-extent
 Y0, Y1    = 0.0, 0.4      # this subdomain's y-extent
-IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the line x = IFACE_X
-                          # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
-                          # (they are stacked). Everything below follows from it.
-IFACE_X   = 0.6           # the shared interface; X0/X1 for axis "x", Y0/Y1 for axis "y"
+IFACE_AXIS = "x"          # the line x = IFACE_X; this contract has no other
+IFACE_X   = 0.6           # the shared interface: X0 or X1
 K         = 1.6           # conductivity of THIS subdomain
 
 
@@ -78,8 +76,8 @@ def F_SRC(x, y):
     the outer values.
 
     Unlike its FEniCSx and DUNE siblings, this one is called ONCE PER NODE
-    with SCALAR coordinates (see the SetSolutionStepValue loop below), so
-    write it with plain math or NumPy scalars — do not assume arrays:
+    with SCALAR coordinates, so write it with plain math or NumPy scalars —
+    do not assume arrays:
 
         return 2.0 * np.pi**2 * np.sin(np.pi * x) * np.sin(np.pi * y)
     """
@@ -114,10 +112,10 @@ def source(x, y):
 # ── THE PER-LEVEL RULE (served). ./config.json names the level and overrides the
 #    mesh, the box, K, F_SRC and T_OUTER; the dumps below carry the level. Write:
 #      {"level": k, "nx": .., "ny": .., "x0": .., "x1": .., "y0": .., "y1": ..,
-#       "iface": "left|right|bottom|top", "k": <diffusivity>, "reaction": <c or 0.0>,
+#       "iface": "left|right", "k": <diffusivity>,
 #       "source_expr": "<f(x, y), or 0.0>", "outer": <the non-interface value, if any>}
 #    openPASO judges this side's field against them; without them it abstains.
-LEVEL = 1
+LEVEL, _REACTION = 1, 0.0
 if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
     try:
         _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
@@ -132,6 +130,10 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
             _src = compile(str(_cfg["source_expr"]).replace("^", "**"), "<source_expr>", "eval")
             F_SRC = lambda x, y, _c=_src: eval(_c, {"__builtins__": {}}, dict(  # noqa: E731
                 x=x, y=y, pi=np.pi, sin=np.sin, cos=np.cos, exp=np.exp, sqrt=np.sqrt)) + 0.0 * x
+        _ifc = str(_cfg.get("iface", "")).lower()
+        IFACE_X = {"left": X0, "right": X1}.get(_ifc, IFACE_X)
+        IFACE_AXIS = "y" if _ifc in ("bottom", "top") else IFACE_AXIS
+        _REACTION = float(_cfg.get("reaction") or 0.0)
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
 
@@ -239,9 +241,9 @@ def main():
     so a verification script can `import` this file, call main(), and integrate
     the volume field against a manufactured solution — the coupling itself only
     ever needs the file handshake."""
-    if min(abs(IFACE_X - X0), abs(IFACE_X - X1)) > TOL:
-        sys.exit(f"IFACE_X={IFACE_X} is not an x-boundary of this subdomain "
-                 f"[{X0},{X1}] — nothing is shared with the partner")
+    if IFACE_AXIS != "x" or _REACTION or min(abs(IFACE_X - X0), abs(IFACE_X - X1)) > TOL:
+        sys.exit(f"this side solves -div(K grad T) = f (no reaction) across x = IFACE_X, X0 or X1; "
+                 f"got reaction {_REACTION:g}, axis {IFACE_AXIS}, IFACE_X {IFACE_X} on [{X0},{X1}]")
     # NX < 1 would put the interface column and the outer Dirichlet column on
     # the SAME nodes; the Dirichlet condition wins, the imported flux is
     # discarded, and the run still exits 0 with a plausible-looking export.
@@ -294,7 +296,7 @@ def main():
     for j in range(NY + 1):
         # THE NODAL VALUE IS THE LOAD. FluxCondition2D2N integrates FACE_HEAT_FLUX
         # from its NODES; a condition created without this SetSolutionStepValue
-        # assembles zero, exits 0 and is reported unresponsive (measured 2026-09-11).
+        # assembles zero, exits 0 and is reported unresponsive (measured).
         mp.Nodes[nid[(i_if, j)]].SetSolutionStepValue(
             KM.FACE_HEAT_FLUX, float(q_in[j]))
     props = mp.GetProperties()[1]

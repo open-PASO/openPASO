@@ -46,6 +46,8 @@ def _flat(v):
 # once; when the disk changes (a file appears, a history grows) the text
 # changes and is served again.
 _GIVE_UP_SERVED: dict = {}
+# The files already told that they carry no export self-check (see _participant_write_check).
+_SELFCHECK_NOTE_SERVED: set = set()
 
 
 def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
@@ -141,6 +143,8 @@ def _work_on_disk_contradicting_a_give_up_once(work: Path) -> str:
     # this gate stayed silent.
     pscripts = []
     for q in sorted(work.rglob("*.py")):
+        if ".replaced-" in q.name or q.name.endswith((".bak", ".orig", "~")):
+            continue                      # a copy moved aside is not a participant script
         try:
             c = q.read_text(errors="replace")
         except OSError:
@@ -306,6 +310,8 @@ def _work_on_disk_contradicting_a_give_up_once(work: Path) -> str:
            "then build the result set. "
            if _frozen else
            "\nA could-not-finish report is not a result. ")
+        + ("Keep that report on disk until a complete result set replaces it: a run "
+           "that deletes it and then runs out of time ends with no report at all. ")
         + ("A result set built "
           "from the numbers you already have stands on those numbers, PROVIDED "
           "it is complete: every level the task prescribes and, where the "
@@ -510,6 +516,13 @@ _SOLVER_MARKERS = (
 
 _CONTRACT_LINE = _re_mod.compile(r"^\s*NDOF\s*=\s*\d+\s*$", _re_mod.M | _re_mod.I)
 
+# A LINE THE SOLVER LIBRARY PRINTS ITSELF, in the format only it prints (result_audit's
+# LIBRARY_LINES: the served deal.II program's version line). The marker list above did not know
+# it, and the early check told every cell of one coupled round that the served program's own
+# console "PROVES A RUN, NOT WHICH CODE RAN IT" (measured).
+from tools.result_audit import LIBRARY_LINES as _LIBRARY_LINES      # noqa: E402
+_LIBRARY_LINE = _re_mod.compile("|".join(_LIBRARY_LINES), _re_mod.M | _re_mod.I)
+
 
 def _looks_like_captured_output(text: str) -> bool:
     """Whether this text is a solver's console rather than a written summary.
@@ -531,7 +544,7 @@ def _looks_like_captured_output(text: str) -> bool:
     this one accusing a solver of not existing.
     """
     low = text.lower()
-    if any(m.lower() in low for m in _SOLVER_MARKERS):
+    if any(m.lower() in low for m in _SOLVER_MARKERS) or _LIBRARY_LINE.search(text):
         return True
     return bool(_CONTRACT_LINE.search(text))
 
@@ -560,7 +573,8 @@ def _only_the_contract_line(text: str) -> bool:
     condemns it is the same drift as three doors resolving a path three ways.
     """
     low = text.lower()
-    if any(m.lower() in low for m in _SOLVER_MARKERS) or _STAMPED_SOLVER_LINE.search(text):
+    if (any(m.lower() in low for m in _SOLVER_MARKERS) or _STAMPED_SOLVER_LINE.search(text)
+            or _LIBRARY_LINE.search(text)):
         return False
     return bool(_CONTRACT_LINE.search(text))
 
@@ -772,6 +786,18 @@ def _eaten_error_check(output: str) -> str:
 _DELIVERABLE_STEM = ("solution_level", "interface_level", "field_level")
 
 
+_COORD_TOKEN = _re_mod.compile(r"(?:x|y|z)\d*|(?:x|y|z)(?:if|iface|int|line|const|c)")
+_VALUE_TOKENS = frozenset({"u", "ux", "uy", "uz", "q", "qn", "flux", "val", "value", "t", "temp", "sol",
+                           "phi", "grad", "du", "dudn", "sigma", "p", "f", "k", "res", "residual"})
+
+
+def _coordinate_name(name: str) -> bool:
+    """True for a name that reads as a coordinate (x, iface_x, x_if, y0), never for a value (ux, flux_x)."""
+    toks = [t for t in name.lower().split("_") if t]
+    return (any(_COORD_TOKEN.fullmatch(t) for t in toks)
+            and not any(t in _VALUE_TOKENS for t in toks))
+
+
 def _constant_deliverable_check(written: Path, content: str) -> str:
     """Is a graded file being filled in with a literal instead of a result?
 
@@ -863,7 +889,11 @@ def _constant_deliverable_check(written: Path, content: str) -> str:
                 names = {n.id for v in arg.values
                          if isinstance(v, ast.FormattedValue)
                          for n in ast.walk(v.value) if isinstance(n, ast.Name)}
-                written_consts = {n for n in names if n in literal and n not in other}
+                # A COORDINATE THAT IS CONSTANT BY GEOMETRY IS NOT AN INVENTED VALUE. Measured:
+                # a correct cell wrote its straight interface's x from one literal (iface_x)
+                # beside y, u and q read from its dumps, and was told every number was invented.
+                written_consts = {n for n in names if n in literal and n not in other
+                                  and not _coordinate_name(n)}
                 # ONE CONSTANT IS ENOUGH, and requiring two was a hole the
                 # size of the measured failure. The shape that produced 132
                 # interface points of literal 0.0 is
@@ -907,8 +937,7 @@ def _script_noop_check(written: Path, content: str) -> str:
     into a boundary condition does not survive into the code.
 
     The consequence is invisible at runtime: Kratos converges, exits 0, and
-    returns exactly the no-flux field -- 2.307291e-03 against 3.605675e-03
-    with the condition present, bit-identical to a zero-flux run.
+    returns exactly the no-flux field, bit-identical to a zero-flux run.
 
     So it is caught in the SCRIPT, when the script is written, before it has
     run once. Prose next to the fact did not work eighteen times.
@@ -949,8 +978,8 @@ def _extra_script_checks(written: Path, content: str) -> str:
       NGSolve x/y rebound before symbolic use -- 27 runs. After
         `from ngsolve import *`, any loop assigning x or y rebinds the
         symbolic coordinates to floats. Measured: type() goes
-        CoefficientFunction -> float with value 0.02514662, x and y left at
-        0.9886363636, and CoefficientFunction((float, float)) is accepted
+        CoefficientFunction -> float, x and y are left at the last probe
+        visited, and CoefficientFunction((float, float)) is accepted
         silently. A constant body force on a fully-Dirichlet incompressible
         domain gives u identically zero -- 7.16e-17, 3.60e-17, 1.30e-17,
         order 0.0000 -- against 1.2229e-02 with the symbolic source.
@@ -1048,8 +1077,8 @@ def _extra_script_checks(written: Path, content: str) -> str:
                 "THEM SYMBOLICALLY. After `from ngsolve import *` those names "
                 "ARE the symbolic coordinates, so the assignment turns your "
                 "source into a CONSTANT -- measured, type() goes "
-                "CoefficientFunction -> float with value 0.02514662 and x, y "
-                "left at 0.9886363636, and CoefficientFunction((float, float)) "
+                "CoefficientFunction -> float and x, y are left at the last "
+                "probe visited, and CoefficientFunction((float, float)) "
                 "is accepted silently. A constant body force on a "
                 "fully-Dirichlet incompressible domain gives u identically "
                 "zero: 7.16e-17, 3.60e-17, 1.30e-17 across the levels, order "
@@ -1071,8 +1100,8 @@ def _FLUX_NOOP_MSG(written: Path) -> str:
             "integrated BY a condition; with none on the interface edges "
             "Kratos runs, converges, exits 0 and returns exactly the field it "
             "would have returned with no flux at all. Measured on one mesh: "
-            "zero flux 2.307291e-03, flux on nodes with no condition "
-            "2.307291e-03 (BIT-IDENTICAL), flux with conditions 3.605675e-03. "
+            "flux on nodes with no condition gives the zero-flux field "
+            "BIT-IDENTICALLY; with the conditions the flux is applied. "
             "Add, over the interface edges in order:\n"
             "        for c in range(len(iface) - 1):\n"
             "            mp.CreateNewCondition(\"ThermalFace2D2N\", c + 1,\n"
@@ -1391,6 +1420,15 @@ def _participant_write_check(written: Path, content: str) -> str:
     those 46 and fires on none of the 32 served participants. Names defects only, writes nothing; the
     mesh, the form, the material, the source and the solve are the agent's and are not judged here.
     """
+    if written.name.lower().endswith((".cc", ".cpp", ".cxx")) or written.name.lower() == "cmakelists.txt":
+        # A deal.II PROGRAM AND ITS CMakeLists ARE JUDGED TOO (measured: a missing update flag and
+        # a find_package without HINTS each cost a cell its deal.II side).
+        try:
+            from tools.participant_lint import cxx_findings   # noqa: PLC0415
+            _cx = cxx_findings(content, written.name)
+        except Exception:                                # noqa: BLE001
+            return ""
+        return "".join(f"\n[write check] {written.name}: {f}" for f in _cx[:3])
     if not written.name.lower().endswith(".py"):
         return ""
     try:
@@ -1418,6 +1456,13 @@ def _participant_write_check(written: Path, content: str) -> str:
         gap = missing_export_selfcheck(content)
     except Exception:                                    # noqa: BLE001
         gap = ""
+    # ONCE PER FILE. Measured on a coupled round: the note fired 39 times on hand-written files and
+    # drew no response; the information is in its first serving, and the repeat buries the findings
+    # that change with each write.
+    if gap:
+        _key = str(Path(written).resolve())
+        gap = "" if _key in _SELFCHECK_NOTE_SERVED else gap
+        _SELFCHECK_NOTE_SERVED.add(_key)
     gap_txt = (f"\n[write check] {written.name}: {gap}" if gap else "")
     # THE IMPORT THAT NEVER REACHED THE ANSWER IS ITS OWN CATEGORY TOO, and the
     # quietest of the three: the run finishes, the interface residual collapses,
@@ -1426,7 +1471,7 @@ def _participant_write_check(written: Path, content: str) -> str:
     # failing ones, on none that were correct).
     try:
         from tools.participant_lint import imported_values_not_held   # noqa: PLC0415
-        lost = imported_values_not_held(content)
+        lost = imported_values_not_held(content, near=written)
     except Exception:                                    # noqa: BLE001
         lost = ""
     if lost:
@@ -1476,9 +1521,10 @@ def _participant_write_check(written: Path, content: str) -> str:
         alone = ""
     if alone:
         gap_txt += f"\n[write check] {written.name}: {alone}"
-    # AND A SOLVE THAT IS ONE PRECONDITIONER SWEEP, AND A SERVED REFUSAL
-    # DELETED: both measured on one round, both let a run finish wrong.
-    for _fn_name in ("unsolved_linear_solve", "served_guard_removed"):
+    # AND A SOLVE THAT IS ONE PRECONDITIONER SWEEP, A SERVED REFUSAL DELETED,
+    # AND A SERVED BLOCK LOST WHILE THE FILE WAS WRITTEN AGAIN: each measured on
+    # a round, each lets a run go on without what the contract served.
+    for _fn_name in ("unsolved_linear_solve", "served_guard_removed", "served_blocks_lost"):
         try:
             from tools import participant_lint as _pl                 # noqa: PLC0415
             _said = getattr(_pl, _fn_name)(content) if _fn_name == "unsolved_linear_solve" \
@@ -1534,7 +1580,8 @@ def _participant_run_check(output: str, command: str = "") -> str:
         return ""
     try:
         from tools.participant_lint import findings_from_output   # noqa: PLC0415
-        findings = findings_from_output(output)
+        # the command tells which code crashed when the output cannot (a SIGSEGV prints no traceback)
+        findings = findings_from_output(output, command)
     except Exception:                                    # noqa: BLE001
         return ""
     if not findings:

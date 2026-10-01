@@ -8,7 +8,7 @@ Group: Two solvers on one problem.
 
 | Parameter | Type | Required | Default |
 |---|---|---|---|
-| `participants` | string | yes |  |
+| `participants` | string or array | yes |  |
 | `max_iter` | integer | no | `50` |
 | `tol` | number | no | `1e-06` |
 | `accelerator` | string | no | `'auto'` |

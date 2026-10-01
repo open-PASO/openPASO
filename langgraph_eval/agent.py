@@ -911,7 +911,22 @@ def _bash_tool_for(workdir: Path, *, audit_on_submit: bool = False,
         except Exception:                              # noqa: BLE001
             return ""
         if not outside:
-            return ""
+            # /tmp IS THIS SHELL'S PRIVATE SCRATCH, AND THE FILE TOOLS CANNOT REACH IT.
+            # Measured: a shell made a folder under /tmp, write_file then refused
+            # every path in it, and the run lost three to four minutes before
+            # writing inside its working directory. Said at the command that
+            # creates or writes there, in both arms.
+            try:
+                made = re.findall(r"(?:\bmkdir|\btouch|\bcp|\bmv|\btee|>>?)\s+(?:-\S+\s+)*(/tmp/[\w./+-]*)",
+                                  command)
+            except Exception:                          # noqa: BLE001
+                made = []
+            if not made:
+                return ""
+            return ("\n[" + made[0] + " is this shell's private scratch: it lasts between your shell "
+                    "commands, but read_file, write_file and edit_file cannot reach it and nothing "
+                    f"there is part of your result. Write scripts and every deliverable inside "
+                    f"your working directory {workdir}; use a relative path.]")
         return ("\n[" + ", ".join(outside[:3]) + " is outside your working "
                 f"directory {workdir}, which is read-only from here. All files "
                 "\u2014 scripts, logs, and every required deliverable \u2014 must "

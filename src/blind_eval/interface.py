@@ -510,6 +510,84 @@ def flux_ratio_consistency(reported, dudn, spread_tol: float = 0.30,
             "spread_tolerance": spread_tol}
 
 
+def flux_multiple_consistency(reported, dudn, rtol: float = 0.30,
+                              floor_frac: float = 0.05, components=None):
+    """Is the reported flux a CONSTANT multiple of the field's normal derivative?
+
+    Read as the best constant multiple, ``k = sum(q g) / sum(g g)`` over the
+    interface points, and how far the flux lies from it: ``misfit = |q - k g| /
+    |q|`` (root mean square). Same verdicts as :func:`flux_ratio_consistency`:
+    CONSISTENT (misfit within ``rtol``, ``k > 0``), SIGN_CONVENTION (a clean
+    multiple with ``k < 0``), INCONSISTENT, NOT_ASSESSED.
+
+    WHY NOT THE SPREAD OF q / g. The ratio is ill-conditioned wherever the normal
+    derivative passes through zero and next to a corner of the interface, where
+    a one-sided difference is least accurate. Measured on right fields read leg by
+    leg across a bent interface: the 10-90 % spread of q / g read 130 % -> 204 %
+    -> 43 % over three levels, while the misfit of the best constant multiple read
+    36 % -> 28 % -> 11 %; on a straight one 31 % -> 12 % -> 8 % against 12 % -> 5 %
+    -> 3 %. Each point weighs by its own gradient, so a point where both pass
+    through zero moves nothing. A scaled flux keeps a small misfit: its ``k`` is
+    what shows it, against the stated coefficient.
+    """
+    pairs = [(r, g) for r, g in zip(reported, dudn) if g is not None]
+    if not pairs:
+        return {"verdict": "NOT_ASSESSED",
+                "detail": "the field could not be interpolated to the "
+                          "interface probes (fewer than three probe columns, "
+                          "or the field probes are not a tensor grid)"}
+    ncomp = min(len(pairs[0][0]), len(pairs[0][1]))
+    want = ([c for c in components if 0 <= c < ncomp] if components is not None
+            else list(range(ncomp)))
+    per_comp = []
+    for c in want:
+        q = [float(r[c]) for r, _g in pairs]
+        g = [float(d[c]) for _r, d in pairs]
+        qq, gg = sum(v * v for v in q), sum(v * v for v in g)
+        if qq <= 0.0:
+            per_comp.append({"component": c, "verdict": "NOT_ASSESSED",
+                             "detail": "the reported flux is identically zero, so there is "
+                                       "no profile to compare with the field"})
+            continue
+        grms = math.sqrt(gg / len(g))
+        if gg <= 0.0 or sum(1 for v in g if abs(v) >= floor_frac * grms) < 3:
+            per_comp.append({"component": c, "verdict": "NOT_ASSESSED",
+                             "detail": ("the submitted field is flat at the interface: its "
+                                        "normal derivative is identically zero" if gg <= 0.0 else
+                                        "fewer than three interface points carry a normal "
+                                        "derivative above 5% of its own RMS")})
+            continue
+        k = sum(a * b for a, b in zip(q, g)) / gg
+        misfit = math.sqrt(sum((a - k * b) ** 2 for a, b in zip(q, g)) / qq)
+        per_comp.append({"component": c, "implied_coefficient": k, "misfit": misfit,
+                         "n_points": len(q),
+                         "verdict": ("INCONSISTENT" if misfit > rtol else
+                                     "SIGN_CONVENTION" if k < 0 else "CONSISTENT")})
+    bad = [d for d in per_comp if d["verdict"] == "INCONSISTENT"]
+    flipped = [d for d in per_comp if d["verdict"] == "SIGN_CONVENTION"]
+    ok = [d for d in per_comp if d["verdict"] == "CONSISTENT"]
+    if bad:
+        verdict, detail = "INCONSISTENT", (
+            "the reported interface flux is not a constant multiple of the normal "
+            "derivative of the submitted field: it differs from the best such multiple by "
+            + ", ".join(f"{d['misfit']:.0%} (component {d['component']})" for d in bad))
+    elif flipped:
+        verdict, detail = "SIGN_CONVENTION", (
+            "the reported flux is a constant multiple of the field's normal derivative, "
+            "with the OPPOSITE sign on component(s) "
+            + ", ".join(str(d["component"]) for d in flipped)
+            + ": the outward-normal convention the task states was not followed")
+    elif ok:
+        verdict, detail = "CONSISTENT", (
+            "the reported flux is the submitted field's normal derivative times a "
+            "constant, as it must be: implied coefficient "
+            + ", ".join(f"{d['implied_coefficient']:.4g} (misfit {d['misfit']:.1%})" for d in ok))
+    else:
+        verdict, detail = "NOT_ASSESSED", "no component could be assessed"
+    return {"verdict": verdict, "detail": detail, "per_component": per_comp,
+            "misfit_tolerance": rtol}
+
+
 def flux_consistency(reported, recovered, rtol: float = 0.25):
     """Does the reported interface flux match one recomputed from the field?"""
     pairs = [(r, g) for r, g in zip(reported, recovered) if g is not None]

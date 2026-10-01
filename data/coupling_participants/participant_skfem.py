@@ -1,6 +1,9 @@
 """scikit-fem participant for the openPASO `couple` driver.
 
-Steady heat conduction  -div(k grad T) = f  on one rectangular subdomain.
+Steady heat conduction  -div(k grad T) = f  on one 2-D subdomain: the mesh your
+solve builds (a box, a box with cells removed, joined boxes). k may vary by
+region, the interface may bend (IFACE_SEGMENTS), and which outer edges are held
+is your solve's choice.
 CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1), writes
 exports.json LAST.
@@ -23,20 +26,20 @@ from skfem.helpers import dot, grad
 #    this script gives the exact block for the RIGHT / Neumann side.
 SIDE      = "dirichlet"   # "dirichlet" | "neumann"
 PARTNER   = "right"       # name of the partner participant in couple(...)
-X0, X1    = 0.0, 0.6      # this subdomain
+X0, X1    = 0.0, 0.6      # this subdomain's box; for another shape, the box around it
 Y0, Y1    = 0.0, 0.4
 IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the line x = IFACE_X
                           # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.6           # shared interface (X0/X1 for axis "x", Y0/Y1 for axis "y")
-IFACE_SEGMENTS = ()       # EMPTY: the interface is the single straight line named above. For an
-                          # interface that BENDS -- one subdomain's corner cut out of the other --
-                          # list its legs in order instead, each ("x"|"y", position, from, to):
-                          #     IFACE_SEGMENTS = (("x", 0.5, 0.0, 0.5), ("y", 0.5, 0.5, 1.0))
-                          # is the vertical leg x = 1/2 from y = 0 to 1/2, then the horizontal leg
-                          # y = 1/2 from x = 1/2 to 1. Both sides must list the SAME legs in the
-                          # SAME order: the exchange is matched by distance along them.
-K         = 0.8           # conductivity
+IFACE_SEGMENTS = ()       # EMPTY: the interface is the single straight line named above. If it
+                          # BENDS, list its legs in order, each ("x"|"y", position, from, to):
+                          #     IFACE_SEGMENTS = (("x", XA, YA, YB), ("y", YB, XA, XB))
+                          # is the leg x = XA from y = YA to YB, then the leg y = YB from x = XA to
+                          # XB, with your numbers in place of the letters. Both sides must list the
+                          # SAME legs in the SAME order: the exchange is matched by distance along
+                          # them. iface_dofs are then every boundary dof on the legs, y_if their (x, y).
+K         = 0.8           # conductivity (where it varies by region, your solve builds that)
 
 
 def F_SRC(x, y):
@@ -62,11 +65,56 @@ def F_SRC(x, y):
         return -K * (6.0 * x * y**2 + 2.0 * x**3)
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the NON-interface x-boundary
+T_OUTER   = 320.0         # Dirichlet value on the outer edges your solve holds (outer_dofs)
 NX, NY    = 24, 16        # this subdomain's own mesh
 T_INIT    = 310.0          # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 # ─────────────────────────────────────────────────────────────────────────
+
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). x0, x1, y0, y1, k, outer and source_expr
+#    (a string in x and y, `^` allowed) in config.json replace the constants above, written AS
+#    THE TASK WRITES THEM. A key it does not state leaves its constant as it is; the audit's
+#    equation check reads the same keys. What these keys cannot state: k is ONE number for the
+#    whole side, and this contract reads no key for a k that differs by region. A side with
+#    several materials builds its k in its own solve and states no k here; one number would be
+#    another equation to every check that reads it. The interface is not read from config.json
+#    either: it is IFACE_AXIS and IFACE_X above, or IFACE_SEGMENTS for a bent one.
+def _expr_fn(expr):
+    """A NumPy function of (x, y) from an expression string as a task writes it."""
+    code = compile(str(expr).replace("^", "**"), "<source_expr>", "eval")
+    names = {"pi": np.pi, "sin": np.sin, "cos": np.cos, "exp": np.exp, "sqrt": np.sqrt,
+             "abs": np.abs, "log": np.log, "tanh": np.tanh, "cosh": np.cosh, "sinh": np.sinh}
+    def f(x, y):
+        env = dict(names); env["x"] = x; env["y"] = y
+        return eval(code, {"__builtins__": {}}, env) + 0.0 * x
+    return f
+try:
+    _cfg_all = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
+    _cfg_all.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+except (ValueError, TypeError, json.JSONDecodeError):
+    _cfg_all = {}
+_FROM_CFG = []
+if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
+    _FROM_CFG.append("x0, x1, y0, y1")
+for _nm, _key in (("K", "k"), ("T_OUTER", "outer")):
+    if _cfg_all.get(_key) is not None:
+        try:
+            globals()[_nm] = float(_cfg_all[_key])
+            _FROM_CFG.append(_key)
+        except (TypeError, ValueError):
+            print(f"NOTE: config.json's {_key} is not one number, so {_nm} above stands."
+                  + (" This contract reads no k that differs by region: build it in your solve "
+                     "and state no k in config.json." if _key == "k" else ""))
+if _cfg_all.get("source_expr") is not None:
+    _f_cfg = _expr_fn(_cfg_all["source_expr"])
+    def F_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
+        return _f_cfg(x, y)
+    _FROM_CFG.append("source_expr")
+print("SOURCES IN USE: from " + ("config.json" if "source_expr" in _FROM_CFG else
+                                 "code (the F_SRC body above)")
+      + (f"; f = {str(_cfg_all['source_expr'])[:80]}" if "source_expr" in _FROM_CFG else "")
+      + f"; taken from config.json: {', '.join(_FROM_CFG) or 'nothing'}")
 
 AX = 0 if IFACE_AXIS == "x" else 1         # the coordinate the interface FIXES
 AL = 1 - AX                                # the coordinate that RUNS ALONG it
@@ -248,7 +296,7 @@ D = outer_dofs
 #    0.0, a converged coupling passing every exchange check).
 _dl = np.asarray(basis.doflocs, float)               # (2, ndofs): where each dof sits
 _yv = np.asarray(y_if, float)
-_straight = _yv.ndim == 1                            # a bent interface is matched by arc instead
+_straight = _yv.ndim == 1 and not IFACE_SEGMENTS     # a bent interface is checked against its legs
 _on = np.where(np.abs(_dl[AX] - IFACE_X) <= TOL)[0] if _straight else np.zeros(0, int)
 _ids = np.asarray(iface_dofs).astype(int).ravel()
 _bad = [k for k, d in enumerate(_ids)
@@ -266,6 +314,46 @@ if _straight and (_bad or _missed or len(_ids) != _yv.size):
            + ")" if _bad else "")
         + (f"; {_missed} of the {len(_on)} dofs on the interface line have no entry" if _missed else "")
         + ". basis.doflocs gives each dof's position; basis.nodal_dofs maps a node to its dof.")
+# A BENT INTERFACE IS CHECKED AGAINST THE LEGS IT DECLARES: every listed dof is a boundary dof
+# on a leg, every boundary dof on a leg is listed, and y_if[k] is where iface_dofs[k] sits.
+if IFACE_SEGMENTS:
+    _m = basis.mesh
+    _bf = _m.boundary_facets()
+    _lt = 1e-6 * float(np.linalg.norm(_m.p[:, _m.facets[0, _bf]] - _m.p[:, _m.facets[1, _bf]],
+                                      axis=0).min())    # a millionth of the shortest boundary edge
+
+    def _on_legs(P):                                 # P (2, n): True where a point lies on a leg
+        hit = np.zeros(P.shape[1], bool)
+        for axis, pos, a, b in IFACE_SEGMENTS:
+            c = 0 if axis == "x" else 1
+            hit |= ((np.abs(P[c] - pos) <= _lt)
+                    & (P[1 - c] >= min(a, b) - _lt) & (P[1 - c] <= max(a, b) + _lt))
+        return hit
+    _bd = np.asarray(basis.get_dofs().all(), int)   # the dofs on the mesh boundary
+    _on = _bd[_on_legs(_dl[:, _bd])]
+    _bds, _two = set(_bd.tolist()), _yv.ndim == 2 and _yv.shape[-1] >= 2 and len(_yv) == len(_ids)
+
+    def _wrong(k, d):                                # why entry k is not right, or "" when it is
+        if not 0 <= d < _dl.shape[1]:
+            return f"iface_dofs[{k}] = {d}, no dof of this basis"
+        at = f"iface_dofs[{k}] = {d}, a dof at ({_dl[0, d]:g}, {_dl[1, d]:g})"
+        if d not in _bds:
+            return at + ", not on the mesh boundary"
+        if not _on_legs(_dl[:, [d]])[0]:
+            return at + ", on no leg"
+        if _two and np.abs(_dl[:, d] - _yv[k, :2]).max() > _lt:
+            return at + f", while y_if[{k}] = ({_yv[k, 0]:g}, {_yv[k, 1]:g})"
+        return ""
+    _bad = [w for w in (_wrong(k, d) for k, d in enumerate(_ids)) if w]
+    _missed = len(set(_on.tolist()) - set(_ids.tolist()))
+    if not _ids.size or not _two or _bad or _missed:
+        raise SystemExit(
+            f"INTERFACE DOFS: on a bent interface iface_dofs must be every boundary dof on the legs "
+            f"of IFACE_SEGMENTS, and y_if[k] the (x, y) of iface_dofs[k]; iface_dofs has {len(_ids)} "
+            f"entries and y_if has shape {tuple(_yv.shape)}"
+            + (f"; {len(_bad)} entries are not right (the first: {_bad[0]})" if _bad else "")
+            + (f"; {_missed} of the {len(_on)} boundary dofs on the legs have no entry" if _missed else "")
+            + ". basis.doflocs gives each dof's position; basis.get_dofs() the boundary dofs.")
 
 if SIDE == "dirichlet":
     T_if = sample(imp, "values", T_INIT, y_if)
@@ -284,14 +372,48 @@ else:
 sol = solve(*condense(A, b, x=sol, D=D))
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
+# ── SOLVE SELF-CHECK (served) ─ keep this block. On every dof outside D, the ones the
+#    solve does not hold, a solved system leaves r = A u - b near round-off (A, b: the
+#    unconstrained operator and load, b with the partner's flux on the Neumann side).
+#    Measured on a coupled run: a side solved with its interface held at zero, then
+#    wrote the partner's values into sol; its export and the trace check below read
+#    them back, and only this residual showed it. As a share of the scale below,
+#    measured on this file: a direct solve 2e-16, a conjugate-gradient solve at its
+#    default tolerance about 1e-6, values written after the solve 8e-3 to 1e-1.
+_chk_D = np.asarray(D)                              # dof numbers, or a mask over the dofs
+_chk_free = np.setdiff1d(np.arange(A.shape[0]),
+                         np.flatnonzero(_chk_D) if _chk_D.dtype == bool else _chk_D.astype(int).ravel())
+_chk_u = np.asarray(sol, float).ravel()
+_chk_bb = np.asarray(b, float).ravel()
+_chk_r = np.abs(A @ _chk_u - _chk_bb)[_chk_free]
+_chk_sc = max(float(np.abs(_chk_bb).max(initial=0.0)),       # the scale is |A| |u|, not |A u|
+              float(np.asarray(abs(A).sum(axis=1)).max(initial=0.0)) * float(np.abs(_chk_u).max(initial=0.0)))
+if _chk_r.size and _chk_sc > 0 and _chk_r.max() > 1e-4 * _chk_sc:
+    raise SystemExit(f"SOLVE SELF-CHECK: on the dofs outside D, the ones the solve does not hold "
+                     f"({_chk_r.size} of them), r = A u - b reaches {_chk_r.max():.2e}, "
+                     f"{_chk_r.max() / _chk_sc:.1e} of the system scale {_chk_sc:.2e} (the larger "
+                     f"of |b| and |A| |u|), and more than 1e-4 of it on "
+                     f"{int((_chk_r > 1e-4 * _chk_sc).sum())} of those dofs. A and b are this side's "
+                     f"unconstrained operator and load; a direct solve of that system leaves about "
+                     f"1e-16 of the scale there. The field in sol does not solve that system, so "
+                     f"nothing was exported.")
+
 # ── DID THE PARTNER'S TRACE ENTER THE SOLVE? (served) ─ keep this block. On the
 #    Dirichlet side the partner's values must be in the solution at the interface's
 #    own dofs (read from the basis, never through the list the values were written
 #    through). The two end nodes are left out -- the outer boundary may hold them.
-if SIDE == "dirichlet" and _straight:
-    _inner = _on[(np.abs(_dl[AL, _on] - ALO) > TOL) & (np.abs(_dl[AL, _on] - AHI) > TOL)]
+if SIDE == "dirichlet" and (_straight or IFACE_SEGMENTS):
+    if IFACE_SEGMENTS:                               # the leg nodes but the polyline's two ends
+        (_a0, _p0, _s0, _), (_a1, _p1, _, _e1) = IFACE_SEGMENTS[0], IFACE_SEGMENTS[-1]
+        _ends = np.array([(_p0, _s0) if _a0 == "x" else (_s0, _p0),
+                          (_p1, _e1) if _a1 == "x" else (_e1, _p1)], float)
+        _inner = _on[[np.abs(_ends - _dl[:, d]).max(axis=1).min() > _lt for d in _on]]
+        _where = _dl[:, _inner].T
+    else:
+        _inner = _on[(np.abs(_dl[AL, _on] - ALO) > TOL) & (np.abs(_dl[AL, _on] - AHI) > TOL)]
+        _where = _dl[AL, _inner]
     if _inner.size:
-        _want = sample(imp, "values", T_INIT, _dl[AL, _inner])
+        _want = sample(imp, "values", T_INIT, _where)
         _gap = float(np.abs(np.asarray(sol)[_inner] - _want).max())
         if _gap > 1e-9 * max(1.0, float(np.abs(_want).max())):
             raise SystemExit(f"EXPORT SELF-CHECK: the partner's temperature is not in the solution at "
@@ -375,13 +497,26 @@ good = np.where(~suspect)[0]
 if len(good):
     for i in np.where(suspect)[0]:
         Q[i] = Q[good[np.argmin(np.abs(good - i))]]
-# ── EXPORT SELF-CHECK ─ keep this block. It stops the three exports that look
-#    fine and are worthless: a non-finite field; a Neumann side whose imported
+# ── EXPORT SELF-CHECK ─ keep this block. It stops the exports that look fine and
+#    are worthless: no interface point, or coordinates, values and fluxes of
+#    different lengths; a non-finite field; a Neumann side whose imported
 #    load never entered the assembled system (it returns the no-load answer and
 #    a flux of ~0 against a nonzero partner); and a flux that is the partner's
 #    array negated instead of a recovery from THIS side's own system.
 _chk_vals = np.asarray(sol[iface_dofs], float).ravel()
 _chk_flux = np.asarray(Q, float).ravel()
+_yc = np.asarray(y_if, float)
+_exp_co = (_yc[:, :2] if _yc.ndim == 2 else                # the coordinates exported below
+           np.column_stack([np.full(_yc.size, float(IFACE_X)), _yc]) if AX == 0 else
+           np.column_stack([_yc, np.full(_yc.size, float(IFACE_X))]))
+if not len(_exp_co):
+    raise SystemExit("EXPORT SELF-CHECK: no interface point to export (iface_dofs and y_if are "
+                     "empty), so the partner would receive an empty interface. List this "
+                     "side's interface dofs and their positions.")
+if not len(_exp_co) == len(_chk_vals) == len(_chk_flux):
+    raise SystemExit(f"EXPORT SELF-CHECK: {len(_exp_co)} interface coordinates, {len(_chk_vals)} "
+                     f"values and {len(_chk_flux)} fluxes; each exported point needs its own value "
+                     f"and flux. Build all three from the same iface_dofs and y_if.")
 if not (np.isfinite(_chk_vals).all() and np.isfinite(_chk_flux).all()):
     raise SystemExit("EXPORT SELF-CHECK: non-finite interface values or fluxes; "
                      "the solve did not produce a usable field, so nothing was "
@@ -393,11 +528,22 @@ _chk_qin = (np.concatenate([np.asarray(_d.get("normal_fluxes") or [], float).rav
             if _chk_imp else np.zeros(0))
 if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
         and np.abs(_chk_flux).max() < 1e-9 * np.abs(_chk_qin).max():
-    raise SystemExit("EXPORT SELF-CHECK: the recovered interface flux is ~0 "
-                     "against a nonzero imported flux: the imported load never "
-                     "entered the assembled system (the facet term / boundary "
-                     "condition that integrates it is missing). Fix the "
-                     "application; do not couple on")
+    # IT SAYS WHAT IT MEASURED. It used to name a missing facet term; measured on a
+    # coupled run, the term was there and the interface facets were not. The weights
+    # w_i tell those apart.
+    _chk_w = np.abs(np.asarray(wgt, float)[np.asarray(iface_dofs, int)])
+    _chk_on = np.where(~suspect)[0]                  # w_i > 0 and held by no outer value
+    _chk_ri = np.abs(np.asarray(r, float)[np.asarray(iface_dofs, int)])
+    raise SystemExit(f"EXPORT SELF-CHECK: the recovered interface flux Q = -r/w is ~0 (at most "
+                     f"{np.abs(_chk_flux).max():.2e}) against an imported flux of up to "
+                     f"{np.abs(_chk_qin).max():.2e}. The weights w_i = int phi_i ds over the facets "
+                     f"of fbasis at the {_chk_w.size} interface dofs are "
+                     + ("0 at every one: fbasis covers no facet at these dofs, and nothing "
+                        "integrated over it reaches them." if not (_chk_w > 1e-14).any() else
+                        f"nonzero at {int((_chk_w > 1e-14).sum())} of them (sum {_chk_w.sum():.3e}); "
+                        f"at the {_chk_on.size} of those that no outer value holds, r = A u - b_vol "
+                        f"is at most {_chk_ri[_chk_on].max(initial=0.0):.2e}, so there A u equals "
+                        f"the volume load b_vol."))
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied flux can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \
@@ -439,12 +585,7 @@ try:
             _f.write(f"{float(_px):.11e},{float(_py):.11e},{float(_u):.11e}\n")
     with open(f"interface_level{LEVEL}.csv", "w") as _f:
         _f.write("x,y,u,qn\n")
-        _pts = (np.atleast_2d(np.asarray(y_if, float))
-                if np.asarray(y_if).ndim == 2 else
-                np.column_stack([np.full(len(y_if), float(IFACE_X)), np.asarray(y_if, float)])
-                if AX == 0 else
-                np.column_stack([np.asarray(y_if, float), np.full(len(y_if), float(IFACE_X))]))
-        for (_px, _py), _d, _q in zip(_pts, iface_dofs, Q):
+        for (_px, _py), _d, _q in zip(_exp_co, iface_dofs, Q):
             _f.write(f"{float(_px):.11e},{float(_py):.11e},"
                      f"{float(sol[_d]):.11e},{float(_q):.11e}\n")
 except Exception as _dump_exc:
@@ -466,10 +607,7 @@ except Exception as _dump_exc:
 Path("exports.json").write_text(json.dumps({
     "field_name": "temperature",
     "n_points": int(len(iface_dofs)),
-    "coordinates": (np.atleast_2d(np.asarray(y_if, float)).tolist()
-                    if np.asarray(y_if).ndim == 2 else
-                    [([float(IFACE_X), float(yy)] if AX == 0 else [float(yy), float(IFACE_X)])
-                     for yy in y_if]),
+    "coordinates": _exp_co.tolist(),
     "values": [float(t) for t in sol[iface_dofs]],
     "normal_fluxes": [float(q) for q in Q],
 }, indent=2))
