@@ -22,8 +22,14 @@ except Exception:
 # it by chance; replacing that changed the numbers a run had computed. Requiring
 # a boundary in front leaves encoded data alone and still catches every path in
 # prose, JSON, logs and tracebacks.
+#
+# This machine's own home directory is the exception once it is eight characters or longer: base64
+# holds a given string of eight characters by chance about once in 64**8 positions, so the home is
+# never in encoded data by chance and is removed wherever it stands, glued to letters included
+# ('A' * 40 + '<home>/x' kept its home behind the boundary rule).
 _BOUNDARY = r"(?<![A-Za-z0-9+/])"   # "=" stays a boundary: --prefix=/home/... is a path
-_HOME_RE = re.compile(_BOUNDARY + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
+_LONG_HOME = len(_HOME) >= 8
+_HOME_RE = re.compile(("" if _LONG_HOME else _BOUNDARY) + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
 _ANY_HOME_RE = re.compile(_BOUNDARY + r"/(?:home|Users|media)/[A-Za-z0-9._-]+")
 _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-9_-])") if len(_USER) >= 3 else None
 
@@ -38,24 +44,35 @@ _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-
 # scrubber exists to remove. So only the values of the keys that carry encoded
 # data are protected, and everything else is scrubbed as prose.
 _KEYED_VALUE = re.compile(r'"(?:frames|mask|data|image)"\s*:\s*"([^"\\]*)"')
-_DATA_URI = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+")
+_DATA_URI = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,([A-Za-z0-9+/=]+)")
 
-# AND DECIDED ON THE WHOLE VALUE, the same way wherever a value is met: in a parsed object, in a
-# document, in a download streamed in pieces. Encoded data holds base64's characters from its first
-# to its last: A-Z a-z 0-9 + / and = (encoded blocks can be joined, so padding may stand inside). It
-# holds no space and none of "." "-" "_" ":" "~", one of which nearly every path and every sentence
-# holds; it is at least 40 characters long; and it does not begin where a home directory begins.
-# Anything else under these keys is text and is scrubbed as text. Judged by its first 64 characters,
-# or with spaces allowed, 'A' * 64 + ' /home/<user>/x' went out as it was (Copilot on the org PR:
-# first the object walk, then the streamed download; the whole-document path had the same hole),
-# and so did a long path a run wrote under "data" (measured on all three).
+# AND DECIDED ON THE WHOLE VALUE, by one rule wherever a value is met: in a parsed object, in a
+# document, in a download streamed in pieces, in a data: URI's payload. Encoded data is base64 as an
+# encoder writes it: groups of four of A-Z a-z 0-9 + /, only the last group of a block padded ("xx=="
+# or "xxx="), blocks possibly joined, and possibly an unpadded group of two or three at the end. It is
+# at least 40 characters long, it does not begin where a home directory begins, and it never holds
+# this machine's home directory (see _LONG_HOME). Anything else is text and is scrubbed as text.
+# Each weaker form let a home path out, measured on all three paths: judged by the first 64
+# characters, or with spaces allowed, 'A' * 64 + ' <home>/x' and a long path a run wrote under
+# "data"; with "=" allowed anywhere, 'A' * 40 + '=<home>/x' (Copilot on the org PR, three rounds).
+# The form alone cannot settle it: 'A' * 40 + '<home>/x' IS valid base64, so the home check decides.
 _BASE64_TEXT = re.compile(r"[A-Za-z0-9+/=]{40,}")
+_PADDING = re.compile(r"=+")
+
+
+def _is_base64(value: str) -> bool:
+    if _BASE64_TEXT.fullmatch(value) is None or len(value) % 4 == 1:
+        return False
+    whole = len(value) - len(value) % 4           # an unpadded last group of 2 or 3 starts here
+    return all(len(m.group()) <= 2 and m.end() % 4 == 0 and m.end() <= whole
+               for m in _PADDING.finditer(value))
 
 
 def is_encoded(value: str) -> bool:
     """Whether `value`, met under one of the encoded keys, is encoded data to pass on untouched."""
-    return (_BASE64_TEXT.fullmatch(value) is not None
-            and _HOME_RE.match(value) is None and _ANY_HOME_RE.match(value) is None)
+    return (_is_base64(value)
+            and _HOME_RE.match(value) is None and _ANY_HOME_RE.match(value) is None
+            and not (_LONG_HOME and _HOME in value))
 
 
 def _scrub_prose(t: str) -> str:
@@ -80,7 +97,7 @@ def scrub_text(s: str) -> str:
         return s
     # the two kinds cannot overlap: encoded data holds no ":" and a data: URI no quote
     spans = sorted([m.span(1) for m in _KEYED_VALUE.finditer(s) if is_encoded(m.group(1))]
-                   + [m.span() for m in _DATA_URI.finditer(s)])
+                   + [m.span(1) for m in _DATA_URI.finditer(s) if is_encoded(m.group(1))])
     out, last = [], 0
     for start, end in spans:
         out.append(_scrub_prose(s[last:start]))

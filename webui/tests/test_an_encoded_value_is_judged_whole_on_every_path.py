@@ -6,7 +6,9 @@ found such a value judged by its start: first in the object walk, then in the st
 which looked at the first 64 characters and copied the rest unread. Measured before the fix: a value
 of 64 letters, a space and the home directory, and a long path a run wrote under "data", went out as
 they were in the streamed download AND in the whole-file download; and where the stream cut a piece
-inside a path, the rest of the user name went out after "~".
+inside a path, the rest of the user name went out after "~". Copilot's next round: with "=" allowed
+anywhere, 40 letters, "=" and the home directory passed as encoded data, and so do 40 letters glued
+to the home directory, which IS valid base64: the form cannot settle it, the home check does.
 """
 from __future__ import annotations
 
@@ -34,6 +36,9 @@ TEXT_VALUES = {
     "a value that only starts encoded": "A" * 64 + f" {HOME}/secret",
     "a long path a run wrote": f"{HOME}/projects/openpaso/eval/interactive/webui/work/results.csv",
     "a path in base64's own characters": f"{HOME}/projects/openpaso/runs/work/output/fields/velocity",
+    "padding before the home directory": "A" * 40 + "=" + f"{HOME}/secret",
+    "letters glued to the home directory": "A" * 40 + f"{HOME}/secret",
+    "the home directory as a valid block": "A" * 38 + "==" + f"{HOME}/secret" + "A" * (-len(f"{HOME}/secret") % 4),
 }
 
 
@@ -75,8 +80,12 @@ def test_encoded_data_comes_back_byte_for_byte_on_every_path(served):
     cases the earlier fixes were for), are left exactly as written on every path."""
     frames = base64.b64encode(os.urandom(9_000_000)).decode()           # over the limit on its own
     name = USER if re.fullmatch(r"[A-Za-z0-9]{3,}", USER) else "someone"
-    planted = (frames[:200] + "+" + name + "/" + frames[200:400] + "=" + "/home/" + "someone/x"
-               + frames[400:])
+    # what chance can put into real frames, in place so that the value stays base64: a second block
+    # that begins with a home path after the first block's padding, and a name between "+" and "/"
+    first = base64.b64encode(os.urandom(1001)).decode()               # ends in "="
+    inner = "/home/" + "someone/x"
+    planted = (first + inner + frames[len(inner):200] + "+" + name + "/"
+               + frames[200 + len(name) + 2:])
     doc = json.dumps({"kind": "field_series", "note": f"written in {HOME}/run",
                       "frames": planted, "mask": frames[:4000]})
     streamed = json.loads(served("field.json", doc))
@@ -117,3 +126,21 @@ def test_the_rule_itself():
         assert not is_encoded(value), value
     assert not is_encoded("QUJD" * 9), "shorter than 40 characters"
     assert not is_encoded(frames[:100] + " " + frames[100:]), "a space is not base64"
+    assert not is_encoded("QUJD" * 10 + "A"), "a last group of one character encodes nothing"
+    assert not is_encoded("QUJD" * 10 + "Q=JD"), "padding stands only at the end of a group"
+    assert not is_encoded("QUJD" * 10 + "Q==="), "at most two padding characters"
+    assert is_encoded("QUJD" * 10 + "QUI="), "one padded block"
+
+
+def test_a_data_uri_is_judged_by_the_same_rule(served):
+    """A data: URI's payload was protected as far as base64's characters reach, so a home path written
+    straight after it went out with it."""
+    payload = base64.b64encode(os.urandom(3000)).decode()
+    ok = f'<img src="data:image/png;base64,{payload}">'
+    bad = f'<img src="data:image/png;base64,{payload}{HOME}/secret">'
+    for path, out in (("document", scrub_text(bad)), ("whole-file download", served("page.html", bad)),
+                      ("streamed download", served("big.html", PAD + bad))):
+        leaked = HOME in out
+        assert not leaked, f"the {path} handed out the home directory after a data: URI"
+    kept = served("ok.html", ok) == ok and scrub_text(ok) == ok
+    assert kept, "a real data: URI must come back byte for byte"

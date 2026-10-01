@@ -638,8 +638,12 @@ def test_encoded_data_survives_every_substitution_not_only_the_newest():
     import base64
     from webui.privacy import scrub_text
     planted = "/home/" + "someone/private"      # built, so this file holds no path
-    frames = (base64.b64encode(os.urandom(3000)).decode() + "="
-              + planted + base64.b64encode(os.urandom(3000)).decode())
+    # two encoded blocks joined, the first ending in its padding and the second beginning, by chance,
+    # with a home path: a value an encoder can write. An "=" put at the start of a group, as this test
+    # once did, is not base64, and the scrubber now reads base64's grammar.
+    head = base64.b64encode(os.urandom(3001)).decode()          # ends in "=="
+    tail = base64.b64encode(os.urandom(3000)).decode()
+    frames = head + planted + tail[len(planted):]
     doc = json.dumps({"kind": "field_series", "frames": frames,
                       "note": f"wrote {Path.home()}/run/out.vtu"})
     out = scrub_text(doc)
@@ -668,7 +672,9 @@ def test_a_name_inside_encoded_data_is_left_alone():
     if len(user) < 3:
         return
     frames = base64.b64encode(os.urandom(4000)).decode()
-    planted = frames[:200] + "+" + user + "/" + frames[200:]
+    # in place, as chance puts it: inserted, the name moved the padding off its group and the value
+    # stopped being base64
+    planted = frames[:200] + "+" + user + "/" + frames[200 + len(user) + 2:]
     doc = json.dumps({"kind": "field_series", "frames": planted,
                       "provenance": {"source": f"/home/{user}/run/out.vtu"}})
     out = scrub_text(doc)
