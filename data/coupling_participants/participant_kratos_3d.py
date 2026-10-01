@@ -587,6 +587,8 @@ def check_tets(mp):
     uk, inv, cnt = np.unique((S[:, 0] * m + S[:, 1]) * m + S[:, 2],
                              return_inverse=True, return_counts=True)
     turn = np.bincount(inv, weights=1.0 - 2.0 * odd, minlength=len(uk))
+    # FP is (face, vertex, coordinate): .all(1) runs over a face's three vertices, so a face is on
+    # the box's surface when all three share one coordinate of LO or of HI (x == X0, ...).
     rim = ((np.abs(FP - LO) < TOL).all(1) | (np.abs(FP - HI) < TOL).all(1)).any(1)
     lone = (cnt[inv] == 1) & ~rim
     worse = ((cnt[inv] == 2) & (turn[inv] != 0)) | (cnt[inv] > 2)

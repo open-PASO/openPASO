@@ -1543,10 +1543,12 @@ def _participant_write_check(written: Path, content: str) -> str:
     # AND A SOLVE THAT IS ONE PRECONDITIONER SWEEP, A SERVED REFUSAL DELETED,
     # AND A SERVED BLOCK LOST WHILE THE FILE WAS WRITTEN AGAIN: each measured on
     # a round, each lets a run go on without what the contract served.
-    for _fn_name in ("unsolved_linear_solve", "served_guard_removed", "served_blocks_lost"):
+    for _fn_name in ("unsolved_linear_solve", "skfem_form_mixes_elements", "served_guard_removed",
+                     "served_blocks_lost"):
         try:
             from tools import participant_lint as _pl                 # noqa: PLC0415
-            _said = getattr(_pl, _fn_name)(content) if _fn_name == "unsolved_linear_solve" \
+            _said = getattr(_pl, _fn_name)(content) \
+                if _fn_name in ("unsolved_linear_solve", "skfem_form_mixes_elements") \
                 else getattr(_pl, _fn_name)(content, near=written)
         except Exception:                                # noqa: BLE001
             _said = ""
@@ -1771,6 +1773,63 @@ def _fourc_after_shell_check(workdir: Path, started_at: float, command: str = ""
             if real:
                 out.append(f"\n[deck check] {deck.relative_to(root)} was written by this command"
                            + _deck_findings_text("[deck check]", deck.name, findings, "in this deck"))
+        return "".join(out)
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _febio_deck_text(tag: str, name: str, findings: list, when: str) -> str:
+    shown = findings[:8]
+    more = f"\n  ... and {len(findings) - 8} more" if len(findings) > 8 else ""
+    return (f"\n{tag} FEBio DECK {name}: {len(findings)} defect(s) named from the deck {when}; FEBio "
+            f"accepts some of these without a word, so a run that ends in NORMAL TERMINATION does not clear them:\n"
+            + "\n".join(f"  - {f}" for f in shown) + more)
+
+
+def _febio_deck_write_check(written: Path, content: str) -> str:
+    """A FEBio deck written by hand is judged the moment it is written (see _febio_after_shell_check)."""
+    if written.suffix.lower() != ".feb":
+        return ""
+    try:
+        from tools.febio_deck_lint import lint_deck, looks_like_deck   # noqa: PLC0415
+        if not looks_like_deck(content):
+            return ""
+        findings = lint_deck(content)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    return _febio_deck_text("[write check]", written.name, findings, "before any run") if findings else ""
+
+
+def _febio_after_shell_check(workdir: Path, started_at: float, command: str = "") -> str:
+    """Every FEBio deck this shell command wrote, judged from its text.
+
+    MEASURED on three coupled rounds with a FEBio elastic side (15 cells): the participant writes its
+    .feb at run time, so no write check ever saw a deck, and the defects that decided the results
+    were ones FEBio accepts without a word -- u_z held on 146 of 1386 nodes of a plane-strain slab, a
+    held set with 1178 interior nodes, interface tables with 33 entries for 66 nodes, NodeSets
+    written with spaces (FEBio kept one node of each). FEBio's own stops ('invalid value for
+    attribute "lid"', 'Invalid load curve ID') came 41 times and name no set and no element. Reads
+    only the agent's own files, at most the two newest decks; writes nothing.
+    """
+    try:
+        from tools.febio_deck_lint import lint_deck, looks_like_deck   # noqa: PLC0415
+        root = Path(workdir)
+        decks = []
+        for q in root.rglob("*.feb"):
+            try:
+                if q.stat().st_mtime >= started_at and q.stat().st_size < 50_000_000:
+                    decks.append(q)
+            except OSError:
+                continue
+        out = []
+        for deck in sorted(decks, key=lambda q: q.stat().st_mtime, reverse=True)[:2]:
+            txt = deck.read_text(errors="ignore")
+            if not looks_like_deck(txt):
+                continue
+            findings = lint_deck(txt)
+            if findings:
+                out.append(_febio_deck_text("[run check]", str(deck.relative_to(root)), findings,
+                                            "this command wrote"))
         return "".join(out)
     except Exception:                                    # noqa: BLE001
         return ""

@@ -433,10 +433,13 @@ def _text_difference(records, setup_text: str) -> str:
             return "(nothing: the text ends before this line)"
         t = lines[k].strip() or "(an empty line)"
         return t if len(t) <= 140 else t[:140] + " …"
+    # THE CALLER'S OWN LINE ONLY. The reviewed text stays on the server (it may hold private
+    # literals; Copilot on the org PR): the reply names where the run first differs and quotes
+    # this run's line, which the caller has just sent, never the stored one.
     return (f" — the closest review on record is of a text that differs from this run's first at "
-            f"its line {j1 + 1}: reviewed `{shown(was, i1)}`, this run `{shown(now, j1)}` "
-            f"({changed} line(s) differ). Run the reviewed file itself (input_path / "
-            f"generator_path) rather than a copy of it.")
+            f"its line {j1 + 1} (this run's line there: `{shown(now, j1)}`; {changed} line(s) "
+            f"differ). Run the reviewed file itself (input_path / generator_path) rather than a "
+            f"copy of it.")
 
 
 def _setup_difference(records, setup_text: str) -> str:
@@ -1586,6 +1589,48 @@ def _ratio_misfit_trend(per_side: list, shrink: float = 0.6) -> list:
 _BLOCK_CAVEAT = "Global residual is NOT representative"
 _CLEAN_HEAD = "this level's iteration CONVERGED and your files are self-consistent. "
 _BLOCK_NAMED = re.compile(r"([A-Za-z0-9_.\-]+?\.(?:values|normal_fluxes)(?:\[\d+\])?)=([0-9.eE+\-]+)")
+
+
+def _straight_interface_ends(dirs, coords, level, since):
+    """The two points where a straight interface along x or y ends, as the sides' own mesh dumps of
+    this level carry them: the extremes, along the interface, of the dump nodes that lie on its
+    line. None where the interface is not one such line, the level is unknown, or no dump of it
+    written by this call (newer than `since`) has a node on the line. Read by the point-by-point
+    flux check, which leaves out only the rows at these points (see check_interface_flux_profile)."""
+    import numpy as np
+    try:
+        P = np.asarray(coords, float)
+        P = P.reshape(len(P), -1)
+    except (TypeError, ValueError):
+        return None
+    if not level or P.ndim != 2 or P.shape[0] < 2 or P.shape[1] < 2:
+        return None
+    span = float(np.ptp(P, axis=0).max())
+    if span <= 0 or (P.shape[1] > 2 and float(np.ptp(P[:, 2:], axis=0).max()) > 1e-9 * span):
+        return None
+    ax = int(np.argmin(np.ptp(P[:, :2], axis=0)))
+    if float(np.ptp(P[:, ax])) > 1e-9 * span:
+        return None                                  # not one straight line along x or y
+    c, al, tol = float(P[:, ax].mean()), 1 - ax, 1e-6 * span
+    lo = hi = None
+    for d in dirs:
+        q = Path(d) / f"field_level{int(level)}.csv"
+        try:
+            if q.stat().st_mtime < since:
+                continue
+            rows = np.loadtxt(q, delimiter=",", skiprows=1, usecols=(0, 1), ndmin=2)
+        except (OSError, ValueError, TypeError):
+            continue
+        on = rows[np.abs(rows[:, ax] - c) <= tol]
+        if len(on):
+            lo = float(on[:, al].min()) if lo is None else min(lo, float(on[:, al].min()))
+            hi = float(on[:, al].max()) if hi is None else max(hi, float(on[:, al].max()))
+    if lo is None or hi <= lo:
+        return None
+    ends = [[0.0, 0.0], [0.0, 0.0]]
+    ends[0][ax] = ends[1][ax] = c
+    ends[0][al], ends[1][al] = lo, hi
+    return ends
 
 
 def _block_caveat_trend(out_levels: list, blocks_by_level: dict):
@@ -3702,6 +3747,77 @@ def _cap_knowledge_reply(out: str, topic: str = "", solver: str = "",
 # ladder's residual_level2.csv, which the same call rewrote minutes later).
 import contextvars as _contextvars                                  # noqa: E402
 _LADDER_PENDING = _contextvars.ContextVar("openpaso_ladder_pending", default=())
+_LEVEL_IN_NAME = re.compile(r"level[_-]?(\d+)(?!\d)", re.I)
+
+
+def _audit_findings_hiding_levels(root: str, hidden) -> list:
+    """The audit's findings on `root`, with every file whose name carries one of the `hidden`
+    levels out of its sight; with nothing hidden, the audit of `root` as it is.
+
+    A LADDER'S LEVEL REPLY READS ONLY WHAT THE LADDER HAS WRITTEN. The files of the levels it has
+    still to run are a previous attempt's, and leaving out the findings whose sequence names such
+    a level was not enough: a finding read across every level on disk names none. Measured on two
+    re-run ladders: the level-1 replies led with "THE TWO FIELDS DO NOT CARRY OPPOSITE FLUXES" read
+    from the fresh level 1 and the previous ladder's levels 2 and 3, and the level-2 replies with
+    a free interface end read from the previous level-3 dump, beside fields that were right. The
+    audit runs on a view of the folder: a link to every file but those, in a temporary folder
+    that is removed when it returns. The audit writes nothing, and its paths are given back as
+    the folder's own."""
+    import shutil
+    import tempfile
+    from . import result_audit as _ra
+    hide = set()
+    for h in hidden or ():
+        try:
+            hide.add(int(h))
+        except (TypeError, ValueError):
+            pass
+    if not hide:
+        return list(_ra.audit(root).get("findings", []))
+    real = Path(root)
+    tmp = Path(tempfile.mkdtemp(prefix="openpaso_ladder_view_"))
+    view = tmp / (real.name or "run")
+    try:
+        n = 0
+        for dirpath, dirnames, filenames in os.walk(real):
+            here = view / Path(dirpath).relative_to(real)
+            here.mkdir(parents=True, exist_ok=True)
+            for nm in list(dirnames):
+                src = Path(dirpath) / nm
+                if any(int(m.group(1)) in hide for m in _LEVEL_IN_NAME.finditer(nm)):
+                    dirnames.remove(nm)                    # a folder of a hidden level, as its files
+                elif src.is_symlink():                     # kept as the link it is, not walked
+                    os.symlink(os.path.join(dirpath, os.readlink(src)), here / nm)
+                    dirnames.remove(nm)
+            for nm in filenames:
+                if any(int(m.group(1)) in hide for m in _LEVEL_IN_NAME.finditer(nm)):
+                    continue
+                os.symlink(Path(dirpath) / nm, here / nm)
+                n += 1
+            if n > 50000:
+                raise OSError("too many files for a view")
+        found = list(_ra.audit(str(view)).get("findings", []))
+    except OSError:
+        found = None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if found is None:                                      # no view could be built: as before
+        return [f for f in _ra.audit(root).get("findings", [])
+                if not any(int(m.group(1)) in hide
+                           for m in _LEVEL_IN_NAME.finditer(str(f.get("sequence", ""))))]
+    v, r = str(view), str(real)
+
+    def _back(o):
+        if isinstance(o, str):
+            return o.replace(v, r)
+        if isinstance(o, list):
+            return [_back(x) for x in o]
+        if isinstance(o, tuple):
+            return tuple(_back(x) for x in o)
+        if isinstance(o, dict):
+            return {k: _back(x) for k, x in o.items()}
+        return o
+    return [_back(f) for f in found]
 # True while couple_levels runs one of its levels: the ladder checks each side against
 # its own equation after its last level, so a level's reply does not say none was
 # checked (measured: level 3 of a verified ladder led with the note that no level had
@@ -3823,19 +3939,34 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
         flux = data.get("normal_fluxes") or []
         if not coords or len(vals) != len(coords):
             continue
+        # A VECTOR EXCHANGE IS WRITTEN WHOLE. This kept the first component of a
+        # displacement and a traction under the header x,y,u,qn: measured on an
+        # elastic coupling, the healed file of a side that exported (ux, uy) read
+        # as a scalar side, and the cell gave up on "that code exports scalars".
+        # The columns are the ones the served elastic contracts write.
+        ncomp = len(vals[0]) if isinstance(vals[0], (list, tuple)) else 0
+        if ncomp > 1 and (ncomp > 3 or any(not isinstance(v, (list, tuple)) or len(v) != ncomp
+                                           for v in vals)):
+            continue                       # no shape this file can state; leave the gap visible
+        comps = "xyz"[:ncomp] if ncomp > 1 else ""
         try:
             with target.open("w", newline="") as fh:
                 writer = _csv.writer(fh)
-                writer.writerow(["x", "y", "u", "qn"])
+                writer.writerow(["x", "y"] + ([f"u{c}" for c in comps] + [f"q{c}" for c in comps]
+                                              if comps else ["u", "qn"]))
                 for i, point in enumerate(coords):
                     xy = list(point) if isinstance(point, (list, tuple)) else [point]
                     u = vals[i]
-                    q = flux[i] if i < len(flux) else 0.0
+                    q = flux[i] if i < len(flux) else ([0.0] * ncomp if comps else 0.0)
+                    head = [f"{float(xy[0]):.11e}", f"{float(xy[1]):.11e}" if len(xy) > 1 else "0"]
+                    if comps:
+                        q = q if isinstance(q, (list, tuple)) and len(q) == ncomp else [0.0] * ncomp
+                        writer.writerow(head + [f"{float(c):.11e}" for c in u]
+                                        + [f"{float(c):.11e}" for c in q])
+                        continue
                     u = u[0] if isinstance(u, (list, tuple)) and u else u
                     q = q[0] if isinstance(q, (list, tuple)) and q else q
-                    writer.writerow([f"{float(xy[0]):.11e}",
-                                     f"{float(xy[1]):.11e}" if len(xy) > 1 else "0",
-                                     f"{float(u):.11e}", f"{float(q):.11e}"])
+                    writer.writerow(head + [f"{float(u):.11e}", f"{float(q):.11e}"])
         except (OSError, TypeError, ValueError, IndexError):
             # A PARTIAL FILE IS WORSE THAN NONE: it would look like a dump and
             # be read as one. Remove it and leave the gap visible.
@@ -7869,7 +8000,9 @@ def register_consolidated_tools(mcp: FastMCP):
             _blocks = {k: v for k, v in (r.block_residuals or {}).items() if not _unread_key(k)}
             f, n = check_residual_blocks(_blocks or r.block_residuals, tol,
                                          fixed_point=getattr(r, "block_fixed_point", None),
-                                         distance=getattr(r, "block_distance", None))
+                                         distance=getattr(r, "block_distance", None),
+                                         scale_change=getattr(r, "block_scale_change", None),
+                                         tiny_change=getattr(r, "block_tiny_change", None))
             val += f; not_run += n
             _skipped = {}
             for _k in (r.block_residuals or {}):
@@ -7890,7 +8023,11 @@ def register_consolidated_tools(mcp: FastMCP):
             val += f; not_run += n
             f, n = check_interface_meshes(a, b, names[0], names[1]); val += f; not_run += n
             f, n = check_interface_flux_profile(a, b, names[0], names[1],
-                                                numbers=_prof_numbers)
+                                                numbers=_prof_numbers,
+                                                ends=_straight_interface_ends(
+                                                    [Path(str(p.work_dir)) for p in parts],
+                                                    a.get("coordinates"), _lvl_for_log,
+                                                    _t_level_wall - 1.0))
             val += f; not_run += n
             if a.get("normal_fluxes") is None or b.get("normal_fluxes") is None:
                 not_run.append(
@@ -8312,7 +8449,16 @@ def register_consolidated_tools(mcp: FastMCP):
                                 "levels claimed", "deliverable completeness",
                                 "summary file")
                 _pending = set(_LADDER_PENDING.get())
-                for _f in _ra.audit(_root).get("findings", []):
+                # INSIDE A LADDER the files of the levels still to run are out of the audit's
+                # sight, so what the summary claims of them is not judged here either; the
+                # hand-in audit judges the summary against every level. Measured, replaying the
+                # recorded ladders' 143 level replies: with those files out of sight, "summary
+                # names" and "interface residual" read the previous attempt's summary against
+                # them and would have been added to 106 and 14 of them.
+                if _pending:
+                    _submit_only += ("summary names", "summary consistency", "interface residual",
+                                     "duplicate deliverables")
+                for _f in _audit_findings_hiding_levels(_root, _pending):
                     if any(s in str(_f.get("sequence", "")) for s in _submit_only):
                         continue
                     if str(_f.get("sequence", "")) == "no coupling history on disk":
@@ -9740,14 +9886,29 @@ def register_consolidated_tools(mcp: FastMCP):
             replaced += (f" MOVED your existing {_size:,}-byte {_p.name} aside to {_keep.name} first -- "
                          f"if that was a filled file, take it back from there instead of filling the "
                          f"hole again.")
+        # ALL OR NOTHING, THE WRITE TOO: a write that failed after the moves left a partial file where
+        # the caller's had been and the caller's own only in a backup. Whatever this call wrote is
+        # removed and every move is undone, so a refusal leaves the folder as it was.
+        _written: list = []
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text)
-            for _bp, _tx in _beside:
-                _bp.write_text(_tx)
+            for _wp, _wt in [(target, text)] + list(_beside):
+                _written.append(_wp)
+                _wp.write_text(_wt)
         except OSError as exc:
-            return json.dumps({"written": False, "path": str(target),
-                               "error": f"{type(exc).__name__}: {exc}"})
+            for _wp in _written:
+                try:
+                    _wp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for _was, _now in reversed(_moved):
+                try:
+                    _now.rename(_was)
+                except OSError:
+                    pass
+            return json.dumps({"written": False, "path": str(target), "error": (
+                f"{type(exc).__name__}: {exc}. Nothing was written: what this call had written is "
+                f"removed and every file it had moved aside is back in its place.")})
         import hashlib as _hl
         # COUNTED FROM THE MARKERS THEMSELVES. It counted "does not serve the
         # solve itself", a phrase the names list carries once however many solve

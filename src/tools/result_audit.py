@@ -2410,19 +2410,42 @@ def interface_sign_findings(work: Path) -> list[dict]:
     # A SIDE WHOSE CONDUCTIVITY IS A TENSOR: q_n / (-du/dn) is not one constant there
     # (see _k_tensor), so its sign and ratio are not judged; the two-sided checks
     # below still read its files.
+    # A SIDE THAT STATES NO CONDUCTIVITY IS NOT JUDGED AS A SCALAR EITHER. Measured: two sides
+    # whose config.json carried only level, nx and ny, and whose programs set K as a 2x2
+    # matrix, were read as scalar sides, and a right result's flux "DOES NOT FOLLOW FROM ITS
+    # OWN FIELD" (1314 % / 145 % / 561 %) led all three of its hand-in audits. Where the config
+    # is silent the side's own program is read (see _k_in_program): a matrix there is a tensor,
+    # a number a scalar, and where neither says, the coefficient is unknown and nothing that
+    # needs it is judged.
     _tensor: dict = {}
+    _unknown: dict = {}
     try:
+        _said, _silent = set(), {}
         for _d in sorted({p.parent for p in work.glob("*/config.json")}
                          | {d for d in _side_dirs(work) if (d / "config.json").is_file()}):
             try:
-                _why_t = _k_tensor(json.loads((_d / "config.json").read_text() or "{}"))
+                _cfg_d = json.loads((_d / "config.json").read_text() or "{}")
             except (OSError, ValueError):
                 continue
+            _why_t = _k_tensor(_cfg_d)
             if _why_t:
                 _tensor.setdefault(_owner_side(_d.name), (_d.name, _why_t))
+            elif not _k_unstated(_cfg_d):
+                _said.add(_owner_side(_d.name))
+            else:
+                _form, _src = _k_in_program(_d)
+                if _form == "tensor":
+                    _tensor.setdefault(_owner_side(_d.name), (
+                        _d.name, f"states no k, and {_src} there sets K as a matrix"))
+                elif _form == "scalar":
+                    _said.add(_owner_side(_d.name))
+                else:
+                    _silent.setdefault(_owner_side(_d.name), _d.name)
+        _unknown = {s: n for s, n in _silent.items() if s not in _said and s not in _tensor}
     except Exception:                                    # noqa: BLE001
-        _tensor = {}
+        _tensor, _unknown = {}, {}
     tensor_skipped: set = set()
+    unknown_skipped: set = set()
     for (lvl, side), path in sorted(ifs.items()):
         gi = _read_iface(path, _IF)
         if gi is None:
@@ -2439,6 +2462,9 @@ def interface_sign_findings(work: Path) -> list[dict]:
             continue
         if str(side).upper() in _tensor:
             tensor_skipped.add(str(side).upper())
+            continue
+        if str(side).upper() in _unknown:
+            unknown_skipped.add(str(side).upper())
             continue
         sp = sols.get((lvl, side))
         if sp is None:
@@ -3144,7 +3170,23 @@ def interface_sign_findings(work: Path) -> list[dict]:
             "constant there, and neither the flux's sign nor its ratio to the field is "
             f"judged for {'that side' if len(_ts) == 1 else 'those sides'}. The checks "
             "that compare the two sides' files still do.")})
-    if not out and assessed == 0:
+    _unknown_note = None
+    if unknown_skipped:
+        _us = sorted(unknown_skipped)
+        _unknown_note = ({"sequence": "interface flux sign", "values": [], "informational": True,
+                    "finding": (
+            f"THE FLUX-FROM-FIELD AND SIGN CHECKS DID NOT RUN (NOT CHECKED) for "
+            f"{' and '.join('side ' + s for s in _us)}: "
+            + "; ".join(f"{_unknown[s]}'s config.json states no k, and its program does not "
+                        f"say whether K is one number or a matrix" for s in _us)
+            + ". q_n / (-du/dn) is one constant along the interface only where the conductivity "
+            "is one number; with a tensor K the outward flux -(K grad u) . n takes in the "
+            "derivative along the interface as well. Without the coefficient neither the flux's "
+            f"sign nor its ratio to the field is judged for {'that side' if len(_us) == 1 else 'those sides'}. "
+            "The checks that compare the two sides' files still do.")})
+    # a side left unjudged for another reason is still said so, beside the note above
+    _left = {str(s).upper() for _l, s in ifs} - tensor_skipped - unknown_skipped
+    if not out and assessed == 0 and (_left or _unknown_note is None):
         if vector_layout:
             # Say WHY, accurately. Measured: a correct thermo-mechanical
             # result set with every prescribed file on disk was told to
@@ -3181,6 +3223,8 @@ def interface_sign_findings(work: Path) -> list[dict]:
                 "own field. Write the per-level field file for every "
                 "level and side on the prescribed probe grid, and this check "
                 "becomes available. This is NOT a clean bill.")})
+    if _unknown_note:
+        out.append(_unknown_note)
     return out
 
 
@@ -4667,6 +4711,52 @@ def _fourc_deck_state(side: Path, work: Path) -> dict | None:
              "deck until its VTU folder appears; a deck that ran is not touched.")
     return {"what": "; ".join(what) + ".", "brief": brief, "fourc": _is_4c}
 
+def febio_deck_findings(work: Path) -> list[dict]:
+    """The FEBio deck a side last handed to FEBio, judged from its text.
+
+    MEASURED on three coupled rounds with a FEBio elastic side: the participant writes its .feb at run
+    time and rewrites it every iteration, so the deck that made the delivered field sits in the side
+    directory, and its decisive defects were ones FEBio runs to NORMAL TERMINATION without a word --
+    u_z held on 146 of the 1386 nodes of a plane-strain slab (a three-level result whose error did not
+    decay), a held set with 1178 interior nodes and interface tables with half their entries (two
+    fields that came out zero). The deck is the one a script in the side names, else the newest.
+    Reads only the agent's own files; one finding per side, the defects listed as the lint names them.
+    """
+    from tools.febio_deck_lint import lint_deck, looks_like_deck      # noqa: PLC0415
+    out: list[dict] = []
+    for side in _side_dirs(work):
+        decks = [q for q in side.glob("*.feb") if q.is_file()]
+        if not decks:
+            continue
+        try:
+            named = " ".join(q.read_text(errors="ignore")[:400000] for q in side.glob("*.py")
+                             if ".replaced-" not in q.name)
+        except OSError:
+            named = ""
+        pick = [q for q in decks if q.name in named] or decks
+        deck = max(pick, key=lambda q: q.stat().st_mtime)
+        try:
+            txt = deck.read_text(errors="ignore")
+        except OSError:
+            continue
+        if not looks_like_deck(txt):
+            continue
+        found = lint_deck(txt)
+        if not found:
+            continue
+        try:
+            rel = str(deck.relative_to(work))
+        except ValueError:
+            rel = deck.name
+        out.append({"sequence": f"febio deck {side.name}", "values": [], "priority": 7, "finding": (
+            f"THE FEBio DECK {rel}, THE LAST ONE THIS SIDE HANDED TO FEBio, CARRIES {len(found)} DEFECT(S) "
+            f"named from its text. FEBio runs some of these to NORMAL TERMINATION without a word, so the "
+            f"field that came out of this deck is that deck's answer:\n  - " + "\n  - ".join(found[:8])
+            + (f"\n  ... and {len(found) - 8} more" if len(found) > 8 else "")
+            + "\nFix the script that writes the deck, run the ladder again, and read this check again.")})
+    return out
+
+
 def _side_dirs(work: Path) -> list:
     """Every participant folder under `work`, one or two levels down.
 
@@ -4683,6 +4773,46 @@ def _side_dirs(work: Path) -> list:
                 or any(d.glob("field_level*.csv"))):
             out.append(d)
     return out
+
+
+# THE REMEDY NAMES THE HELD SET IN THE SIDE'S OWN CODE. Measured on a steady coupled round: a deal.II
+# side held every dof inside its box (its hole 4 put them into boundary_values), and the remedy below
+# named "the free-dof mask the solve inverts on" -- NGSolve's mechanism, which a deal.II program does
+# not have; the cell spent 18 minutes on other causes. Each wording is the name the code's own served
+# contract gives its held dofs; a side whose code its files do not show gets words of no code's.
+_HELD_SET = {
+    "dealii": ("the dofs boundary_values holds when the solve runs (hole 4 of the program fills it): a dof inside "
+               "the box that it holds is never solved for"),
+    "ngsolve": "the free-dof mask the solve inverts on (fes.FreeDofs(), or the BitArray handed to the solve)",
+    "fenics": ("the dofs the dirichletbc entries of bcs hold: a dof inside the subdomain that one of them holds is "
+               "never solved for"),
+    "skfem": "the condensed set D: a dof inside the subdomain that is in D is never solved for",
+    "kratos": "the nodes fixed before the solve: a node inside the subdomain that is fixed is never solved for",
+}
+
+
+def _held_set_words(side_dir: Path) -> str:
+    """How the remedy names the dofs a side's solve holds, in the words of that side's own code."""
+    try:
+        from .participant_lint import _side_codes, _strip_strings_and_comments, looks_like_participant  # noqa: PLC0415
+    except Exception:                                                                 # noqa: BLE001
+        _side_codes = None
+    codes: list = []
+    if _side_codes is not None:
+        files = sorted(Path(side_dir).glob("*.py")) + sorted(Path(side_dir).glob("*.cc"))
+        texts = []
+        for q in files:
+            try:
+                texts.append(q.read_text(errors="ignore"))
+            except OSError:
+                continue
+        # a participant script speaks for the side before a probe beside it
+        for t in sorted(texts, key=lambda t: not looks_like_participant(t)):
+            codes += [c for c in _side_codes(_strip_strings_and_comments(t)) if c not in codes]
+    held = [c for c in codes if c in _HELD_SET]
+    if len(held) == 1:
+        return _HELD_SET[held[0]]
+    return "the dofs the solve holds at given values: a dof inside the subdomain that it holds is never solved for"
 
 
 def unsolved_field_findings(work: Path, dirs=None, since=None, scan: bool = True) -> list[dict]:
@@ -4749,8 +4879,8 @@ def unsolved_field_findings(work: Path, dirs=None, since=None, scan: bool = True
                     f"zero at interior nodes: those dofs were never solved for, or were zeroed "
                     f"after the solve. The coupling still converges on such a side -- it hands "
                     f"back what it was given -- so neither the residual history nor the "
-                    f"exchange checks show it. Check the free-dof mask the solve inverts on, "
-                    f"and that the solve's result is what the side exports.")})
+                    f"exchange checks show it. Check {_held_set_words(d)}; and check that the solve's "
+                    f"result is what the side exports.")})
     return out
 
 
@@ -5062,6 +5192,58 @@ def _k_tensor(cfg) -> str:
     return ""
 
 
+def _k_unstated(cfg) -> bool:
+    """True when a side's config.json states no conductivity at all, in any form."""
+    return isinstance(cfg, dict) and not any(c in cfg for c in ("k", "K", "kappa", "conductivity")) \
+        and not any(_K_COMPONENT.fullmatch(str(c)) for c in cfg)
+
+
+def _k_in_program(side_dir: Path) -> tuple:
+    """("scalar" | "tensor" | "", file) -- the form of the conductivity a side's own Python
+    program sets at its top level (K = ..., or k = ... where no K is set), read without
+    running it. Every served heat contract carries its coefficient as such a constant, and a
+    side that keeps its data in code states it only there. A number is a scalar; a list of
+    more than one number, or a matrix, a tensor; anything else (a name, a call, a function)
+    says nothing about the form, and neither does a program that sets two forms."""
+    import ast as _ast
+
+    def _form(v):
+        if isinstance(v, _ast.UnaryOp) and isinstance(v.op, (_ast.USub, _ast.UAdd)):
+            return _form(v.operand)
+        if isinstance(v, _ast.Constant):
+            return ("scalar" if isinstance(v.value, (int, float)) and not isinstance(v.value, bool)
+                    else "")
+        if isinstance(v, (_ast.List, _ast.Tuple)):
+            return ("tensor" if len(v.elts) > 1 or any(isinstance(e, (_ast.List, _ast.Tuple))
+                                                       for e in v.elts) else "")
+        if isinstance(v, _ast.Call):
+            nm = getattr(v.func, "attr", None) or getattr(v.func, "id", "")
+            if nm in ("array", "asarray", "float") and v.args:
+                f = _form(v.args[0])
+                return f if nm != "float" or f == "scalar" else ""
+        return ""
+
+    found: dict = {}
+    for p in sorted(Path(side_dir).glob("*.py")):
+        if ".replaced-" in p.name:
+            continue
+        try:
+            body = _ast.parse(p.read_text(errors="replace")).body
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for name in ("K", "k"):
+            forms = {_form(st.value) for st in body if isinstance(st, _ast.Assign)
+                     and any(isinstance(t, _ast.Name) and t.id == name for t in st.targets)}
+            if forms:
+                found[p.name] = forms
+                break
+    forms = set().union(*found.values()) if found else set()
+    if len(forms) != 1 or "" in forms:
+        return "", ""
+    form = forms.pop()
+    return form, next(n for n, f in found.items() if form in f)
+
+
 def _no_single_k(cfg) -> str:
     """How a side's config.json falls short of one conductivity, in plain words."""
     if not isinstance(cfg, dict) or "k" not in cfg:
@@ -5232,16 +5414,28 @@ def own_field_flux_findings(work: Path, dirs=None, since=None, levels=None,
     bal = [b for _, b in rows]
     txt = " -> ".join(f"{b:.0%}" for b in bal)
     added = any(b >= 1.5 for b in bal)
-    stays = len(bal) >= 3 and all(b > 0.2 for b in bal) and not all(
-        q < 0.6 * p for p, q in zip(bal, bal[1:]))
+    # "DOES NOT SHRINK" IS JUDGED ON THE LAST REFINEMENT STEP, AND ONLY WHERE IT HOLDS. On a right
+    # coupling the rest is the one-sided difference's error and falls with every step. Measured
+    # over the recorded coupled runs that read three levels: the right results' last step keeps
+    # 50-77 % of the level before, the defects' 90-116 %. The old rule fired when any step kept
+    # 60 % or more: it called 76 % -> 38 % -> 23 % "does not shrink" (a step that kept 60.2 %,
+    # where right results of the same problem read 85 % -> 41 % -> 23 %) and led a hand-in
+    # audit with it.
+    _kept = bal[-1] / bal[-2] if len(bal) >= 2 and bal[-2] > 0 else 0.0
+    stays = len(bal) >= 3 and all(b > 0.2 for b in bal) and _kept >= 0.8
     # TWO READABLE LEVELS ARE ONE STEP, AND ONE STEP IS SAID AS ONE. Measured: a level-1 mesh
     # whose legs keep fewer than three points once their end nodes are out gives no reading,
     # so a three-level ladder had two readable levels (86 % -> 103 %) and a rule that asked
     # for three never spoke.
-    two = (len(bal) == 2 and all(b > 0.2 for b in bal) and bal[1] >= 0.6 * bal[0])
+    two = len(bal) == 2 and all(b > 0.2 for b in bal) and _kept >= 0.8
     if not (added or stays or two):
         return out
     _unread = [l for l in _read_lv if l not in lv]
+    _step = f"the last refinement step (level {lv[-2]} to level {lv[-1]}) " if len(bal) >= 2 else ""
+    _trend = ((f" and it does not shrink with the mesh: {_step}took it from {bal[-2]:.0%} up to "
+               f"{bal[-1]:.0%}." if bal[-1] >= bal[-2] else
+               f" and it barely shrinks with the mesh: {_step}took it only from {bal[-2]:.0%} to "
+               f"{bal[-1]:.0%}.") if _step else ".")
     out.append({
         "sequence": "own-field flux balance", "values": bal, "priority": 4,
         "finding": (
@@ -5258,10 +5452,11 @@ def own_field_flux_findings(work: Path, dirs=None, since=None, levels=None,
                "is a flux APPLIED with the wrong sign, and it is fixed in the solve, not in "
                "the number written out."
                if added else
-               " and it does not shrink with the mesh: the field on one side does not carry "
-               "the flux its partner's field does."
-               + (" Two readable levels are one refinement step: they show that this step did "
-                  "not shrink it, not how a further level would move"
+               _trend + " On a right coupling the two cancel up to the error of a one-sided "
+               "difference, which falls with every refinement; here the field on one side does "
+               "not carry the flux its partner's field does."
+               + (" Two readable levels are one refinement step: they show what this one step "
+                  "did, not how a further level would move"
                   + (f" (level(s) {', '.join(str(l) for l in _unread)} gave no reading)"
                      if _unread else "")
                   + "." if two and not stays else ""))
@@ -5689,6 +5884,26 @@ def _is_dsmc_side(d: Path) -> bool:
     return False
 
 
+def _exchanges_a_vector(d: Path) -> bool:
+    """A side whose own traffic is a vector per point: exports.json values of two or three
+    numbers each, or a field dump whose header names ux and uy."""
+    try:
+        v = (json.loads((d / "exports.json").read_text() or "{}").get("values") or [None])[0]
+        if isinstance(v, (list, tuple)) and len(v) in (2, 3):
+            return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    for f in sorted(d.glob("field_level*.csv"))[:1]:
+        try:
+            with f.open() as fh:
+                head = fh.readline().lower().replace(" ", "").strip().split(",")
+        except OSError:
+            continue
+        if "ux" in head and "uy" in head:
+            return True
+    return False
+
+
 def _side_operators(work: Path) -> dict:
     """Each side's operator, as that side's OWN config.json states it.
 
@@ -5793,6 +6008,7 @@ def _side_operators(work: Path) -> dict:
                           and cfg.get("source_T") else None)
         if not src and "elastic" not in entry:
             entry["missing"] = entry["missing"] + ["source_expr (or source_T for the temperature equation)"]
+            entry["vector"] = _exchanges_a_vector(cfg_path.parent)
         # AN ISOTHERMAL ELASTIC SIDE HAS NO SCALAR EQUATION TO STATE: it is
         # judged by the momentum check alone, and asking it for a conductivity
         # and a scalar source would send it after keys its problem does not have.
@@ -7320,6 +7536,18 @@ def equation_findings(work: Path, since=None) -> list[dict]:
         if _tm:
             out.append(_transient_note(side, _tm))
             continue
+        if op.get("missing") and op.get("vector"):
+            # A SIDE THAT EXCHANGES A DISPLACEMENT IS ASKED FOR ITS MOMENTUM DATA. Measured on three
+            # coupled rounds: every FEBio elastic side was told its config.json lacked "k" and
+            # "source_expr", keys of a heat equation its problem does not have.
+            out.append({"sequence": f"equation check side {side}", "values": [], "priority": 26,
+                        "informational": True, "finding": (
+                f"SIDE {side}'S DISPLACEMENT WAS NOT CHECKED AGAINST ITS MOMENTUM EQUATION: it exchanges a "
+                f"vector, and its ./config.json does not state its box (x0, x1, y0, y1), its material (E "
+                f"and nu, or lam and mu) and its body force (source_ux, source_uy; \"0\" when there is "
+                f"none) -- the numbers your code solves with. The elastic contracts read them from that "
+                f"file; with them this audit judges the delivered displacement against them.")})
+            continue
         if op.get("missing"):
             _kd = _k_not_one_number(op["dir"])
             # WHAT ONE BOX AND ONE k CANNOT STATE IS NOT ASKED FOR (measured: sides with
@@ -8421,6 +8649,7 @@ def audit(work_dir: str, claimed_order: float | None = None,
         findings.extend(_guarded("outer_boundary_findings", outer_boundary_findings, work))
         findings.extend(_guarded("unparsed_level_files_findings", unparsed_level_files_findings, work))
         findings.extend(_guarded("solver_stopped_findings", solver_stopped_findings, work))
+        findings.extend(_guarded("febio_deck_findings", febio_deck_findings, work))
         findings.extend(_guarded("interface_continuity_findings", interface_continuity_findings, work))
         findings.extend(_guarded("identical_solution_levels_findings", identical_solution_levels_findings, work))
         findings.extend(_guarded("wrong_level_run_log_findings", wrong_level_run_log_findings, work))
@@ -8670,6 +8899,7 @@ def audit(work_dir: str, claimed_order: float | None = None,
     findings.extend(_guarded("free_interface_end_findings", free_interface_end_findings, work))
     findings.extend(_guarded("unparsed_level_files_findings", unparsed_level_files_findings, work))
     findings.extend(_guarded("solver_stopped_findings", solver_stopped_findings, work))
+    findings.extend(_guarded("febio_deck_findings", febio_deck_findings, work))
     findings.extend(_guarded("export_findings", export_findings, work))
     findings.extend(_guarded("interface_continuity_findings", interface_continuity_findings, work))
     findings.extend(_guarded("identical_solution_levels_findings", identical_solution_levels_findings, work))

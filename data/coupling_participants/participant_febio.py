@@ -23,8 +23,10 @@ to the 1D equation
 
     d/dx ( M du/dx ) = 0 ,   M = lambda + 2 mu   (P-wave / oedometric modulus)
 
-which is `-div(k grad T) = 0` with T -> u_x and k -> M.  Dirichlet/Neumann
-interface structure is identical:
+which is `-div(k grad T) = 0` with T -> u_x and k -> M.  It exchanges ONE number per
+point: for a plane-strain elastic exchange (a displacement and a traction vector) the
+contract is write_participant_contract(solver='febio', variant='elasticity').
+Dirichlet/Neumann interface structure is identical:
   * Dirichlet side: imports the partner's `values` (interface u_x), applies
     them as a per-node prescribed x-displacement.
   * Neumann side  : imports the partner's `normal_fluxes` and applies them

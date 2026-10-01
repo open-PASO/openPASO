@@ -1803,8 +1803,8 @@ def _check_interface_balance_whole(export_a, export_b, label_a="A", label_b="B",
 
 
 def check_interface_flux_profile(export_a, export_b, label_a="A", label_b="B",
-                                 rtol: float = 0.10, numbers: dict | None = None
-                                 ) -> tuple[list[str], list[str]]:
+                                 rtol: float = 0.10, numbers: dict | None = None,
+                                 ends=None) -> tuple[list[str], list[str]]:
     """Does the flux match POINT BY POINT, not only in total?
 
     The net balance is a single number, and a single number is easy to satisfy
@@ -1821,6 +1821,9 @@ def check_interface_flux_profile(export_a, export_b, label_a="A", label_b="B",
     fewer is compared with the other side's flux read along the straight leg it
     lies on, never beyond that side's last point on the leg. Only where neither
     can be done does this say so, instead of passing.
+
+    `ends`, where the caller knows them, are the two points where a straight interface ends on
+    the sides' own meshes; only rows at those points are then left out (see below).
     """
     findings: list[str] = []
 
@@ -1907,14 +1910,32 @@ def check_interface_flux_profile(export_a, export_b, label_a="A", label_b="B",
     # outer reaction -- so the end rows measured the convention, not the
     # exchange (measured: they alone drove a "does NOT shrink" verdict whose
     # interior read 6.2 / 11.7 / 5.3 %). The ends are named by the balance check.
+    # THE ENDS ARE WHERE THE INTERFACE ENDS, NOT THE FIRST AND LAST ROWS. Where both sides leave
+    # the end nodes out of their lists, the first and last rows are the nodes NEXT to the ends,
+    # and leaving them out hid the one defect there: measured on a coupled round, a Neumann side
+    # that built its load from a list without the end vertices carried no flux on the two end
+    # segments, its flux missed its partner's by 16-19 % at the end-adjacent nodes at every
+    # level, and this check passed every level. Where the caller knows the ends (the sides' own
+    # mesh dumps), only rows at them are left out.
     if len(A) >= 4:
         _ends = _bent_ends(P)
-        if _ends is not None:
-            _lo, _hi = _ends
+        _at = None
+        if _ends is None and ends is not None:
+            try:
+                _E = _np.atleast_2d(_np.asarray(ends, float))[:, :P.shape[1]]
+                _span = float(_np.ptp(P, axis=0).max()) or 1.0
+                _at = [i for i in range(len(P))
+                       if float(_np.min(_np.linalg.norm(_E - P[i], axis=1))) <= 1e-6 * _span]
+            except (TypeError, ValueError):
+                _at = None
+        if _at is not None:
+            _drop = set(_at)
+        elif _ends is not None:
+            _drop = set(_ends)
         else:
             _ax = int(_np.argmax(_np.var(P, axis=0)))
-            _lo, _hi = int(_np.argmin(P[:, _ax])), int(_np.argmax(P[:, _ax]))
-        _keep = [i for i in range(len(A)) if i not in (_lo, _hi)]
+            _drop = {int(_np.argmin(P[:, _ax])), int(_np.argmax(P[:, _ax]))}
+        _keep = [i for i in range(len(A)) if i not in _drop]
         A, B, P = A[_keep], B[_keep], P[_keep]
     # PER COMPONENT, for a vector interface flux. One scale taken over the whole
     # array is set by the largest component, so a tangential traction that is
@@ -2375,7 +2396,9 @@ def check_interface_meshes(export_a, export_b, label_a="A", label_b="B",
 def check_residual_blocks(block_residuals: dict, tol: float,
                           slack: float = 10.0,
                           fixed_point: dict | None = None,
-                          distance: dict | None = None) -> tuple[list[str], list[str]]:
+                          distance: dict | None = None,
+                          scale_change: dict | None = None,
+                          tiny_change: dict | None = None) -> tuple[list[str], list[str]]:
     """Is the reported global residual actually representative?
 
     The driver converges on ONE relative norm over every participant's stacked
@@ -2408,6 +2431,18 @@ def check_residual_blocks(block_residuals: dict, tol: float,
         if est:
             bad = {k: v for k, v in bad.items()
                    if not (isinstance(est.get(k), float) and est[k] == est[k] and est[k] <= limit)}
+    # A BLOCK THAT MOVED WITHIN THE LIMIT ON ITS OWN SCALE HAS SETTLED. The entry-by-entry measure
+    # reads an entry against its own value, so an entry of one field that holds a small share of
+    # its block reads large for an absolute change at the iteration's tolerance (measured: 1.74e-4
+    # at an entry holding 0.9 % of its block's largest value, on a right ladder's finest level). A
+    # block is cleared when its last change against its largest value is within the limit and so
+    # is that of each entry more than six orders below that value against itself (another quantity
+    # sharing the array: the masking this check exists for; see coupling_driver._scaled_change).
+    if scale_change and tiny_change:
+        def _within(est, k):
+            v = est.get(k)
+            return isinstance(v, float) and v == v and v <= limit
+        bad = {k: v for k, v in bad.items() if not (_within(scale_change, k) and _within(tiny_change, k))}
     if bad:
         worst = max(bad.items(), key=lambda kv: kv[1])
         # WHAT WAS MEASURED, SAID: the largest change of one entry of the block at the

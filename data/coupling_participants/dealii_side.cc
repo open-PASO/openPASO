@@ -228,7 +228,8 @@ int main(int argc, char **argv)
     // boundary face another id, so that hole 4 can tell the interface from
     // the outer edges.
     // The lines after it stop when a face on the line lacks INTERFACE_ID, a
-    // face off it carries it, or the marked faces do not cover the interface.
+    // face off it carries it, the marked faces do not cover the interface,
+    // or the mesh does not have in.nx cells along x and in.ny along y.
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     const std::vector<unsigned int> repetitions{in.nx, in.ny};
     GridGenerator::subdivided_hyper_rectangle(triangulation, repetitions, Point<2>(in.x0, in.y0),
@@ -244,6 +245,7 @@ int main(int argc, char **argv)
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
     double iface_length = 0;   // served: INTERFACE_ID marks exactly the interface line
+    unsigned int on_edge[2] = {0, 0};   // served: the boundary faces on the edges y = y0 and x = x0
     for (const auto &cell : triangulation.active_cell_iterators())
       for (const auto &face : cell->face_iterators())
         if (face->at_boundary())
@@ -253,9 +255,16 @@ int main(int argc, char **argv)
             fail(std::string("BOUNDARY IDS: a face ") + (on_line ? "on" : "off") + " the interface line has id " +
                  std::to_string(face->boundary_id()) + "; INTERFACE_ID goes on exactly the interface faces");
           iface_length += on_line ? face->measure() : 0.0;
+          on_edge[0] += std::abs(face->center()[1] - in.y0) < tol;
+          on_edge[1] += std::abs(face->center()[0] - in.x0) < tol;
         }
     if (std::abs(iface_length - (hi - lo)) > 1e-6 * (hi - lo))
       fail("BOUNDARY IDS: the INTERFACE_ID faces are " + num(iface_length) + " long, the interface " + num(hi - lo));
+    if (on_edge[0] != in.nx || on_edge[1] != in.ny || triangulation.n_active_cells() != in.nx * in.ny)
+      fail("MESH: the mesh's edge y = in.y0 has " + std::to_string(on_edge[0]) + " boundary faces and its edge x = "
+           "in.x0 has " + std::to_string(on_edge[1]) + " (" + std::to_string(triangulation.n_active_cells()) +
+           " cells in all), and the input asks for in.nx = " + std::to_string(in.nx) + " cells along x and in.ny = " +
+           std::to_string(in.ny) + " along y: hole 1 meshes the box with in.nx by in.ny cells");
 
     FE_Q<2> fe(in.degree);
     DoFHandler<2> dof_handler(triangulation);
@@ -438,6 +447,7 @@ int main(int argc, char **argv)
               << " (the integral of f: " << f_int[0] << ") and, weighted by f at the support points, to " << b_sum[1]
               << " (the integral of f times its interpolant: " << f_int[1] << ")" << std::endl;
     system_rhs = volume_rhs;
+    const double matrix_size = system_matrix.frobenius_norm();   // served: hole 4 leaves system_matrix as it is
 
     // HOLE 4 OF 5 -- THE BOUNDARY DATA.
     // Uses: support (the support point of each dof), n, dirichlet (the role),
@@ -448,16 +458,17 @@ int main(int argc, char **argv)
     // Neumann role) and flux_load (per dof, the integral of that data times
     // phi_i over the interface faces).
     // Leaves: boundary_values (dof to value, empty on entry) holding exactly
-    // the held dofs. The edge opposite the interface is held at in.outer, and
-    // so are the two edges the interface ends on when in.full_outer is 1 (when
+    // the held dofs, all of them on the boundary: every dof inside the box
+    // stays free. The edge opposite the interface is held at in.outer, and so
+    // are the two edges the interface ends on when in.full_outer is 1 (when
     // it is 0 they are free). On the Dirichlet role every interface dof is
-    // held at partner.value of its support point, on the Neumann role none is
-    // (an interface end that lies on a held edge may take either value). On
-    // the Neumann role system_rhs (equal to volume_rhs on entry) also carries
-    // the partner's flux as a load with its sign unchanged, the partner's
-    // outward flux being this side's inward one: system_rhs minus volume_rhs
-    // equals flux_load on the interface dofs. system_matrix stays as hole 3
-    // left it.
+    // held at partner.value of its support point, on the Neumann role none
+    // is. An interface end that lies on a held edge is held too: at either
+    // value on the Dirichlet role, at in.outer on the Neumann role. On the
+    // Neumann role system_rhs (equal to volume_rhs on entry) also carries the
+    // partner's flux as a load with its sign unchanged, the partner's outward
+    // flux being this side's inward one: system_rhs minus volume_rhs equals
+    // flux_load on the interface dofs. system_matrix stays as hole 3 left it.
     // The lines after it check each of these.
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     VectorTools::interpolate_boundary_values(mapping, dof_handler, 0, Functions::ConstantFunction<2>(in.outer),
@@ -482,21 +493,48 @@ int main(int argc, char **argv)
     }
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
+    // served: what hole 4 left, against the input, at every dof by where it lies: inside the box, on
+    // an outer edge, on the interface between its ends, or at an interface end
     auto held = [&](types::global_dof_index i) { return boundary_values.count(i) > 0; };
-    for (unsigned int i = 0; i < n; ++i)   // served: what hole 4 left, against the input
+    auto held_at = [&](types::global_dof_index i, const double v) {
+      return held(i) && std::abs(boundary_values.at(i) - v) <= 1e-9 * (1 + std::abs(v));
+    };
+    auto left = [&](types::global_dof_index i) {   // the dof, and what hole 4 left on it
+      return "the dof at (" + num(support[i][0]) + ", " + num(support[i][1]) + ") is " +
+             (held(i) ? "held at " + num(boundary_values.at(i)) : std::string("free"));
+    };
+    for (unsigned int i = 0; i < n; ++i)
     {
       const Point<2> &p = support[i];
       const bool on_if = std::abs(p[AX] - in.position) < tol, on_far = std::abs(p[AX] - far) < tol;
       const bool at_end = std::abs(p[AL] - lo) < tol || std::abs(p[AL] - hi) < tol;
-      if ((on_far && !held(i)) || (at_end && !on_if && !on_far && held(i) != (in.full_outer != 0)))
-        fail("OUTER EDGES: the dof at (" + num(p[0]) + ", " + num(p[1]) + ") is " + (held(i) ? "held" : "free") +
-             "; hole 4 holds the edge opposite the interface, and the two it ends on exactly when full_outer is 1");
-      const double trace = partner.value(p);
-      if (on_if && !at_end &&
-          (held(i) != dirichlet || (dirichlet && std::abs(boundary_values.at(i) - trace) > 1e-9 * (1 + std::abs(trace)))))
-        fail("INTERFACE: on the " + in.side + " role an interface dof must be " +
-             (dirichlet ? "held at partner.value(p)" : "free, the partner's flux being a load"));
+      const bool edge_held = on_far || in.full_outer != 0;
+      const double trace = on_if ? partner.value(p) : 0.0;
+      if (!on_if && !on_far && !at_end && held(i))
+        fail("INSIDE THE BOX: " + left(i) + " and lies inside the box; hole 4 holds boundary dofs only and leaves "
+             "every dof inside the box free");
+      if ((on_far || (at_end && !on_if)) && (edge_held ? !held_at(i, in.outer) : held(i)))
+        fail("OUTER EDGES: " + left(i) + " and lies on " +
+             (on_far ? "the edge opposite the interface" : "an edge the interface ends on") + "; hole 4 " +
+             (edge_held ? "holds it at in.outer (" + num(in.outer) + ")" : std::string("leaves it free, full_outer being 0")));
+      if (on_if && !at_end && (dirichlet ? !held_at(i, trace) : held(i)))
+        fail("INTERFACE: on the " + in.side + " role " + left(i) + " and lies on the interface between its ends; hole 4 " +
+             (dirichlet ? "holds it at partner.value(p) (" + num(trace) + ")"
+                        : std::string("leaves it free, the partner's flux being a load")));
+      if (on_if && at_end &&
+          !(in.full_outer ? held_at(i, in.outer) || (dirichlet && held_at(i, trace)) : dirichlet ? held_at(i, trace) : !held(i)))
+        fail("INTERFACE ENDS: on the " + in.side + " role " + left(i) + " and is an end of the interface, on an edge " +
+             (in.full_outer ? "the outer condition holds (full_outer 1); hole 4 holds it at " +
+                                (dirichlet ? "partner.value(p) (" + num(trace) + ") or " : std::string()) + "in.outer (" +
+                                num(in.outer) + ")"
+                            : "left free (full_outer 0); hole 4 " +
+                                (dirichlet ? "holds it at partner.value(p) (" + num(trace) + ")" : std::string("leaves it free")) +
+                                ", as every interface dof"));
     }
+    if (std::abs(system_matrix.frobenius_norm() - matrix_size) > 1e-12 * matrix_size)
+      fail("MATRIX: hole 4 changed system_matrix (the root of the sum of its squared entries went from " + num(matrix_size) +
+           " to " + num(system_matrix.frobenius_norm()) + "); hole 4 leaves it as hole 3 left it and holds dofs in "
+           "boundary_values alone");
     double gap = 0, flip = 0, size = 0, got = 0;
     for (const auto i : iface)
     {
@@ -518,7 +556,7 @@ int main(int argc, char **argv)
     // on every other row. system_matrix and system_rhs leave this hole as they
     // came in: the flux recovery after it reads their held rows.
     // The lines after it stop when a held row of system_matrix was emptied,
-    // or when `solution` misses either condition.
+    // when every dof is held, or when `solution` misses either condition.
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     {
       SparseMatrix<double> m(sparsity);
@@ -535,6 +573,7 @@ int main(int argc, char **argv)
     Vector<double> r(n);
     system_matrix.vmult(r, solution);
     double row_max = 0, r_free = 0, kept = 0;
+    unsigned int n_free = 0, held_inside = 0;   // the rows the solve answers for; held dofs inside the box
     for (unsigned int i = 0; i < n; ++i)
     {
       double row = 0, off = 0;
@@ -547,16 +586,25 @@ int main(int argc, char **argv)
              "given reinit(sparsity)), then filled by copy_from(system_matrix). A SparseMatrix copy-constructed "
              "from system_matrix is left empty, and a library call on it crashes with no message");
       if (held(i))
+      {
+        const Point<2> &p = support[i];
         kept = std::max(kept, std::abs(solution(i) - boundary_values.at(i)));
+        held_inside += p[0] > in.x0 + tol && p[0] < in.x1 - tol && p[1] > in.y0 + tol && p[1] < in.y1 - tol;
+      }
       else
-        r_free = std::max(r_free, std::abs(r(i) - system_rhs(i)));
+        ++n_free, r_free = std::max(r_free, std::abs(r(i) - system_rhs(i)));
     }
+    if (n_free == 0 && held_inside > 0)
+      fail("SOLVE: every dof is held: boundary_values holds all " + std::to_string(n) + " of them, " +
+           std::to_string(held_inside) + " inside the box, so no row of system_matrix u = system_rhs was left to "
+           "solve and nothing was solved: `solution` is boundary_values alone. A dof inside the box is never held");
     const double scale = std::max(system_rhs.linfty_norm(), row_max * solution.linfty_norm());
     if (!std::isfinite(solution.l2_norm()) || kept > 1e-9 * (1 + solution.linfty_norm()) || r_free > 1e-8 * scale)
       fail("SOLVE: `solution` misses boundary_values by " + num(kept) + " and leaves system_matrix u - system_rhs at " +
            num(r_free) + " on the free dofs (system scale " + num(scale) + "): it does not solve this system");
-    std::cout << "residual of the solve: " << num(r_free) << " on the free rows, " << num(kept)
-              << " on the held dofs (system scale " << num(scale) << ")" << std::endl;
+    std::cout << "residual of the solve: " << num(r_free) << " on the " << n_free << " free rows, " << num(kept)
+              << " on the " << n - n_free << " held dofs (system scale " << num(scale) << ")"
+              << (n_free ? "" : "; every dof is held, and nothing was solved") << std::endl;
 
     // served: the CONSISTENT outward flux q_i = -r_i / w_i, r = system_matrix u
     // - volume_rhs (the volume load alone, no boundary condition). An interface

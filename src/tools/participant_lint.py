@@ -272,6 +272,18 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
     ("skfem", r"\bdoforder\s*=",
      "TypeError: CellBasis.__init__() got an unexpected keyword argument 'doforder'",
      "Basis(mesh, element) takes no doforder keyword"),
+    # Measured on a coupled elastic round (scikit-fem 12.0.1): three of five cells wrote
+    # sym_grad(u, w) in their form, and one MeshTri.rect and basis.find_nodes.
+    ("skfem", r"\bsym_grad\s*\(\s*[\w.]+\s*,",
+     "TypeError: sym_grad() takes 1 positional argument but 2 were given",
+     "sym_grad takes the field alone, sym_grad(u); the form's w is not passed to it"),
+    ("skfem", r"\bMeshTri\w*\.rect\s*\(",
+     "AttributeError: type object 'MeshTri1' has no attribute 'rect'",
+     "a rectangle is MeshTri.init_tensor(np.linspace(x0, x1, nx + 1), np.linspace(y0, y1, ny + 1))"),
+    ("skfem", r"\.find_nodes\s*\(",
+     "AttributeError: 'CellBasis' object has no attribute 'find_nodes'",
+     "a basis selects dofs with basis.get_dofs(lambda x: np.isclose(x[0], X)) and a mesh its nodes "
+     "with mesh.nodes_satisfying(lambda x: np.isclose(x[0], X))"),
     ("skfem", r"\bfind_dofs\s*\(",
      "AttributeError: 'FacetBasis' object has no attribute 'find_dofs'",
      "every basis has get_dofs, not find_dofs"),
@@ -775,6 +787,21 @@ _ERROR_FIXES: tuple = (
      "scikit-fem: Basis(mesh, element) takes no doforder keyword"),
     (("skfem",), "has no attribute 'find_dofs'",
      "scikit-fem: every basis has get_dofs, not find_dofs"),
+    (("skfem",), "sym_grad() takes 1 positional argument but 2 were given",
+     "scikit-fem: sym_grad takes the field alone, sym_grad(u); the form's third argument w is not "
+     "passed to it"),
+    (("skfem",), "has no attribute 'rect'",
+     "scikit-fem: a rectangle is MeshTri.init_tensor(np.linspace(x0, x1, nx + 1), np.linspace(y0, y1, ny + 1))"),
+    (("skfem",), "has no attribute 'find_nodes'",
+     "scikit-fem: a basis selects dofs with basis.get_dofs(lambda x: np.isclose(x[0], X)) and a mesh "
+     "its nodes with mesh.nodes_satisfying(lambda x: np.isclose(x[0], X))"),
+    # Measured on a coupled elastic round: four of five DUNE sides passed the DirichletBC as galerkin's
+    # second argument; one then wrote dbc=, which is accepted and never applied, and its CG ran until killed.
+    (("dune",), "'DirichletBC' object has no attribute 'gridView'",
+     "DUNE-fem: galerkin's second positional argument is the space, not a DirichletBC; the Dirichlet "
+     "condition goes into the list with the form, galerkin([a == b, dbc], solver=...). A dbc= keyword "
+     "is accepted and the condition is never applied: a held unit square then solved as if nothing "
+     "were held"),
     (("ngsolve",), "cannot import name 'trace' from 'ngsolve'",
      "NGSolve: the tensor helpers are CAPITALISED and the set is not UFL's. Measured on this install, ngsolve EXPORTS Sym, Trace, Det, Grad, grad, div, Id, InnerProduct, OuterProduct, Inv, Cof -- and does NOT export sym, trace, det, Div, Identity or Transpose. The strain is Sym(Grad(u)), the trace Trace(...), the identity Id(2)"),
     (("ngsolve",), "cannot import name 'det' from 'ngsolve'",
@@ -1244,6 +1271,42 @@ _ERROR_FIXES: tuple = (
      "measured on this install: no `global nrho <n> fnum <F>` before create_particles (SPARTA then "
      "uses nrho = 1, fnum = 1), and no grid cell on the flow side of any surface line (read_surf's "
      "line '<a> <b> <c> = cells outside/inside/overlapping surfs' then has a = 0)"),
+    # ── FEBio: THE MESSAGES THAT DO NOT NAME THEIR CAUSE. Measured on three coupled rounds with a
+    # FEBio elastic side: 'invalid value for attribute "lid"' 30 times in 13 of 15 cells and
+    # 'Invalid load curve ID' in 11, and no run check answered either. Each entry was reproduced on
+    # this install (FEBio 4.12) by a placeholder slab deck one change away from a running one
+    # (tests/test_a_febio_deck_defect_febio_accepts_silently_is_named.py). What FEBio names itself
+    # (an unknown tag, an unknown node set) is left to FEBio.
+    (("febio",), "Invalid load curve ID",
+     "FEBio: an lc=\"k\" on a <value> names a <load_controller id=\"k\"> inside a <LoadData> section, and "
+     "this deck defines none with that id; the message names neither the lc nor the element. A <value> "
+     "with no lc is applied in full at every time"),
+    (("febio",), re.compile(r'tag "node" \(line \d+\) : invalid value for attribute "lid"'),
+     "FEBio: lid in a <NodeData> is the 1-based position in its node_set's own list, 1..N, not a node "
+     "id. A lid of 0, a node id, more entries than the set holds, or a <NodeSet> written with spaces "
+     "(FEBio keeps the first number between two commas, so the set comes out short) stop here"),
+    (("febio",), 'needs to have property "solver" defined',
+     "FEBio: the <Control> section holds no <solver> block; removing <solver type=\"solid\"> from a "
+     "running deck gives exactly this"),
+    (("febio",), re.compile(r"^[ \t]*\*[ \t]+(?P<said>std::exception)[ \t]+\*[ \t]*$", re.M),
+     "FEBio: one cause measured on this install: a <value type=\"map\"> that names a map no <NodeData "
+     "name=...> in the deck defines"),
+    (("febio",), "No force acting on the system.",
+     "FEBio: a WARNING, not a stop. It comes when the residual after an iteration falls below FEBio's "
+     "floor (squared norm 1e-20), and with small loads that is the first iteration: the field is still "
+     "the solved one (loads scaled down by 1e-3 to 1e-10 printed it and gave the scaled field). A zero "
+     "load prints it too, with a zero field, so read the node log's values, not the warning"),
+    (("febio",), re.compile(r'tag "MeshData" \(line \d+\) : unrecognized tag'),
+     "FEBio: <MeshData> is a section of its own after <MeshDomains>; placed inside <Mesh> it stops here"),
+    (("febio",), re.compile(r'tag "linear_solver" \(line \d+\) : invalid value for attribute "type"'),
+     "FEBio: this build has no MKL solvers. skyline runs; pardiso, mkl_dss, superlu and \"conjugate "
+     "gradient\" stop here, and fgmres is read, then refuses the stiffness matrix"),
+    (("febio",), re.compile(r'tag "NodeSet" \(line \d+\) : invalid value:'),
+     "FEBio 4: a <NodeSet> is one comma-separated id list written as its text; child tags such as "
+     "<node id=...> or <n id=...> stop here"),
+    (("febio",), re.compile(r'tag "x_dof" \(line \d+\) : unrecognized tag'),
+     "FEBio: <x_dof>, <y_dof> and <z_dof> belong to a `zero displacement` bc; a `prescribed "
+     "displacement` takes one dof as <dof>x</dof>, so this tag inside one stops here"),
 )
 
 
@@ -1518,6 +1581,9 @@ _DISTRIBUTE = ("AffineConstraints::distribute takes the solution vector, after t
                "and a vector, or two vectors, it does not compile. A matrix and its right-hand side take the "
                "constraints through condense(matrix, rhs) before the solve, or through "
                "distribute_local_to_global while they are assembled")
+_CONSTRAINT_MEMBERS = ("AffineConstraints<double> is filled by add_line(i) and set_inhomogeneity(i, v), or by "
+                       "add_constraint(i, {}, v), and closed by close(); it has no initialize, attach_dof_handler "
+                       "or add_entry, and add_lines takes dof numbers (a std::set), not a map of values")
 _FFV = ("FEFaceValues holds no dof numbers: the dofs of the face's cell are cell->get_dof_indices(indices), "
         "indices a std::vector<types::global_dof_index> of fe.n_dofs_per_cell() entries, and shape_value(i, q) "
         "runs over all of that cell's dofs, i from 0 to fe.n_dofs_per_cell() - 1 (for FE_Q it is zero for a dof "
@@ -1587,6 +1653,12 @@ _DEALII_FIRST_ERRORS = (
      "extractor, fe_values[FEValuesExtractors::Vector(0)].gradient(i, q) (a Tensor<2, 2>), .symmetric_gradient(i, "
      "q) (a SymmetricTensor<2, 2>) and .divergence(i, q), and one component's gradient is "
      "shape_grad_component(i, q, c)"),
+    # Measured on a coupled elastic round: a cell built eps from a free symmetric_gradient(...) and stopped
+    # here, then from scalar shape gradients, which the served ASSEMBLY stop refused five times.
+    (("'symmetric_gradient' was not declared",),
+     "deal.II has no free symmetric_gradient: the strain of shape function i of a two-component FESystem is "
+     "fe_values[FEValuesExtractors::Vector(0)].symmetric_gradient(i, q), a SymmetricTensor<2, 2> (the FEValues "
+     "made with update_gradients)"),
     (("FEValues<", "has no member named 'distribute_local_to_global'"),
      "distribute_local_to_global is a member of AffineConstraints, constraints.distribute_local_to_global("
      "cell_matrix, cell_rhs, local_dof_indices, system_matrix, system_rhs), and it empties the constrained rows a "
@@ -1627,6 +1699,38 @@ _DEALII_FIRST_ERRORS = (
      "interpolate_boundary_values takes one boundary id, or a std::map<types::boundary_id, const Function<2> *> "
      "for several ({{1, &f}, {2, &f}}), then the std::map of values or the AffineConstraints; a braced list of "
      "ids does not convert"),
+    # MEASURED ON A TRANSIENT COUPLED ROUND: the first errors of 9 failed deal.II builds of three cells drew
+    # no answer here, and the other forms below sat behind another first error in the same builds. Each
+    # wrong form was compiled on this install, and each answer's calls compiled, linked and ran.
+    (("AffineConstraints<double>'", "has no member named"), _CONSTRAINT_MEMBERS),
+    (("no matching function", "AffineConstraints<double>::add_entry("), _CONSTRAINT_MEMBERS),
+    (("no matching function", "AffineConstraints<double>::add_lines(std::map"), _CONSTRAINT_MEMBERS),
+    (("no match for 'operator='", "std::vector<", "and 'double')"),
+     "a std::vector has no = 0.0: a deal.II Vector<double> sets every entry so (Vector<double> v(n); v = 0), "
+     "and a std::vector is filled with std::fill(v.begin(), v.end(), 0.0)"),
+    (("no match for call to '(std::vector<",),
+     "a std::vector is indexed with v[i]: v(i) calls it, and a std::vector cannot be called; a deal.II "
+     "Vector<double> takes v(i) and v[i] alike"),
+    (("no matching function", "get_function_gradients(", "std::vector<double>&)"),
+     "get_function_gradients(vector, gradients) fills gradients, a std::vector<Tensor<1, 2>> of "
+     "n_quadrature_points entries (it needs update_gradients); a std::vector<double> takes get_function_values"),
+    (("SparseMatrix<", "has no member named 'sparsity'"),
+     "a SparseMatrix's pattern is get_sparsity_pattern(), a const SparsityPattern&: a second matrix on the same "
+     "pattern is SparseMatrix<double> B(sparsity) with that pattern"),
+    (("no matching function", "make_sparsity_pattern(", "AffineConstraints<double>&)"),
+     "DoFTools::make_sparsity_pattern takes the pattern it fills second: (dof_handler, dsp) with "
+     "DynamicSparsityPattern dsp(dof_handler.n_dofs()), or (dof_handler, dsp, constraints, keep_constrained_dofs) "
+     "with the constraints third"),
+    (("'SparseDirectLU' was not declared",),
+     "deal.II has no SparseDirectLU: its direct solver for a SparseMatrix<double> is SparseDirectUMFPACK "
+     "(deal.II/lac/sparse_direct.h), set up by initialize(matrix), after which vmult(x, b) writes the solution of "
+     "matrix x = b into x"),
+    (("Tensor<2, 2, double>' has no member named 'vmult'",),
+     "a Tensor<2, 2> applies to a Tensor<1, 2> as K * g (a Tensor<1, 2>), and (K * g) * h is a number"),
+    (("undefined reference to", "SparseDirectUMFPACK::solve<dealii::Vector<double> >"),
+     "after initialize(matrix), SparseDirectUMFPACK solves with vmult(x, b), or in place with solve(b), b then "
+     "holding the solution; solve(b, x) picks the overload whose first argument is a matrix, which is built for "
+     "no vector and so fails to link"),
 )
 
 
@@ -3711,6 +3815,82 @@ def unsolved_linear_solve(content: str) -> str:
             f'"mumps" when available); an iterative one needs a converging KSP (cg/gmres with a tolerance).')
 
 
+_REDUCE = ("mean", "average", "sum", "max", "min", "amax", "amin", "median", "item")
+
+
+def skfem_form_mixes_elements(content: str) -> str:
+    """'' unless a scikit-fem form makes one number of a quadrature point over every element.
+
+    In a skfem form `w.x` has shape (2, elements, quadrature points). MEASURED on a coupled round:
+    a side read each quadrature point as `w.x[0, :, i]` -- that point in EVERY element -- and took
+    its `.mean()` to choose a conductivity and a source value; the form then gave every element the
+    same values (its three-material conductivity became two numbers and its source three across
+    the whole side), its field missed its own equation everywhere, and its error did not fall with
+    the mesh. Over the recorded runs the same shape (`w.x[0, :, 0].mean()`) is in two more, both
+    wrong, and in no right one."""
+    if not isinstance(content, str) or "skfem" not in content:
+        return ""
+    import ast
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return ""
+    hits = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or len(fn.args.args) < 2:
+            continue
+        w = fn.args.args[-1].arg
+
+        def mixes(node) -> bool:                   # w.x[<c>, :, <q>]: quadrature point q of every element
+            if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "x" and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == w):
+                return False
+            sl = node.slice
+            return (isinstance(sl, ast.Tuple) and len(sl.elts) == 3 and isinstance(sl.elts[1], ast.Slice)
+                    and sl.elts[1].lower is None and sl.elts[1].upper is None
+                    and not isinstance(sl.elts[2], ast.Slice))
+        names = {}
+        for st in ast.walk(fn):
+            if isinstance(st, ast.Assign) and len(st.targets) == 1:
+                t, v = st.targets[0], st.value
+                pairs = (list(zip(t.elts, v.elts)) if isinstance(t, ast.Tuple) and isinstance(v, ast.Tuple)
+                         and len(t.elts) == len(v.elts) else [(t, v)])
+                for tt, vv in pairs:
+                    if isinstance(tt, ast.Name) and mixes(vv):
+                        names[tt.id] = vv
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            f, arg = node.func, None
+            if isinstance(f, ast.Attribute) and f.attr in _REDUCE:
+                if isinstance(f.value, ast.Name) and f.value.id in ("np", "numpy"):
+                    arg = node.args[0] if node.args else None      # np.mean(<x>)
+                else:
+                    arg = f.value                                  # <x>.mean()
+            elif isinstance(f, ast.Name) and f.id in ("float", "max", "min") and node.args:
+                arg = node.args[0]                                 # float(<x>)
+            src = None
+            if arg is not None and mixes(arg):
+                src = arg
+            elif isinstance(arg, ast.Name) and arg.id in names:
+                src = names[arg.id]
+            if src is not None:
+                red = f.attr if isinstance(f, ast.Attribute) else f.id
+                hits.append((fn.name, node.lineno, ast.unparse(src), red))
+                break
+    if not hits:
+        return ""
+    fn, ln, expr, red = hits[0]
+    more = f" (and in {len(hits) - 1} more form(s))" if len(hits) > 1 else ""
+    return (f"a scikit-fem form makes one number of a quadrature point over EVERY element: in {fn}() "
+            f"(line {ln}) `{expr}` reads that quadrature point in all elements, and `{red}` turns them "
+            f"into one value{more}. In a form w.x has shape (2, elements, quadrature points), so "
+            f"whatever the form picks this way is the same in every element -- a conductivity or a "
+            f"source chosen by region becomes one value for the whole side. Compute it on the whole "
+            f"arrays instead, element by element, e.g. np.where(w.x[0] < X_SPLIT, K_LEFT, K_RIGHT).")
+
+
 # A statement that cannot stop the run: pass, continue, break, a print, or an assignment with no call.
 _CANNOT_STOP = re.compile(r"pass|continue|break|print\(.*\)|[\w.\[\]\s,:\-+*/'\"]+[+\-*/]?=[^()\n]*")
 
@@ -3863,6 +4043,8 @@ def _lost_label(label: str, state) -> str:
         return f"'{label}' (demoted to a print)"
     if state == "edited":
         return f"'{label}' (its condition is kept, and nothing under it stops the run)"
+    if isinstance(state, tuple) and state[0] == "condition":
+        return f"'{label}' (its message is kept, but {state[1]})"
     if isinstance(state, tuple) and state[0] == "narrowed":
         return (f"'{label}' (narrowed: its condition also asks {state[1]}, so it no longer stops every run "
                 f"the served one stops)")
@@ -3937,6 +4119,155 @@ def _narrowed(content: str, template: str, head: str):
     return ("narrowed", " and ".join(f"`{mine[k][:80]}`" for k in mine if k not in served))
 
 
+def _edit_rows(text: str) -> list:
+    """(first row, last row) of each EDIT block of a served text: its placeholders are the
+    author's to set, so none of its lines is a served line."""
+    rows = text.splitlines()
+    out = []
+    for i, ln in enumerate(rows):
+        if ln.lstrip().startswith("#") and "EDIT THIS BLOCK" in ln:
+            j = next((k for k in range(i + 1, len(rows)) if re.fullmatch(r"[ \t]*#[ \t]*─{20,}[ \t]*", rows[k])),
+                     len(rows) - 1)
+            out.append((i + 1, j + 1))
+    return out
+
+
+def _stop_reads(text: str, head: str, served: bool = False):
+    """(the `if` test of the stop whose message starts with `head`, as source, and the module-level
+    statements above it that compute what that test reads, followed back through what they read
+    in turn, as {ast dump: source}); None when the text does not parse or carries no such stop.
+    Only statements at the top level before the stop's own top-level statement count, and in a
+    served text (`served`) none inside its EDIT block."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+
+    def lead(arg) -> str:
+        while isinstance(arg, ast.BinOp):
+            arg = arg.left
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.JoinedStr):
+            out = []
+            for v in arg.values:
+                if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                    break
+                out.append(v.value)
+            return "".join(out)
+        return ""
+    parent = {}
+    for node in ast.walk(tree):
+        for ch in ast.iter_child_nodes(node):
+            parent[ch] = node
+    found = None
+    for node in ast.walk(tree):
+        call = node.exc if isinstance(node, ast.Raise) else node.value if isinstance(node, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and call.args):
+            continue
+        f = call.func
+        if (f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else "") not in (
+                "SystemExit", "exit"):
+            continue
+        if lead(call.args[0]).split("{", 1)[0].strip()[:30] == head[:30]:
+            found = node
+            break
+    if found is None:
+        return None
+    cur, test = found, None
+    while cur in parent and not isinstance(parent[cur], ast.Module):
+        up = parent[cur]
+        if test is None and isinstance(up, ast.If) and cur in up.body:
+            test = up.test
+        cur = up
+    if cur not in tree.body:
+        return None
+    above = tree.body[:tree.body.index(cur)]
+    if served:
+        edit = _edit_rows(text)
+        above = [st for st in above if not any(a <= st.lineno <= b for a, b in edit)]
+    # ONLY THE CHECK'S OWN NAMES ARE FOLLOWED: served check code keeps what it computes in names
+    # that start with an underscore (_line, _bad, _chk_vals); the names a fill sets (the mesh, the
+    # interface lists, y_if) are the author's, and a served line that computes them may be rewritten.
+    want = {n.id for n in ast.walk(test) if isinstance(n, ast.Name)} if test is not None else set()
+    reads: dict = {}
+    for st in reversed(above):
+        if not isinstance(st, (ast.Assign, ast.AugAssign, ast.AnnAssign)) or st.value is None:
+            continue
+        tg = st.targets if isinstance(st, ast.Assign) else [st.target]
+        names = {n.id for t in tg for n in ast.walk(t) if isinstance(n, ast.Name)}
+        if any(nm.startswith("_") for nm in names & want):
+            reads[ast.dump(st)] = ast.unparse(st)
+            want |= {n.id for n in ast.walk(st.value) if isinstance(n, ast.Name)}
+    return (ast.unparse(test) if test is not None else ""), reads
+
+
+def _condition_changed(content: str, template: str, head: str):
+    """('condition', what differs) when the stop whose message starts with `head` is still in the file
+    behind a raise, but its `if` test, or a served line of the check's own above it that the test
+    reads, was changed in what it tests; None otherwise, and wherever either text cannot be read. A
+    test that only gained conditions is _narrowed's.
+
+    WHAT COUNTS AS CHANGED IN WHAT IT TESTS. A test is changed when it reads every name the served
+    test reads and is still another expression (a bound moved, a comparison turned around), unless
+    it only dropped conditions of an `and` or gained alternatives of an `or` (then it stops every
+    run the served one stops, and more); a check
+    line is changed when the file sets the same name above the stop from an expression that reads
+    every name the served line reads and more besides (a condition added to it). A name renamed
+    away is the author's adaptation, and a line moved elsewhere cannot be judged here: neither is
+    named. Measured over every recorded served participant file, each against the contracts of its
+    own build: that reading names a turned-around end test and a narrowed interface-line set (one
+    round) and a cross-check tolerance loosened ten- and twentyfold (two runs of another problem),
+    and none of the files that only renamed their own arrays inside a check line or moved the line.
+
+    MEASURED on a coupled round: a worker excluded the two interface end nodes from its lists,
+    the served INTERFACE NODES and INTERFACE DOFS stops fired, rightly, and it edited both so that
+    they passed -- the first by turning its test on the ends around, the second by narrowing the
+    served line its test reads (the set of interface-line dofs) to the interior. Both messages
+    still sat behind their raise, and the write check counted both stops as kept. Its Neumann load
+    then carried no flux at the two end vertices."""
+    import ast
+    import builtins
+
+    def names(src: str) -> set:
+        try:
+            return {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)} - set(dir(builtins))
+        except SyntaxError:
+            return set()
+    served = _stop_reads(_HOLE_RE.sub("", template), head, served=True)
+    mine = _stop_reads(content, head)
+    if served is None or mine is None:
+        return None
+    (t_served, r_served), (t_mine, r_mine) = served, mine
+    try:
+        same_test = ast.dump(ast.parse(t_served or "0")) == ast.dump(ast.parse(t_mine or "0"))
+    except SyntaxError:
+        return None
+    if not same_test and t_served and t_mine and names(t_served) <= names(t_mine):
+        if _narrowed(content, template, head):
+            return None                                  # only conditions added: said as narrowed
+        # A STOP MADE STRICTER IS NOT A STOP LOST: one that dropped conditions of an `and` test,
+        # or gained alternatives in an `or` test, fires on every run the served one fires on.
+        ts, tm = ast.parse(t_served, mode="eval").body, ast.parse(t_mine, mode="eval").body
+        if isinstance(ts, ast.BoolOp) and isinstance(tm, ast.BoolOp) and type(ts.op) is type(tm.op):
+            ps, pm = {ast.dump(v) for v in ts.values}, {ast.dump(v) for v in tm.values}
+            if (pm <= ps) if isinstance(ts.op, ast.And) else (ps <= pm):
+                return None
+        return ("condition", f"its test is now `{t_mine[:100]}`")
+    by_target: dict = {}
+    for src in r_mine.values():
+        by_target.setdefault(src.split("=", 1)[0].strip(), []).append(src)
+    for d, src in r_served.items():
+        if d in r_mine:
+            continue
+        for other in by_target.get(src.split("=", 1)[0].strip(), []):
+            if names(src) < names(other):
+                added = ", ".join(sorted(names(other) - names(src)))
+                return ("condition", f"the served line its test reads, `{src[:100]}`, now also reads {added}")
+    return None
+
+
 def _unset_guard_now_unreachable(cond, content: str) -> bool:
     """True for a served stop on an unset placeholder (`if NAME is None:`) whose placeholder the
     file now sets to something else: the stop can no longer fire, and dropping it loses nothing.
@@ -3973,14 +4304,15 @@ def served_guard_removed(content: str, near=None) -> str:
             continue
         state = _guard_state(content, cond, head, body_lines, norm_body)
         if state == "kept":
-            state = _narrowed(content, template, head) or state
+            state = _narrowed(content, template, head) or _condition_changed(content, template, head) or state
         if state in ("kept", "changed"):
             continue
         gone.append(_lost_label(label or head or (cond or "")[:40], state))
     if not gone:
         return ""
     return (f"SERVED GUARD REMOVED: {len(gone)} of the {len(guards)} refusals this contract came with "
-            f"are gone, demoted to a print, narrowed or edited so that they no longer stop the run: "
+            f"are gone, demoted to a print, narrowed, edited so that they no longer stop the run, or "
+            f"no longer test what the served ones test: "
             f"{'; '.join(gone[:4])}{'; ...' if len(gone) > 4 else ''}. "
             f"Each stops a run that would hand in a wrong number (measured: with the temperature "
             f"cross-check demoted, a run exported tractions with no thermal stress at every level). "
@@ -4110,7 +4442,8 @@ def served_blocks_lost(content: str, near=None) -> str:
 # written program no longer carries, read from the served program itself, never from a fixed list.
 _SERVED_STOP = re.compile(r'\bfail\s*\(\s*(?:std::string\s*\(\s*)?"([A-Z][A-Z_ ]*[A-Z]):')
 _SERVED_LINES = {"dealii_side.cc": (("NDOF = ", '"NDOF = <n>"'), ('"VOLUME_SOURCE[ "]', '"VOLUME_SOURCE on|off"')),
-                 "dealii_side_transient.cc": (("NDOF = ", '"NDOF = <n>"'), ('"SOURCE[ "]', '"SOURCE on|off"'))}
+                 "dealii_side_transient.cc": (("NDOF = ", '"NDOF = <n>"'), ('"SOURCE[ "]', '"SOURCE on|off"')),
+                 "dealii_side_elastic.cc": (("NDOF = ", '"NDOF = <n>"'), ('"BODY_FORCE[ "]', '"BODY_FORCE on|off"'))}
 
 
 def _program_served_as(name: str, near=None):
@@ -4131,8 +4464,35 @@ def _program_served_as(name: str, near=None):
             continue
         m = re.search(r"""^DEALII_SRC\s*=\s*["']([^"']+)["']""", t, re.M)
         if m and Path(m.group(1)).name == name:
-            return "dealii_side_transient.cc" if re.search(r"^N_STEPS\s*=", t, re.M) else "dealii_side.cc"
+            # THE WRAPPER SAYS WHICH PROGRAM IT BUILDS: the elastic one reads "BODY_FORCE on". Measured on
+            # a coupled elastic round: the served elastic program, unchanged, was judged against the heat
+            # program 99 times in four cells and told it had lost SOURCE, VOLUME_SOURCE and MATRIX.
+            if re.search(r"^N_STEPS\s*=", t, re.M):
+                return "dealii_side_transient.cc"
+            return "dealii_side_elastic.cc" if "BODY_FORCE on" in t else "dealii_side.cc"
     return None
+
+
+def _served_stop_conditions(served: str) -> list:
+    """[(label, the condition of the `if` that guards it)] for each served stop of a program: the
+    nearest `if (` before the fail(...) call, its parentheses balanced."""
+    out = []
+    for m in re.finditer(r'\bfail\s*\(\s*(?:std::string\s*\(\s*)?"([A-Z][A-Z_ ]*[A-Z]):', served):
+        start = served.rfind("if (", 0, m.start())
+        if start < 0:
+            continue
+        depth, i = 0, start + 3
+        while i < m.start():
+            if served[i] == "(":
+                depth += 1
+            elif served[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth == 0 and i < m.start():
+            out.append((m.group(1), served[start + 4:i]))
+    return out
 
 
 def served_program_checks_lost(content: str, name: str = "", near=None) -> str:
@@ -4158,10 +4518,28 @@ def served_program_checks_lost(content: str, name: str = "", near=None) -> str:
     lost = [lab if k == 1 else f"{lab} ({'twice' if k == 2 else f'{k} times'})" if not have[lab]
             else f"{lab} ({k - have[lab]} of {k})" for lab, k in want.items() if have[lab] < k]
     gone = [said for pat, said in _SERVED_LINES[program] if re.search(pat, served) and not re.search(pat, body)]
-    if not lost and not gone:
+    # A STOP WHOSE TEST WAS LOOSENED IS LOST TOO. Measured on a transient coupled round: a program raised
+    # the tolerances of two served STEP SYSTEM stops (1e-9 to 1e-4 to 0.05 of the matrix sum, 0.15 to 0.5
+    # of the load sum) and was told nothing until it commented the second one out; its field went on with
+    # a load four times the step's. A stop still carrying its label is judged by the test before it too.
+    flat = re.sub(r"\s+", "", body)
+    changed = []
+    for lab, cond in _served_stop_conditions(served):
+        if have[lab] and re.sub(r"\s+", "", cond) not in flat and (lab, " ".join(cond.split())) not in changed:
+            changed.append((lab, " ".join(cond.split())))
+    if not lost and not gone and not changed:
         return ""
+    if not lost and not gone:
+        return (f"SERVED CHECKS CHANGED: {name} is the program the served deal.II wrapper builds, and it carries "
+                f"every stop of the served {program}, but "
+                + "; ".join(f"the test before its {lab} stop is no longer `if ({cond[:140]})`"
+                            for lab, cond in changed[:3])
+                + ". A served stop whose test was changed -- a tolerance raised, a term dropped -- no longer stops "
+                  "what it was served to stop. Copy the served lines back as they were and change your hole instead: "
+                  "the stop measured what your hole left.")
     kept = sum(min(have[lab], k) for lab, k in want.items())
-    var = ", variant='transient'" if program == "dealii_side_transient.cc" else ""
+    var = {"dealii_side_transient.cc": ", variant='transient'",
+           "dealii_side_elastic.cc": ", variant='elasticity'"}.get(program, "")
     return (f"SERVED CHECKS LOST: {name} is the program the served deal.II wrapper builds, and it carries "
             f"{kept} of the {sum(want.values())} stops of the served {program}"
             + (f"; it no longer carries these: {_named(lost)}" if lost else "")

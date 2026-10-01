@@ -73,6 +73,9 @@ are what is documented. A deck with these sections runs.
     out-of-plane displacement fixed on BOTH z faces — a `zero displacement` bc
     with `<z_dof>1</z_dof>` on each. Read the task's own prescription for the
     through-thickness element count and follow it rather than refining there.
+    Both z faces hold EVERY node of such a slab: u_z held on the boundary
+    nodes only leaves the rest free in z, the slab is then neither plane
+    strain nor plane stress, and FEBio says nothing (measured).
 
   A POSITION-DEPENDENT BODY FORCE, measured on this build (4.12). Two forms
   run and give the same field (a constant load gives another):
@@ -89,6 +92,9 @@ are what is documented. A deck with these sections runs.
   * The body force is PER UNIT MASS: FEBio multiplies it by the material's
     density (measured: density 2 doubles the displacement). A load per unit
     volume is divided by the density, or the density is 1.
+  * It enters with the OPPOSITE SIGN: `<force>0.3,0,0</force>` moves the body
+    toward -x, where a `<nodal_load>` of +0.3 in x moves it toward +x
+    (measured, every form above). The b of -div(sigma) = b is written -b/density.
   * OMITTING `type="math"` on `<force>` IS USUALLY SILENT: the numeric prefix
     is taken and the rest of the expression is discarded, so the run
     succeeds with a constant load.
@@ -103,7 +109,8 @@ are what is documented. A deck with these sections runs.
   * A per-node table is `<NodeData name="px" node_set="right"
     data_type="scalar">` (or `data_type="vec3"`) inside `<MeshData>`, one
     `<node lid="i">value</node>` per node, `lid` counting 1, 2, ... in the
-    node set's own order.
+    node set's own order. `<MeshData>` is a section of its own after
+    `<MeshDomains>`; inside `<Mesh>` it is an `unrecognized tag`.
   * A prescribed displacement names ONE dof: `<bc type="prescribed
     displacement" node_set="right"><dof>x</dof><value lc="1">0.01</value>
     <relative>0</relative></bc>`, or `<value lc="1" type="map">px</value>`
@@ -111,11 +118,16 @@ are what is documented. A deck with these sections runs.
   * A per-node force: `<nodal_load type="nodal_force" node_set="right">
     <value lc="1" type="map">fm</value></nodal_load>` inside `<Loads>`, with
     `fm` a vec3 table.
+  * `lc="1"` names a `<load_controller id="1">` that a `<LoadData>` section
+    defines; with none FEBio stops with `Invalid load curve ID`. A `<value>`
+    with no lc is applied in full at every time (measured).
+  * A bc or load reads its table BY POSITION in its own node set, so the
+    table is written on that same set. A table with fewer entries than its
+    set is accepted without a word: the nodes with no entry take 0.
   * LISTS ARE COMMA-SEPARATED. Space-separated element connectivity
     segfaults with no message (exit -11); space-separated node coordinates
-    are a `syntax error`; a space-separated NodeSet runs and silently keeps
-    fewer nodes ("No force acting on the system." when the loaded set lost
-    them).
+    are a `syntax error`; a space-separated NodeSet runs and keeps only the
+    first number between two commas, so the set silently loses nodes.
   * `febio4 -i deck.feb` runs a deck; it takes no `--version`, `-h` or `-c`.
 
   READ THE LOG, NOT THE EXIT CODE. FEBio prints
@@ -124,5 +136,10 @@ are what is documented. A deck with these sections runs.
       E R R O R   T E R M I N A T I O N
   on failure, and reports `Nr of equations ......... : <n>`, which is the
   number to cross-check against your mesh. Grepping for the contiguous string
-  "normal termination" never matches.
+  "normal termination" never matches. A node log line is the node id, then the
+  values in the order `data=` names them; x, y, z there are the CURRENT
+  positions, reference plus displacement (measured).
+  `No force acting on the system.` is a WARNING, not a lost load: with small
+  loads FEBio prints it after the first iteration and keeps the solved field
+  (measured). Read the node log's values.
 """

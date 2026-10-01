@@ -540,7 +540,7 @@ print(f"[dune {SIDE}] interface n={len(U)} "
 # three times. The LEADING NEWLINE is deliberate -- a program that writes
 # without a trailing newline glues its text onto the front of the next
 # line, and an X11 warning has done exactly that here, turning a correct
-# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 54'.
+# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 113'.
 # A number inside a prose sentence does not count either, and a
 # wrong number is worse than none -- one coupled run that was right in
 # every other respect reported NDOF = 1 at all three levels, and its
@@ -618,7 +618,7 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied load can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \
-        and np.array_equal(_chk_flux, -_chk_qin):
+        and np.any(_chk_flux) and np.array_equal(_chk_flux, -_chk_qin):
     raise SystemExit("EXPORT SELF-CHECK: the exported traction is the partner's "
                      "array negated, bit for bit: a copy, not a recovery from "
                      "this side's own assembled system")

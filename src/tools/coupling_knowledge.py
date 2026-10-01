@@ -312,7 +312,8 @@ _PROGRAM_OF = {"participant_dealii.py": "dealii_side.cc",
                "participant_dealii_elastic.py": "dealii_side_elastic.cc"}
 _SCAFFOLD_OF = {"dealii_side.cc": "SCAFFOLD", "dealii_side_transient.cc": "TRANSIENT_SCAFFOLD",
                 "dealii_side_elastic.cc": "ELASTIC_SCAFFOLD"}
-_GLUE_MODULES = {"json", "os", "subprocess", "sys", "pathlib", "numpy", "re", "shutil", "math", "time", "signal"}
+_GLUE_MODULES = {"json", "os", "subprocess", "sys", "pathlib", "numpy", "re", "shutil", "math", "time", "signal",
+                 "resource"}
 def _dealii_cmake(program: str) -> str:
     """The six-line CMakeLists.txt that builds `program` into ./build/<its stem>."""
     name = Path(program).stem

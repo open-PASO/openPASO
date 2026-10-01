@@ -676,7 +676,18 @@ def _sandboxed_process_argv(workdir: Path, process: list[str], *,
         "--chdir", str(cwd),
     ))
     argv.extend(process)
+    # ONE CELL CANNOT TAKE THE MACHINE'S MEMORY. Measured on 2026-10-01: a cell's own program
+    # (a mesh refined nx + ny times) grew to 125 GB three times in one round, and each time the
+    # kernel's global OOM killer ran with the other four cells, other sessions and the web server
+    # all under the same pressure. Every process of the cell inherits this address-space limit;
+    # the largest virtual size of a legitimate solver process seen on this host is about 15 GB.
+    prlimit = shutil.which("prlimit")
+    if prlimit:
+        argv[:0] = [prlimit, f"--as={_CELL_ADDRESS_SPACE_LIMIT}", "--"]
     return argv
+
+
+_CELL_ADDRESS_SPACE_LIMIT = 48 * 1024 ** 3
 
 
 def _sandboxed_bash_argv(workdir: Path, command: str, *,
@@ -982,6 +993,7 @@ def _bash_tool_for(workdir: Path, *, audit_on_submit: bool = False,
                        + _participant_run_check(out, command)
                        + _participant_command_check(command, workdir, out)
                        + _fourc_after_shell_check(workdir, _started_at, command)
+                       + _febio_after_shell_check(workdir, _started_at, command)
                        if audit_on_submit else "")
                     + _script_check_after_shell(_before_scr)
                     + _artefact_check_after_shell(_before_art)
@@ -1110,6 +1122,7 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
                 reply += _registry_attribute_check(p, content)
                 reply += _extra_script_checks(p, content)
                 reply += _fourc_deck_write_check(p, content)
+                reply += _febio_deck_write_check(p, content)
                 reply += _participant_write_check(p, content)
                 reply += _config_write_check(p, content)
                 reply += _early_artefact_check(workdir, p)
@@ -1724,7 +1737,8 @@ from tools.workspace_advisor import (          # noqa: E402
     _work_on_disk_contradicting_a_give_up,
     deliverable_findings_after_worker as _deliverable_findings_after_worker,
     _wrong_level_run_log_check, _fourc_deck_write_check, _fourc_run_check,
-    _fourc_after_shell_check, _participant_write_check,
+    _fourc_after_shell_check, _febio_after_shell_check, _febio_deck_write_check,
+    _participant_write_check,
     _config_write_check, _participant_run_check,
     _participant_command_check)
 

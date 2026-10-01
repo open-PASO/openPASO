@@ -631,7 +631,7 @@ if _chk_hd:
 # three times. The LEADING NEWLINE is deliberate -- a program that writes
 # without a trailing newline glues its text onto the front of the next
 # line, and an X11 warning has done exactly that here, turning a correct
-# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 54'.
+# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 113'.
 # A number inside a prose sentence does not count either, and a
 # wrong number is worse than none -- one coupled run that was right in
 # every other respect reported NDOF = 1 at all three levels, and its

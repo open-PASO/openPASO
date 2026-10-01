@@ -73,9 +73,12 @@ class ReviewRecord:
     # did. Measured 2026-09-19: ten of ten coupled runs were told "a critic
     # review exists for this solver but NOT for this setup" with no way for
     # the caller -- or for us reading the record afterwards -- to see what
-    # differed. Server-side only; it is never served, it is the caller's own
-    # arguments, and it is what makes the next mismatch diagnosable in one
-    # reply rather than in an afternoon.
+    # differed. What a mismatch reply shows of it: for a coupling setup, the
+    # changed argument's name and its short reviewed and current values (scalars
+    # such as tol or max_iter; a long value is only named); for a script or deck,
+    # the NUMBER of the first differing line and the caller's current line, never
+    # a stored line, which may hold private literals. The audit log keeps its
+    # length, not its text.
     setup_text: str = ""
     consumed_by: str | None = None
     consumed_at: float | None = None

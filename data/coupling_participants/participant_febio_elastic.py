@@ -12,16 +12,14 @@ CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1), writes
 exports.json LAST.
 
-FEBio HAS NO SCRIPTING API: it is XML-in / logfile-out. Each coupling
-iteration this wrapper (1) reads imports.json, (2) writes a complete FEBio 4.0
-.feb deck with the imported interface data baked in PER NODE, (3) runs
-`febio4 -i deck.feb`, (4) parses the ASCII <logfile>, (5) writes exports.json.
+FEBio HAS NO SCRIPTING API: each iteration this wrapper reads imports.json,
+writes a FEBio 4.0 .feb deck with the interface data PER NODE, runs
+`febio4 -i deck.feb`, parses the ASCII <logfile> and writes exports.json.
 
 PLANE STRAIN IN A 3-D CODE. FEBio solves 3-D solids only, so the subdomain is
-meshed as ONE layer of hex8 elements of thickness ZTHICK with u_z = 0 on every
-node: plane strain exactly. The two z-layers of nodes carry identical
-(u_x, u_y), so the exported points are the distinct interface nodes, with 2-D
-coordinates, the list the other *_elastic contracts export.
+meshed as ONE layer of hex8 elements of thickness ZTHICK with u_z = 0 on EVERY
+node (on the boundary nodes alone it is not plane strain, and FEBio says
+nothing). The exported points are the distinct interface nodes, in 2-D.
 
 SIGN CONVENTION. `normal_fluxes` is exported as
 
@@ -36,10 +34,13 @@ answer.
 
 THE TRACTION EXPORT IS THE CONSISTENT (REACTION) TRACTION, PER NODE: not a
 domain average and not an element-stress projection, which are first order at
-best on the boundary. From a(u,v) - (b,v) = -int_Gamma q_out . v ds it follows
+best on the boundary. From a(u,v) - (b,v) = -int_Gamma q_out . v dA it follows
 for every basis function phi_i on the interface that
 
-    q_i = -R_i / w_i,     R = A u_h - b (UNCONSTRAINED),   w_i = int_Gamma phi_i ds.
+    q_i = -R_i / w_i,     R = A u_h - b (UNCONSTRAINED),   w_i = int_Gamma phi_i dA.
+
+Gamma is the slab's interface FACE, so the w_i are AREAS that sum to the
+interface length times ZTHICK; lengths there scale the traction by ZTHICK/2.
 
 On the Dirichlet side FEBio's node log "Rx", "Ry" is that residual at the
 PRESCRIBED dofs, except that a <nodal_load> never reaches it there: the body
@@ -62,12 +63,9 @@ WHAT IS APPROXIMATED.
   * FEBio has no small-strain material: `isotropic elastic` is
     St.Venant-Kirchhoff, linear elasticity only as |grad u| -> 0. Large
     displacements make this a finite-strain side.
-  * The recovered traction has a floor near 1e-7 relative (round-off below it,
-    the finite-strain term above): with FEBio as the DIRICHLET side, do not ask
-    `couple` for a residual tolerance below about 1e-7.
-  * hex8 is trilinear (Q1 in the plane), not the P1 of other contracts; both
-    are O(h^2).
-  * LINSOLVE is "skyline": a build without pardiso fails on FEBio's default.
+  * The recovered traction has a floor near 1e-7 relative: with FEBio as the
+    DIRICHLET side, do not ask `couple` for a residual tolerance below 1e-7.
+  * LINSOLVE is "skyline", this install's default; pardiso is not in it.
 
 RELAXATION IS NOT PER COMPONENT: the driver applies one theta to the whole
 interface state; subdomains of unequal length or Poisson ratio want
@@ -89,9 +87,7 @@ PARTNER   = "right"       # the partner's `name` in your couple(...) call
 X0, X1    = 0.0, 0.5      # this subdomain's x-extent
 Y0, Y1    = 0.0, 1.0      # this subdomain's y-extent
 ZTHICK    = 0.07          # slab thickness; ANY positive value, plane strain
-IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the line x = IFACE_X
-                          # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
-                          # (they are stacked). Everything below follows from it.
+IFACE_AXIS = "x"          # "x": the interface is the line x = IFACE_X (side by side) | "y": y = IFACE_X
 IFACE_X   = 0.5           # the shared interface: X0/X1 for axis "x", Y0/Y1 for axis "y"
 E_MOD     = 870.0         # Young's modulus
 NU        = 0.29          # Poisson ratio (PLANE STRAIN)
@@ -105,33 +101,58 @@ UDY = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def B_SRC(x, y):
-    """Body force per unit volume, (b_x, b_y), as a function of position.
+    """Body force per unit volume, (b_x, b_y), at NumPy arrays x, y; return two arrays.
 
-    Returns zero as shipped, which is a PLACEHOLDER like every number above
-    and is almost never what your problem wants: with displacement prescribed
-    on the whole outer boundary and no body force, the only solution is
-    u = 0 everywhere, and the coupling will converge beautifully to it.
-
-    If your problem states a body force, or gives you a manufactured solution
-    whose source term you derived, put it here. `x` and `y` are NumPy arrays,
-    so build the answer with NumPy and return two arrays of the same shape:
-
-        return (2.0 * MU * np.pi**2 * np.sin(np.pi * x) * np.cos(np.pi * y),
-                np.zeros_like(x))
-
-    Write it exactly as you would for the FEniCSx or scikit-fem sibling, in the
-    same units. It does NOT become a <body_load>: this file integrates B_SRC
-    against the element shape functions and applies the consistent nodal force
-    vector (see the header). (A <body_load type="body force"> with a math
-    expression also runs on this build, per unit mass; this contract does not
-    use it.)
+    Zero as shipped, a PLACEHOLDER: with the outer boundary held and no body
+    force the only solution is u = 0, and the coupling converges to it. It is
+    integrated into consistent nodal forces (header); a <body_load> would apply
+    -density * b instead (measured: the opposite sign).
     """
     return np.zeros_like(x), np.zeros_like(y)
 NX, NY    = 26, 26        # this subdomain's OWN mesh; need not match the partner
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). config.json may carry side, partner,
+#    x0, x1, y0, y1, iface ("left"|"right"|"bottom"|"top"|coordinate), iface_axis, E and nu
+#    (or lam and mu), udx, udy (4 coefficients of 1, x, y, y*y, or the 6 above), source_ux,
+#    source_uy (strings in x, y): they override the constants above, as the audit reads them.
+try:
+    _C = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
+    _C.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+except (ValueError, TypeError, json.JSONDecodeError):
+    _C = {}
+if all(_k in _C for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_C[_k]) for _k in ("x0", "x1", "y0", "y1"))
+if str(_C.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
+    IFACE_AXIS = str(_C["iface_axis"]).strip().lower()[:1]
+_ifc = str(_C.get("iface", "")).strip().lower()
+if _ifc in ("left", "right", "bottom", "top"):
+    IFACE_AXIS = ("x" if _ifc in ("left", "right") else "y")
+    IFACE_X = {"left": X0, "right": X1, "bottom": Y0, "top": Y1}[_ifc]
+elif _ifc.replace(".", "", 1).replace("-", "", 1).isdigit():
+    IFACE_X = float(_ifc)
+if str(_C.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
+    SIDE = str(_C["side"]).strip().lower()
+PARTNER = str(_C.get("partner") or PARTNER).strip()
+if "E" in _C and "nu" in _C:
+    E_MOD, NU = float(_C["E"]), float(_C["nu"])
+elif ("lam" in _C or "lambda" in _C) and "mu" in _C:
+    _l, _m = float(_C.get("lam", _C.get("lambda"))), float(_C["mu"])
+    E_MOD, NU = _m * (3 * _l + 2 * _m) / (_l + _m), _l / (2 * (_l + _m))
+for _nm in ("UDX", "UDY"):
+    _c = _C.get(_nm.lower())
+    if isinstance(_c, (list, tuple)) and len(_c) in (4, 6):
+        _c = [float(_v) for _v in _c]
+        globals()[_nm] = tuple(_c if len(_c) == 6 else _c[:3] + [0.0, 0.0, _c[3]])
+if _C.get("source_ux") is not None and _C.get("source_uy") is not None:
+    _bx, _by = (compile(str(_C[_k]).replace("^", "**"), _k, "eval") for _k in ("source_ux", "source_uy"))
+    def B_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
+        env = {_n: getattr(np, _n) for _n in ("pi", "sin", "cos", "exp", "sqrt", "abs", "log", "tanh")}
+        env.update(x=x, y=y)
+        return (eval(_bx, {"__builtins__": {}}, env) + 0.0 * x, eval(_by, {"__builtins__": {}}, env) + 0.0 * x)
+print("SOURCES IN USE: from " + ("config.json" if "_bx" in globals() else "code (the B_SRC body above)"))
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction export
 FEBIO     = "febio4"      # the FEBio binary path `discover(query='list')` prints
-LINSOLVE  = "skyline"     # NOT "pardiso": many builds ship without it (see above)
+LINSOLVE  = "skyline"     # this install's default; NOT "pardiso" (see above)
 # ─────────────────────────────────────────────────────────────────────────
 
 LAM = E_MOD * NU / ((1.0 + NU) * (1.0 - 2.0 * NU))   # plane strain
@@ -210,16 +231,9 @@ def read_imports():
 
 
 def sample(imp, key, fallback, y):
-    """Map the partner's VECTOR samples onto THIS participant's interface
-    points, COMPONENT BY COMPONENT.
-
-    The driver does no interpolation — non-matching interface meshes are
-    handled here, and for a vector field that has to be done per component. One
-    np.interp over a flattened (N, 2) array interleaves the two components: the
-    result still has the right length, the coupling still converges, and every
-    number is wrong.
-
-    Returns (len(y), ncomp)."""
+    """The partner's VECTOR samples on THIS side's interface points, COMPONENT BY
+    COMPONENT (one np.interp over a flattened (N, 2) array interleaves them, and
+    the coupling still converges). Returns (len(y), ncomp)."""
     fb = np.asarray(fallback, float).ravel()
     if not imp or not imp.get("coordinates"):
         return np.tile(fb, (len(y), 1))
@@ -309,8 +323,9 @@ class Mesh:
         # measured in the siblings, 4.7% in the interface displacement and 28%
         # in the interface traction on a coupling whose residual reached 1e-10
         # and whose flux balanced. They are still EXPORTED; they are just not
-        # interface-imposed. (They also must not appear in two prescribed-
-        # displacement BCs at once, which FEBio would not resolve for you.)
+        # interface-imposed. (Held by two bcs at once, a node keeps ONE value and
+        # FEBio says nothing: a prescribed displacement's over a zero one, the
+        # later of two prescribed ones -- measured on this install.)
         self.interior_j = [j for j in range(NY + 1)
                            if abs(self.ys[j] - Y0) > TOL
                            and abs(self.ys[j] - Y1) > TOL]
@@ -626,8 +641,7 @@ U = np.array([[0.5 * (ulog[nb][c] + ulog[nt][c]) for c in (0, 1)]
               for (nb, nt) in mesh.iface_pair], float)
 
 if SIDE == "dirichlet":
-    # THE CONSISTENT (REACTION) TRACTION (header): the node log's Rx, Ry are
-    # r = A u_h - b at the PRESCRIBED dofs.
+    # THE CONSISTENT (REACTION) TRACTION (header): Rx, Ry = A u_h - b at the PRESCRIBED dofs.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     rlog = parse_log(LOG_R, 2)
     if not rlog:
@@ -639,8 +653,7 @@ if SIDE == "dirichlet":
     R = np.array([[rlog[nb][c] + rlog[nt][c] for c in (0, 1)]
                   for (nb, nt) in mesh.iface_pair], float)
     W = np.array([w[nb] + w[nt] for (nb, nt) in mesh.iface_pair], float)
-    # b INCLUDES THE BODY FORCE, and a <nodal_load> never reaches Rx, Ry at a
-    # prescribed dof: its consistent load, the array the deck carries, comes off here.
+    # b INCLUDES THE BODY FORCE, which a <nodal_load> never puts into Rx, Ry: it comes off here.
     if f_bd is not None:
         R -= np.array([[f_bd[nb][c] + f_bd[nt][c] for c in (0, 1)]
                        for (nb, nt) in mesh.iface_pair], float)
@@ -648,10 +661,8 @@ if SIDE == "dirichlet":
     ok = np.abs(W) > 1e-14
     Q[ok] = -R[ok] / W[ok, None]
 
-    # THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY (a y-face),
-    # so their rows carry the OUTER reaction too and their residual is not this
-    # interface's traction. Take the nearest interior interface node rather than
-    # exporting a corner value that is physically a different quantity.
+    # THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY: their rows carry the
+    # outer reaction too, so they take the nearest interior interface node's value.
     good = np.array(mesh.interior_j, dtype=int)
     good = good[ok[good]]
     if len(good):
@@ -659,12 +670,8 @@ if SIDE == "dirichlet":
             if j not in good:
                 Q[j] = Q[good[np.argmin(np.abs(good - j))]]
 else:
-    # NEUMANN SIDE. FEBio reports Rx = Ry = 0 on these free dofs, so the export
-    # is -Fc_i / w_i: Fc the consistent nodal force this side BUILT from the
-    # partner's traction with its own interface faces and wrote into the deck,
-    # w the same weights as the Dirichlet branch. A wrong facet set, Jacobian or
-    # mass matrix moves it; a fault inside FEBio's own load path does not, and
-    # the element-stress traction below is the independent second opinion.
+    # NEUMANN SIDE. Rx = Ry = 0 on free dofs, so the export is -Fc_i / w_i: Fc the
+    # consistent nodal force built from the partner's traction, w the weights above.
     w = mesh.iface_weights()
     Fq = np.array([[Fc[nb][c] + Fc[nt][c] for c in (0, 1)]
                    for (nb, nt) in mesh.iface_pair], float)
@@ -673,8 +680,7 @@ else:
     ok = np.abs(W) > 1e-14
     Q[ok] = -Fq[ok] / W[ok, None]
 
-    # The two interface corners sit on the outer Dirichlet boundary, exactly as
-    # on the other side, so their weight mixes this interface with that face.
+    # The two interface corners: as on the Dirichlet side.
     good = np.array(mesh.interior_j, dtype=int)
     good = good[ok[good]]
     if len(good):
@@ -682,10 +688,7 @@ else:
             if jj not in good:
                 Q[jj] = Q[good[np.argmin(np.abs(good - jj))]]
 
-    # THE INDEPENDENT SECOND OPINION: this side's own element stresses averaged
-    # onto the interface nodes. It owes nothing to the partner's numbers, and it
-    # is coarse (it does not converge in the max norm): tens of percent from the
-    # export is normal on a correct run, a discrepancy of order one is a fault.
+    # A SECOND OPINION: this side's element stresses averaged onto the interface nodes.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     elog = parse_log(LOG_E, 2)
     if not elog:
@@ -704,11 +707,8 @@ else:
     if len(good):
         d = float(np.max(np.abs(Q[good] - Q_stress[good])))
         sc = max(1e-30, float(np.max(np.abs(Q[good]))))
-        print(f"[febio neumann] applied-load traction vs own-stress traction: "
-              f"max diff {d:.3e} ({d / sc:.2%} of peak) over {len(good)} "
-              f"interior interface nodes. The second is a NON-CONVERGENT "
-              f"boundary-stress average (measured order ~0), so tens of "
-              f"percent here is normal; order-one disagreement is not.")
+        print(f"[febio neumann] applied-load vs own-stress traction: max diff {d:.3e} "
+              f"({d / sc:.2%} of peak); tens of percent is normal, order one is not.")
 
 print(f"[febio {SIDE}] interface n={len(U)} "
       f"ux=[{U[:,0].min():.6g},{U[:,0].max():.6g}] "
@@ -716,9 +716,8 @@ print(f"[febio {SIDE}] interface n={len(U)} "
       f"tx=[{Q[:,0].min():.6g},{Q[:,0].max():.6g}] "
       f"ty=[{Q[:,1].min():.6g},{Q[:,1].max():.6g}]")
 
-# PER-LEVEL PERSISTENCE: this level's interface and field, named by LEVEL, which
-# the next level does not overwrite. Interpolate THESE onto the probe points your
-# task names. A dump defect must not cost the solve: exports.json comes after.
+# PER-LEVEL PERSISTENCE: this level's interface and field, named by LEVEL. Interpolate
+# THESE onto your probe points. A dump defect must not cost the solve.
 try:
     with open(f"interface_level{LEVEL}.csv", "w") as _f:
         _f.write("x,y,ux,uy,qx,qy\n")
@@ -727,9 +726,8 @@ try:
                         else (float(_yy), float(IFACE_X)))
             _f.write(f"{_px:.11e},{_py:.11e},{float(_ux):.11e},"
                      f"{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
-    # The FIELD comes from the deck's whole-mesh node log (<node_data ... file=
-    # "nodal_out.csv"/>, NO node_set); without it there is no field. The slab is
-    # one element thick, so a node's two z-layers average to its plane value.
+    # The FIELD comes from the whole-mesh node log (<node_data ... file="nodal_out.csv"/>,
+    # NO node_set); a node's two z-layers average to its plane value.
     if Path(LOG_F).is_file():
         _acc = {}
         _body = Path(LOG_F).read_text().split("*Step")[-1]
@@ -741,7 +739,8 @@ try:
                 _v = [float(_t) for _t in _c[1:7]]
             except ValueError:
                 continue
-            _k = (round(_v[0], 12), round(_v[1], 12))
+            # `<node id>,x,y,z,ux,uy,uz`: x, y, z are CURRENT positions, so the node is at x - ux.
+            _k = (round(_v[0] - _v[3], 9), round(_v[1] - _v[4], 9))
             _a = _acc.setdefault(_k, [0.0, 0.0, 0])
             _a[0] += _v[3]; _a[1] += _v[4]; _a[2] += 1
         with open(f"field_level{LEVEL}.csv", "w") as _f:
@@ -763,9 +762,8 @@ except Exception as _dump_exc:
                 Path(_partial).unlink()
         except OSError:
             pass
-    print(f"[febio_elastic per-level dump] level {LEVEL} dump failed: "
-          f"{_dump_exc!r}. The coupling continues, but this level has no "
-          f"field file; fix the dump and run this level again.")
+    print(f"[febio_elastic per-level dump] level {LEVEL} dump failed: {_dump_exc!r}; "
+          f"this level has no field file until the dump is fixed and the level run again.")
 
 # exports.json LAST: the driver takes its existence as proof of success.
 # `NDOF = <integer>` on a line of its OWN, per level: two dofs per in-plane node
@@ -773,20 +771,24 @@ except Exception as _dump_exc:
 try:
     print(f"\nNDOF = {2 * len(_acc)}")
 except NameError:
-    print(f"[febio {SIDE}] cannot report NDOF: the deck logged no whole-mesh "
-          f"node data, so there is no node count to report. Your task's "
-          f"execution log needs `NDOF = <integer>` on a line of its own.")
+    print(f"[febio {SIDE}] cannot report NDOF: the deck logged no whole-mesh node data. "
+          f"The execution log needs `NDOF = <integer>` on a line of its own.")
 
-# ── EXPORT SELF-CHECK ─ keep this block. It stops four exports that look fine
-#    and are worthless: non-finite values, an imported load that never entered the
-#    system, the partner's traction negated instead of recovered, and a Dirichlet
-#    side that exports exactly 0.0 where its own data make a reaction.
+# ── EXPORT SELF-CHECK ─ keep this block. It stops exports that look fine and are worthless:
+#    non-finite values, weights that are not the face's, forces that are not the partner's
+#    traction, a load that never entered, a negated copy, and a Dirichlet side exporting
+#    exactly 0.0 where its own data make a reaction.
 _chk_vals = np.asarray(U, float).ravel()
 _chk_flux = np.asarray(Q, float).ravel()
 if not (np.isfinite(_chk_vals).all() and np.isfinite(_chk_flux).all()):
     raise SystemExit("EXPORT SELF-CHECK: non-finite interface values or "
                      "tractions; the solve did not produce a usable field, so "
                      "nothing was exported")
+_chk_area = (AHI - ALO) * ZTHICK                  # the interface FACE
+if abs(float(np.sum(W)) - _chk_area) > 1e-6 * _chk_area:
+    raise SystemExit(f"EXPORT SELF-CHECK: the interface weights W sum to {float(np.sum(W)):.6g}, not to "
+                     f"the interface face's area {_chk_area:.6g} (length times ZTHICK): a nodal force "
+                     f"over them is not a traction")
 _chk_imp = (json.loads(Path("imports.json").read_text() or "{}")
             if Path("imports.json").is_file() else {})
 _chk_qin = (np.concatenate([np.asarray(_d.get("normal_fluxes") or [], float).ravel()
@@ -799,6 +801,10 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
                      "never entered the assembled system (the facet term / "
                      "boundary condition that integrates it is missing). Fix "
                      "the application; do not couple on")
+if SIDE == "neumann" and np.abs(np.sum(Fq, axis=0) - np.sum(t_line * W[:, None], axis=0)).max() \
+        > 1e-6 * max(1e-300, float(np.sum(np.abs(t_line) * W[:, None]))):
+    raise SystemExit(f"EXPORT SELF-CHECK: the interface forces sum to {np.sum(Fq, axis=0)}, the partner's "
+                     f"traction times W to {np.sum(t_line * W[:, None], axis=0)}: not the traction handed in")
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied load can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \

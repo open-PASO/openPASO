@@ -204,6 +204,10 @@ class CouplingResult:
     block_fixed_point: dict[str, float] = field(default_factory=dict)
     # and each block's estimated distance to its fixed point, from its last two steps
     block_distance: dict[str, float] = field(default_factory=dict)
+    # each block's last change against its own largest value, and its tiny entries' against
+    # theirs (see _scaled_change)
+    block_scale_change: dict[str, float] = field(default_factory=dict)
+    block_tiny_change: dict[str, float] = field(default_factory=dict)
     # participant -> "responsive" | "unresponsive" | "imports never changed"
     #              | "no imports declared"
     responsiveness: dict[str, str] = field(default_factory=dict)
@@ -338,6 +342,16 @@ def _stderr_tail(text: str, n: int = 300, most: int = 1500) -> str:
     return text[hits[-1].start():] if hits else text[-n:]
 
 
+def _output_tail(r) -> str:
+    """The stderr tail, and the stdout tail when stderr carried nothing. Measured on a coupled
+    elastic round: a participant that printed the solver's console (FEBio's error box) to stdout
+    and exited 1 was reported twice as "stderr tail: ''", the stop it printed nowhere in sight."""
+    err = _stderr_tail(r.stderr)
+    if (r.stderr or "").strip() or not (r.stdout or "").strip():
+        return err
+    return f"{err} -- stderr was empty; stdout tail: {_stderr_tail(r.stdout)}"
+
+
 def _persist_participant_output(p: Participant, result, iteration: int) -> None:
     """Atomically retain the latest native process output for attribution."""
     log = p.work_dir / "participant_output.log"
@@ -382,6 +396,33 @@ def _rel_change(new: np.ndarray, prev: np.ndarray) -> float:
     if not np.any(live):
         return 0.0
     return float(np.max(np.abs(new[live] - prev[live]) / mag[live]))
+
+
+def _scaled_change(new: np.ndarray, prev: np.ndarray, own_below: float = 1e-6) -> tuple:
+    """(the largest change of a block's entries against the block's largest value, the largest
+    change of its TINY entries against their own values); NaN where it cannot be formed.
+
+    THE WORST ENTRY AGAINST ITSELF IS NOT THE BLOCK'S PRECISION. An entry of one field that
+    holds a small share of its block's largest value -- an interface end, a flux passing through
+    zero -- reads a large relative change for an absolute one at the iteration's tolerance, and a
+    finer mesh puts an entry nearer zero. Measured on a right steady ladder: 1.1e-6, 3.7e-6 and
+    1.74e-4 at levels 1-3 from an entry holding 0.9 % of its block's largest value, and the ladder
+    read NOT VERIFIED three rounds running. So each entry is measured against the block's largest
+    value -- except an entry more than six orders below it, which is taken as another quantity in
+    the same array (a flat list of mixed quantities, the case _rel_change's entry-by-entry measure
+    exists for) and measured against itself. Entries zero to within the block's own range (below
+    1e-13 of the largest) are skipped, as there."""
+    if new.shape != prev.shape or new.size == 0:
+        return float("nan"), float("nan")
+    scale = max(float(np.max(np.abs(new))), float(np.max(np.abs(prev))))
+    if scale <= 0:
+        return 0.0, 0.0
+    mag = np.maximum(np.abs(new), np.abs(prev))
+    d = np.abs(new - prev)
+    tiny = (mag < own_below * scale) & (mag > 1e-13 * scale)
+    on_scale = float(np.max(d[~tiny])) / scale if np.any(~tiny) else 0.0
+    own = float(np.max(d[tiny] / mag[tiny])) if np.any(tiny) else 0.0
+    return on_scale, own
 
 
 def _blocks(ifd: InterfaceData) -> dict[str, np.ndarray]:
@@ -434,7 +475,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, f"participant {p.name} timed out"
     if not ep.exists():
         return None, (f"participant {p.name} wrote no exports.json "
-                      f"(rc={r.returncode}). stderr tail: {_stderr_tail(r.stderr)}")
+                      f"(rc={r.returncode}). stderr tail: {_output_tail(r)}")
     # Same rule as the loop: a solver that writes its last iterate and then
     # aborts has not answered the question, and a floor measured across crashed
     # runs is a floor on the crash, not on the sampling.
@@ -442,7 +483,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, (f"participant {p.name} exited with code {r.returncode} "
                       f"during a replicate run; its exports.json is the output "
                       f"of a FAILED run and cannot define a noise floor. "
-                      f"stderr tail: {_stderr_tail(r.stderr)}")
+                      f"stderr tail: {_output_tail(r)}")
     try:
         return InterfaceData.from_json(ep), None
     except Exception as e:
@@ -725,6 +766,8 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     block_residuals: dict[str, float] = {}
     block_fixed_point: dict[str, float] = {}
     block_distance: dict[str, float] = {}          # estimated distance to the fixed point
+    block_scale_change: dict[str, float] = {}      # the last change on the block's own scale
+    block_tiny_change: dict[str, float] = {}       # ... and of its tiny entries on their own
     step_hist: dict[str, list] = {}               # each block's last four steps
     # participant -> list of (imports digest, exports digest) per iteration
     trace: dict[str, list[tuple[str, str]]] = {p.name: [] for p in participants}
@@ -760,6 +803,8 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
         kw.setdefault("block_residuals", block_residuals)
         kw.setdefault("block_fixed_point", block_fixed_point)
         kw.setdefault("block_distance", block_distance)
+        kw.setdefault("block_scale_change", block_scale_change)
+        kw.setdefault("block_tiny_change", block_tiny_change)
         kw.setdefault("responsiveness", _responsiveness(trace, participants))
         kw.setdefault("responsiveness_detail", _responsiveness_detail(trace, participants))
         kw.setdefault("graph", graph)
@@ -905,7 +950,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
                                error=f"participant {p.name} wrote no exports.json "
-                                     f"(rc={r.returncode}). stderr tail: {_stderr_tail(r.stderr)}")
+                                     f"(rc={r.returncode}). stderr tail: {_output_tail(r)}")
             # A NON-ZERO exit code is a failed solve even when exports.json is
             # present: a solver that diverges often writes its last iterate and
             # then aborts. Continuing on that output produced a converged-looking
@@ -918,7 +963,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                                       f"{r.returncode} at iteration {it}; its "
                                       "exports.json is the output of a FAILED run "
                                       "and must not be coupled on. stderr tail: "
-                                      f"{_stderr_tail(r.stderr)}"))
+                                      f"{_output_tail(r)}"))
             try:
                 new_exports[p.name] = InterfaceData.from_json(ep)
             except Exception as e:
@@ -1072,6 +1117,9 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 pb = prev_blocks.get(n, {}).get(bname)
                 block_residuals[f"{n}.{bname}"] = (
                     _rel_change(arr, pb) if pb is not None else float("nan"))
+                (block_scale_change[f"{n}.{bname}"],
+                 block_tiny_change[f"{n}.{bname}"]) = (
+                    _scaled_change(arr, pb) if pb is not None else (float("nan"), float("nan")))
                 fp = (prelax or {}).get(bname)
                 block_fixed_point[f"{n}.{bname}"] = (
                     _rel_change(arr, fp) if fp is not None else float("nan"))

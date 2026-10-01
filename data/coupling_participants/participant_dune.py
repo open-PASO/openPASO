@@ -299,7 +299,7 @@ if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size 
 # LEADING NEWLINE is deliberate: a program that writes to the terminal
 # without a trailing newline glues its text onto the front of the next
 # line, and an X11 warning has done exactly that here, turning a correct
-# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 54'. Do not add a
+# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 113'. Do not add a
 # second one in front of the captured log: the FIRST such line in the file wins,
 # so a hand-written one overrides this real count.
 try:

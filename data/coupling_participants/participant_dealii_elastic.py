@@ -265,15 +265,34 @@ Path("dealii_input.txt").write_text("\n".join(lines) + "\n")
 for _old in ("dealii_interface.txt", "dealii_field.txt"):
     Path(_old).unlink(missing_ok=True)
 _if_out = Path("dealii_interface.txt").resolve()        # absolute paths: no cwd dependence
+import resource as _resource                     # what a killed run held, and how long it ran
+import time as _time
+_rss_before, _t_run = _resource.getrusage(_resource.RUSAGE_CHILDREN).ru_maxrss, _time.monotonic()
 r = subprocess.run([str(_exe.resolve()), str(Path("dealii_input.txt").resolve()), str(_if_out)],
                    capture_output=True, text=True)
+_t_run = _time.monotonic() - _t_run
 # THE PROGRAM'S OWN CONSOLE, passed through on every run: the per-level run log
 # is that console, and its `NDOF = <n>` line comes from the program.
 print(r.stdout, end="")
 sys.stderr.write(r.stderr)
-if r.returncode < 0:          # killed by a signal: a crash inside the program
+if r.returncode < 0:          # killed by a signal: a crash inside the program, or a stop from outside
     import re as _re
     import signal as _signal
+    if -r.returncode in (_signal.SIGKILL, _signal.SIGTERM):
+        # A SIGNAL FROM OUTSIDE IS NOT A CRASH (measured: a program whose hole 1 refined its mesh nx + ny
+        # times took all of the host's memory, and the kernel killed it after eight minutes; this text
+        # called that a crash inside the program and sent the run to a DEBUG build). What the run measured
+        # is said instead: how long it ran, the most memory it held, and whether it got past hole 1.
+        _rss = _resource.getrusage(_resource.RUSAGE_CHILDREN).ru_maxrss      # kB: the largest child's peak
+        sys.exit(f"the deal.II program was KILLED BY {_signal.Signals(-r.returncode).name} (return code "
+                 f"{r.returncode}) after {_t_run:.0f} s"
+                 + (f", holding {_rss / 2 ** 20:.1f} GB of memory at its peak" if _rss > _rss_before else "")
+                 + ": that signal comes from outside the program. The kernel sends SIGKILL to a program that "
+                   "takes the host's memory, and a time limit sends it too; a crash inside the program ends "
+                   "with SIGSEGV or SIGABRT instead, and a DEBUG build does not name this. "
+                 + ("It printed no 'NDOF = ' line: it was stopped before it numbered its dofs, in hole 1 or "
+                    "the served lines just after it." if "\nNDOF = " not in "\n" + r.stdout else
+                    "It printed its 'NDOF = ' line, so it got past hole 1; its last lines are above."))
     # THE MESSAGE SAYS WHICH BUILD CRASHED: a DEBUG build was told to turn DEBUG on (measured).
     _debug = _cml.is_file() and _re.search(r"^\s*target_compile_definitions\s*\([^)#]*\bDEBUG\b",
                                            _cml.read_text(), _re.M)
