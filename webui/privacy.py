@@ -37,9 +37,25 @@ _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-
 # such run — and the guard would then hide from the scrubber exactly what the
 # scrubber exists to remove. So only the values of the keys that carry encoded
 # data are protected, and everything else is scrubbed as prose.
-_ENCODED = re.compile(r'"(?:frames|mask|data|image)"\s*:\s*"[A-Za-z0-9+/=\s]{40,}"'
-                      r"|data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+")
-_LOOKS_ENCODED = re.compile(r"[A-Za-z0-9+/=\s]{40,}")
+_KEYED_VALUE = re.compile(r'"(?:frames|mask|data|image)"\s*:\s*"([^"\\]*)"')
+_DATA_URI = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+")
+
+# AND DECIDED ON THE WHOLE VALUE, the same way wherever a value is met: in a parsed object, in a
+# document, in a download streamed in pieces. Encoded data holds base64's characters from its first
+# to its last: A-Z a-z 0-9 + / and = (encoded blocks can be joined, so padding may stand inside). It
+# holds no space and none of "." "-" "_" ":" "~", one of which nearly every path and every sentence
+# holds; it is at least 40 characters long; and it does not begin where a home directory begins.
+# Anything else under these keys is text and is scrubbed as text. Judged by its first 64 characters,
+# or with spaces allowed, 'A' * 64 + ' /home/<user>/x' went out as it was (Copilot on the org PR:
+# first the object walk, then the streamed download; the whole-document path had the same hole),
+# and so did a long path a run wrote under "data" (measured on all three).
+_BASE64_TEXT = re.compile(r"[A-Za-z0-9+/=]{40,}")
+
+
+def is_encoded(value: str) -> bool:
+    """Whether `value`, met under one of the encoded keys, is encoded data to pass on untouched."""
+    return (_BASE64_TEXT.fullmatch(value) is not None
+            and _HOME_RE.match(value) is None and _ANY_HOME_RE.match(value) is None)
 
 
 def _scrub_prose(t: str) -> str:
@@ -62,23 +78,16 @@ def scrub_text(s: str) -> str:
     and was rewritten."""
     if not s:
         return s
+    # the two kinds cannot overlap: encoded data holds no ":" and a data: URI no quote
+    spans = sorted([m.span(1) for m in _KEYED_VALUE.finditer(s) if is_encoded(m.group(1))]
+                   + [m.span() for m in _DATA_URI.finditer(s)])
     out, last = [], 0
-    for m in _ENCODED.finditer(s):
-        out.append(_scrub_prose(s[last:m.start()]))
-        out.append(m.group(0))              # untouched
-        last = m.end()
+    for start, end in spans:
+        out.append(_scrub_prose(s[last:start]))
+        out.append(s[start:end])            # untouched
+        last = end
     out.append(_scrub_prose(s[last:]))
     return "".join(out)
-
-
-# STRICT base64, the whole value: its alphabet has no space, no "." "-" "_", padding only at the end,
-# and a length that is a multiple of four. The looser class above lets letters, "/" and spaces
-# through, so a home path matched it from end to end ('A' * 64 + ' /home/<user>/x' did).
-_STRICT_BASE64 = re.compile(r"[A-Za-z0-9+/]{38,}={0,2}")
-
-
-def _is_base64(value: str) -> bool:
-    return len(value) % 4 == 0 and _STRICT_BASE64.fullmatch(value) is not None
 
 
 # The keys whose values are encoded data. scrub_text() recognises them written
@@ -92,10 +101,8 @@ _ENCODED_KEYS = {"frames", "mask", "data", "image"}
 
 def scrub(obj, _key: str | None = None):
     if isinstance(obj, str):
-        # THE WHOLE VALUE, not its start (Copilot on the org PR): a value under one of these keys
-        # that only begins with encoded-looking characters, 'A' * 64 + ' /home/<user>/x', was
-        # returned unscrubbed. Encoded data is encoded data from its first character to its last.
-        if _key in _ENCODED_KEYS and _is_base64(obj):
+        # the whole value decides, by the one rule above
+        if _key in _ENCODED_KEYS and is_encoded(obj):
             return obj                      # the numbers a solver produced
         return scrub_text(obj)
     if isinstance(obj, list):

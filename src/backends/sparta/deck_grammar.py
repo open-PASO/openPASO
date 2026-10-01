@@ -84,6 +84,13 @@ refers to something not yet defined is an error.
     names `all`, a group read_surf made, or one `group <g> surf id <lo>:<hi>`
     made ('Surf_modify surface group is not defined'), and every element needs
     a wall model ('<N> surface elements not assigned to a collision model').
+  * `global nrho` IS A NUMBER DENSITY, molecules per m^3 (not a mass density,
+    not a count per cell), and `fnum` the molecules one simulated particle
+    stands for. `create_particles <mix> n 0` makes nrho x V / fnum particles, V
+    the flow volume (in 2-D the area: a 2-D cell has unit depth); `n N` makes N
+    in all, not per cell, and the gas is then N x fnum / V. DSMC collides the
+    particles of one grid cell with each other, so pick fnum = nrho x V /
+    (particles per cell x grid cells) for several in each cell.
   * `create_box` TAKES THREE PAIRS EVEN IN 2-D. The z pair is still required;
     give it a unit-thickness slab such as -0.5 0.5.
   * `create_grid`'s THIRD COUNT MUST BE 1 in two dimensions, or the run is

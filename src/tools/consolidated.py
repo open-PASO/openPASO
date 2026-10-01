@@ -3311,7 +3311,7 @@ _DECIDING_FACTS = {
     # ufl 2025.2.1) on 2026-09-03. repr-generated literal: the measured
     # text contains brace/quote sequences that hand-escaping kept
     # breaking.
-    "fenics": "1. `ufl.FiniteElement` NO LONGER EXISTS (dolfinx 0.10 / ufl 2025.2: AttributeError; the lowercase hint `ufl.finiteelement` is NOT what you want either). Build spaces the modern way -- fem.functionspace(mesh, ('Lagrange', 1)) with lowercase f, or basix.ufl.element('Lagrange', 'triangle', 1). Both measured working on this install.\n2. `LinearProblem` REQUIRES the keyword `petsc_options_prefix` on this install (TypeError without it). Measured working:\n       p = dolfinx.fem.petsc.LinearProblem(a, L, bcs=[bc],\n           petsc_options={'ksp_type': 'preonly', 'pc_type': 'lu'},\n           petsc_options_prefix='run')\n       uh = p.solve()\n   Its solver is the PUBLIC `p.solver`; touching `p._solver` raises AttributeError (one run died on exactly that).\n3. `ufl.Constant` TAKES A DOMAIN AND A SHAPE, NOT A VALUE: ufl.Constant(0.0) raises AttributeError: 'float' object has no attribute 'ufl_domain', and ufl.Constant(mesh, np.array([0.0, 0.0])) reads the array as the SHAPE (measured). A constant INSIDE a form is fem.Constant(mesh, value).\n4. THE RECTANGLE CONSTRUCTOR TAKES THE CORNERS AS A LIST OF POINTS AND THE COUNTS AS A SEQUENCE: dmesh.create_rectangle(MPI.COMM_WORLD, [[X0, Y0], [X1, Y1]], [NX, NY], dmesh.CellType.triangle) -- measured signature (comm, points, n, cell_type, ...). Building a unit square and rescaling domain.geometry.x by hand is not the same thing and a worker lost a run to it.\n5. SELECT DOFS WITH fem.locate_dofs_topological(V, fdim, facets) (facets from mesh.locate_entities_boundary(domain, fdim, marker), fdim = domain.topology.dim - 1) or fem.locate_dofs_geometrical(V, marker). IT RETURNS THE ARRAY ITSELF FOR ONE SPACE -- do NOT index it with [0]. Measured: for a single space the result is an ndarray of shape (n,), and [0] is the first dof NUMBER, so everything downstream silently becomes one point; only when you pass a LIST of two spaces does it return a pair of arrays. A worker lost a run to exactly that [0]. There is NO V.subset_dofs -- AttributeError, measured, and one run invented exactly that. The condition is fem.dirichletbc(value, dofs, V), the value of the space's shape -- np.zeros(gdim, dtype=default_scalar_type) on a vector space, where a plain number raises Rank mismatch between Constant and function space -- or fem.dirichletbc(g, dofs) for a Function (with V too: incompatible function arguments). A block of a mixed space takes the Function WITH the sub-space: V0, _ = W.sub(0).collapse(); fem.dirichletbc(g, fem.locate_dofs_topological((W.sub(0), V0), fdim, facets), W.sub(0)), g on V0; a constant there raises 'Constant size is not equal to the block size'. All measured.\n6. dolfinx is SILENT by default: before creating the mesh, call dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO) -- the DOLFINX_LOGLEVEL environment variable is NOT honoured, and a run whose console output stays empty cannot show which code ran.\n7. Evaluate a Function at arbitrary points with the bb-tree route: bb = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim); cand = dolfinx.geometry.compute_collisions_points(bb, pts); cells = dolfinx.geometry.compute_colliding_cells(mesh, cand, pts); then uh.eval(pts, first_cell_per_point). Nearest-DOF lookup is the export defect that turns a converged solve into a wrong answer.\n8. FIRST USE COMPILES TOO: dolfinx JIT-compiles every new form with ffcx (a minute or more the first time, more under load). A short `timeout` around that first run, or a pipe into `head`, kills it mid-compile and looks like a crash. Run each participant once standalone with a generous timeout before coupling; the cached modules make later runs start in seconds.\n9. `fem.VectorFunctionSpace` DOES NOT EXIST on this install (AttributeError, measured dolfinx 0.10): a vector P1 space is fem.functionspace(mesh, ('Lagrange', 1, (2,))), and in its array component c of node n sits at index 2*n + c (tabulate_dof_coordinates() has one row per node). A vector fem.Function is interpolated from a callable returning shape (2, n) -- np.vstack((fx, fy)) -- and its TRANSPOSE fails with 'Interpolation data has the wrong shape/size' (measured).\n10. UFL arguments have no `.geometric_dimension()` (AttributeError, measured ufl 2025.2): write ufl.Identity(2) for plane strain; ufl.sym(ufl.grad(u)) is the strain. fem.dirichletbc takes (Function, dofs) or (Constant, dofs, V) on a plain space -- a Constant WITHOUT the space as third argument is a TypeError (measured).\n11. INTERPOLATION IS A METHOD OF THE FUNCTION: f = fem.Function(V); f.interpolate(lambda X: <expression of X[0], X[1]>) with X the (3, n) coordinate array. There is NO module-level fem.interpolate(callable, V) (AttributeError, measured), and a lambda with two arguments (x, y) is a TypeError.\n12. UFL FORMS ARE PYTHON EXPRESSIONS: scalar products are ufl.inner(a, b) (or ufl.dot), products are `*`, integrals are `<integrand> * ufl.dx` and `<integrand> * ds_measure`; the strain is ufl.sym(ufl.grad(u)), the trace ufl.tr(...), the divergence ufl.div(u). There is no `.` operator between UFL objects: a form written as `ufl.grad(u) . ufl.grad(v)` is Python attribute access and dies with \"'Grad' object has no attribute 'ufl'\" (measured on a worker script).\n13. A MIXED (TAYLOR-HOOD) SPACE COMES FROM basix, AND EVERY LEGACY SPELLING IS GONE. Measured on this install (dolfinx 0.10 / basix 0.10 / ufl 2025.2): `ufl.MixedElement` and `ufl.VectorElement` both raise AttributeError: module 'ufl' has no attribute 'MixedElement' / 'VectorElement', and `fem.FunctionSpace` with a capital F is TypeError: FunctionSpace.__init__() missing 1 required positional argument: 'cppV'. What this install accepts:\n       Ve = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_v>, shape=(gdim,))\n       Qe = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_q>)\n       W  = fem.functionspace(mesh, basix.ufl.mixed_element([Ve, Qe]))\n   Reaching the components: ufl.split(w) on a fem.Function, ufl.TrialFunctions(W) / ufl.TestFunctions(W) for the arguments, and w.split() on the Function. W.sub(i).collapse() returns a PAIR (space, dof indices), not a space -- unpack it -- and W.split() does not exist (AttributeError, measured). A velocity-pressure pair needs deg_v > deg_q to be stable; picking them is yours.\n14. FACET TAGS ARE A LOWERCASE FUNCTION IN THE MESH MODULE. `fem.MeshTags(...)` and `dolfinx.MeshTags` are both AttributeError (measured dolfinx 0.10): the constructor is dolfinx.mesh.meshtags(mesh, dim, indices, values) with indices and values as int32 arrays, and you tag facets with dim = mesh.topology.dim - 1. Pass it to a measure as ufl.Measure('ds', domain=mesh, subdomain_data=<tags>) and integrate one tag with ds(<value>). MEASURED AND NOT REQUIRED: the indices do NOT have to be sorted -- a shuffled index array gives the same integral to the last bit on this install, so do not spend a step sorting them. A connectivity the topology has not built raises RuntimeError: 'Connectivity between dimension 0 and 2 has not been computed', and that message names its own fix -- call mesh.topology.create_connectivity(<from>, <to>) once before the lookup.\n15. ASSEMBLING BY HAND (fem.petsc), MEASURED ON dolfinx 0.10: a UFL form goes through fem.form(...) first -- a bare one raises AttributeError: 'Form' object has no attribute '_cpp_object'. assemble_matrix(a_form, bcs=[bc]) zeroes the bc rows AND columns, so the right-hand side needs all three: fem.petsc.apply_lifting(b, [a_form], bcs=[[bc]]), b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE), fem.petsc.set_bc(b, [bc]). On a linear test: without them the boundary AND interior are wrong (4, 3.6), set_bc alone fixes the boundary only (0, 3.6), all three give 3e-15. A Function's PETSc vector is uh.x.petsc_vec (Function.vector is gone, and a PETSc Vec has no petsc_vec). A number times dx needs the domain: fem.Constant(mesh, value) * ufl.dx, or ufl.dx(domain=mesh); 1.0 * ufl.dx raises ValueError: This integral is missing an integration domain.",
+    "fenics": "1. `ufl.FiniteElement` NO LONGER EXISTS (dolfinx 0.10 / ufl 2025.2: AttributeError; the lowercase hint `ufl.finiteelement` is NOT what you want either). Build spaces the modern way -- fem.functionspace(mesh, ('Lagrange', 1)) with lowercase f, or basix.ufl.element('Lagrange', 'triangle', 1). Both measured working on this install.\n2. `LinearProblem` REQUIRES the keyword `petsc_options_prefix` on this install (TypeError without it). Measured working:\n       p = dolfinx.fem.petsc.LinearProblem(a, L, bcs=[bc],\n           petsc_options={'ksp_type': 'preonly', 'pc_type': 'lu'},\n           petsc_options_prefix='run')\n       uh = p.solve()\n   Its solver is the PUBLIC `p.solver`; touching `p._solver` raises AttributeError (one run died on exactly that).\n3. `ufl.Constant` TAKES A DOMAIN AND A SHAPE, NOT A VALUE: ufl.Constant(0.0) raises AttributeError: 'float' object has no attribute 'ufl_domain', and ufl.Constant(mesh, np.array([0.0, 0.0])) reads the array as the SHAPE (measured). A constant INSIDE a form is fem.Constant(mesh, value).\n4. THE RECTANGLE CONSTRUCTOR TAKES THE CORNERS AS A LIST OF POINTS AND THE COUNTS AS A SEQUENCE: dmesh.create_rectangle(MPI.COMM_WORLD, [[X0, Y0], [X1, Y1]], [NX, NY], dmesh.CellType.triangle) -- measured signature (comm, points, n, cell_type, ...). Building a unit square and rescaling domain.geometry.x by hand is not the same thing and a worker lost a run to it.\n5. SELECT DOFS WITH fem.locate_dofs_topological(V, fdim, facets) (facets from mesh.locate_entities_boundary(domain, fdim, marker), fdim = domain.topology.dim - 1) or fem.locate_dofs_geometrical(V, marker). IT RETURNS THE ARRAY ITSELF FOR ONE SPACE -- do NOT index it with [0]. Measured: for a single space the result is an ndarray of shape (n,), and [0] is the first dof NUMBER, so everything downstream silently becomes one point; only when you pass a LIST of two spaces does it return a pair of arrays. A worker lost a run to exactly that [0]. There is NO V.subset_dofs -- AttributeError, measured, and one run invented exactly that. The condition is fem.dirichletbc(value, dofs, V), the value of the space's shape -- np.zeros(gdim, dtype=default_scalar_type) on a vector space, where a plain number raises Rank mismatch between Constant and function space -- or fem.dirichletbc(g, dofs) for a Function (with V too: incompatible function arguments). A block of a mixed space takes the Function WITH the sub-space: V0, _ = W.sub(0).collapse(); fem.dirichletbc(g, fem.locate_dofs_topological((W.sub(0), V0), fdim, facets), W.sub(0)), g on V0; a constant there raises 'Constant size is not equal to the block size'. All measured.\n6. dolfinx is SILENT by default: before creating the mesh, call dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO) -- the DOLFINX_LOGLEVEL environment variable is NOT honoured, and a run whose console output stays empty cannot show which code ran.\n7. Evaluate a Function at arbitrary points with the bb-tree route: bb = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim); cand = dolfinx.geometry.compute_collisions_points(bb, pts); cells = dolfinx.geometry.compute_colliding_cells(mesh, cand, pts); then uh.eval(pts, first_cell_per_point). Nearest-DOF lookup is the export defect that turns a converged solve into a wrong answer.\n8. FIRST USE COMPILES TOO: dolfinx JIT-compiles every new form with ffcx (a minute or more the first time, more under load). A short `timeout` around that first run, or a pipe into `head`, kills it mid-compile and looks like a crash. Run each participant once standalone with a generous timeout before coupling; the cached modules make later runs start in seconds.\n9. `fem.VectorFunctionSpace` DOES NOT EXIST on this install (AttributeError, measured dolfinx 0.10): a vector P1 space is fem.functionspace(mesh, ('Lagrange', 1, (2,))), and in its array component c of node n sits at index 2*n + c (tabulate_dof_coordinates() has one row per node). A vector fem.Function is interpolated from a callable returning shape (2, n) -- np.vstack((fx, fy)) -- and its TRANSPOSE fails with 'Interpolation data has the wrong shape/size' (measured).\n10. UFL arguments have no `.geometric_dimension()` (AttributeError, measured ufl 2025.2): write ufl.Identity(2) for plane strain; ufl.sym(ufl.grad(u)) is the strain. fem.dirichletbc takes (Function, dofs) or (Constant, dofs, V) on a plain space -- a Constant WITHOUT the space as third argument is a TypeError (measured).\n11. INTERPOLATION IS A METHOD OF THE FUNCTION: f = fem.Function(V); f.interpolate(lambda X: <expression of X[0], X[1]>) with X the (3, n) coordinate array. There is NO module-level fem.interpolate(callable, V) (AttributeError, measured), and a lambda with two arguments (x, y) is a TypeError.\n12. UFL FORMS ARE PYTHON EXPRESSIONS: scalar products are ufl.inner(a, b) (or ufl.dot), products are `*`, integrals are `<integrand> * ufl.dx` and `<integrand> * ds_measure`; the strain is ufl.sym(ufl.grad(u)), the trace ufl.tr(...), the divergence ufl.div(u). There is no `.` operator between UFL objects: a form written as `ufl.grad(u) . ufl.grad(v)` is Python attribute access and dies with \"'Grad' object has no attribute 'ufl'\" (measured on a worker script).\n13. A MIXED (TAYLOR-HOOD) SPACE COMES FROM basix, AND EVERY LEGACY SPELLING IS GONE. Measured on this install (dolfinx 0.10 / basix 0.10 / ufl 2025.2): `ufl.MixedElement` and `ufl.VectorElement` both raise AttributeError: module 'ufl' has no attribute 'MixedElement' / 'VectorElement', and `fem.FunctionSpace` with a capital F is TypeError: FunctionSpace.__init__() missing 1 required positional argument: 'cppV'. What this install accepts:\n       Ve = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_v>, shape=(gdim,))\n       Qe = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_q>)\n       W  = fem.functionspace(mesh, basix.ufl.mixed_element([Ve, Qe]))\n   Reaching the components: ufl.split(w) on a fem.Function in a form, ufl.TrialFunctions(W) / ufl.TestFunctions(W) for the arguments, and w.split() only to read the solved parts (in a residual it empties the Jacobian, measured). W.sub(i).collapse() returns a PAIR (space, dof indices), not a space -- unpack it -- and W.split() does not exist (AttributeError, measured). A velocity-pressure pair needs deg_v > deg_q to be stable; picking them is yours.\n14. FACET TAGS ARE A LOWERCASE FUNCTION IN THE MESH MODULE. `fem.MeshTags(...)` and `dolfinx.MeshTags` are both AttributeError (measured dolfinx 0.10): the constructor is dolfinx.mesh.meshtags(mesh, dim, indices, values) with indices and values as int32 arrays, and you tag facets with dim = mesh.topology.dim - 1. Pass it to a measure as ufl.Measure('ds', domain=mesh, subdomain_data=<tags>) and integrate one tag with ds(<value>). MEASURED AND NOT REQUIRED: the indices do NOT have to be sorted -- a shuffled index array gives the same integral to the last bit on this install, so do not spend a step sorting them. A connectivity the topology has not built raises RuntimeError: 'Connectivity between dimension 0 and 2 has not been computed', and that message names its own fix -- call mesh.topology.create_connectivity(<from>, <to>) once before the lookup.\n15. ASSEMBLING BY HAND (fem.petsc), MEASURED ON dolfinx 0.10: a UFL form goes through fem.form(...) first -- a bare one raises AttributeError: 'Form' object has no attribute '_cpp_object'. assemble_matrix(a_form, bcs=[bc]) zeroes the bc rows AND columns, so the right-hand side needs all three: fem.petsc.apply_lifting(b, [a_form], bcs=[[bc]]), b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE), fem.petsc.set_bc(b, [bc]). On a linear test: without them the boundary AND interior are wrong (4, 3.6), set_bc alone fixes the boundary only (0, 3.6), all three give 3e-15. A Function's PETSc vector is uh.x.petsc_vec (Function.vector is gone, and a PETSc Vec has no petsc_vec). A number times dx needs the domain: fem.Constant(mesh, value) * ufl.dx, or ufl.dx(domain=mesh); 1.0 * ufl.dx raises ValueError: This integral is missing an integration domain.",
     # Every line measured by execution on this install (dune-fem on
     # dune-py313) on 2026-09-03. repr-generated literal.
     "dune": "1. `ufl.Eq` NO LONGER EXISTS in this ufl (ImportError; five hits in one round). The lowercase `ufl.eq` does, and it is ONLY a conditional's test: ufl.conditional(ufl.eq(a, b), val_true, val_false). The equation handed to galerkin is written with Python's `==`: `scheme = galerkin([a == L, dbc], solver='cg')` -- passing `eq(a, L)` or a bare form dies with `ValueError: first argument should be a ufl equation (not only a form) or an 'integrands' model` (measured: one of three trial scripts read the `eq` line above as the equation builder).\n2. `DirichletBC` takes (functionSpace, value, subDomain=None) -- there is NO `marker` keyword (TypeError). Measured signature on this install.\n3. A VERTEX'S COORDINATES ARE vertex.geometry.center (or .corner(0)) -- there is no .geometry.point (AttributeError, measured; a run writing the 3-D side died on it). The dof array of a discrete function is u.as_numpy.\n4. A UFL Form HAS NO .copy() (AttributeError, measured). A form is immutable and cheap: build the second one by writing the expression again, e.g. keep the volume load as its own form rather than copying the full one.\n5. `scheme.solve(target=uh)` returns a DICT with keys converged, iterations, linear_iterations, timing -- read info['converged'], never info.converged (AttributeError on dict; one round hit it three times). Measured: a 4x4 Laplace solve returns converged=True with max|u| = 7.768e-02.\n6. Solver verbosity for a captured log: parameters={'linear.verbose': True} on galerkin(...) -- the old 'newton.linear.verbose' spelling is deprecated and warns.\n7. Create functions with a name -- space.interpolate(0.0, name='uh') -- because a plain UFL expression has no .name and downstream I/O that asks for one dies on AttributeError.\n8. FIRST USE COMPILES. 'DUNE-INFO: Compiling Integrands (new)' means dune-fem is JIT-compiling your UFL forms -- minutes on a loaded machine, and again for every new form. Do NOT wrap the run in a short `timeout` and do NOT pipe it into `head`: a PETSc 'Caught signal number 15 Terminate' printed after those lines means the process was killed from OUTSIDE (a timeout or a closed pipe), not that the solver crashed (measured: one run wrapped its participant in `timeout 120`, read the signal-15 message as 'DUNE crashes on every attempt' and gave up with a working install). Run each participant once standalone with a generous timeout so the compiled modules are cached; the coupling iterations then start in seconds.\n9. THE IMPORT LINES, EXACTLY -- COPY THIS BLOCK, DO NOT RECONSTRUCT IT. Every line below was executed on this install. Writing these by hand is the most expensive mistake made here: across 246 coupled runs on this machine, 141 of them raised an ImportError they had written themselves, 218 times in all, and each one costs a rewrite and a rerun.\n    import json\n    from pathlib import Path\n    import numpy as np\n    from dune.grid import structuredGrid, cartesianDomain\n    from dune.alugrid import aluConformGrid\n    from dune.fem import assemble, integrate\n    from dune.fem.space import lagrange\n    from dune.fem.scheme import galerkin\n    from dune.fem.function import uflFunction, gridFunction\n    from dune.ufl import DirichletBC, Constant\n    from ufl import (TrialFunction, TestFunction, SpatialCoordinate,\n                     FacetNormal, grad, inner, dot, div, dx, ds,\n                     conditional, lt, gt, le, ge, eq, And, Or,\n                     sin, cos, exp, sqrt, pi, as_vector)\n   THE THREE WRONG GUESSES THAT COST THE MOST, in order: `from ufl import abs` (71 times -- abs, min and max are NOT in ufl; Python's own built-ins work on a UFL expression), `from ufl import Eq` (45 -- only the lowercase `eq` exists, and the equation itself is written with Python's `==`), and `from dune.ufl import SpatialCoordinate` (39 -- it is in ufl; dune.ufl holds DirichletBC, Constant and cell, nothing else). Also measured absent: `dune.gdt` entirely, `aluConformGrid` in dune.grid (it is in dune.alugrid), `GridFunction` in dune.fem.function (the callables are `gridFunction` and `uflFunction`), and `SubDomain` in ufl. Of those two, `uflFunction(gridView, name=..., order=..., ufl=<expr>)` is DEPRECATED on this install and warns; the replacement takes its arguments in a different order -- `gridFunction(<expr>, gridView, name, order)`, expression FIRST (measured 2026-09-19).\n10. THE GRID CALL, EXACTLY: `gridView = structuredGrid([X0, Y0], [X1, Y1], [NX, NY])` -- lower corner, upper corner, cell counts, in that order (measured: a trial that passed the cell counts first died with `EquidistantOffsetCoordinates(...) Invoked with: array([6., 10.]), ...`).\n11. `abs`, `min`, `max` are NOT importable from ufl in this version (ImportError); the Python built-ins work on UFL expressions, and `ufl.conditional(ufl.lt(a, b), x, y)` is the branch.\n12. A grid entity has no `.index`: use `gridView.indexSet.index(entity)` (or `subIndex(entity, i, codim)` for its vertices); vertex coordinates come from `entity.geometry.center` / `corner(i)`, and the vertex-ordered nodal values of a Lagrange P1 function from `uh.as_numpy` (measured: `e.index` raises AttributeError on the generated Entity type).\n13. IN dune-fem's UFL THE SPACE CARRIES THE DOMAIN: `TrialFunction(space)`, `TestFunction(space)`, `SpatialCoordinate(space)`, and every integrand must contain one of them before `* dx` / `* ds`. Measured in three of three trial scripts: passing the grid gives `LeafGrid has no attribute ufl_domain`, a bare `dx` on a space-free expression gives `This integral is missing an integration domain`, and `space.domain` does not exist (`dimDomain` does).\n14. THE SPACE COUNTS ITS DOFS WITH .size (or len(space)) -- there is no space.dim and no space.dofCoordinates() (both AttributeErrors, measured; two runs writing the 3-D side died on exactly those two). Coordinates come from the grid, not the space: see the mesh access below.\n15. MESH ACCESS, EXACTLY (measured): `for v in gridView.vertices` / `for e in gridView.elements` iterate; `gridView.indexSet.index(v)` numbers a vertex and `gridView.indexSet.subIndex(e, i, 2)` numbers corner i of element e; `e.geometry.corners` is a TUPLE of the corner points (`len()` counts them) and `e.geometry.center` a point. There is no `gridView.entity(i)`, no `gridView.entitySet(...)`, no `gridView.corner(e, j)` and no `geometry.corner(i)` -- each was invented by a trial script and each raises AttributeError/TypeError. A SIMPLEX grid: `from dune.grid import cartesianDomain; from dune.alugrid import aluConformGrid; gridView = aluConformGrid(cartesianDomain([X0, Y0], [X1, Y1], [NX, NY]))` (6 x 10 -> 120 triangles, 77 vertices; `structuredGrid` makes 60 quadrilaterals). On this install a P1 Lagrange dof order equalled the vertex order on both grids, but never rely on it: map through interpolated coordinate fields.\n16. COEFFICIENTS GO IN AS `dune.ufl.Constant(value, name='k')`, never as a bare Python number: `0.0 * u * v * dx` (a zero reaction written as a float) folds to a domainless UFL Zero and dies with `This integral is missing an integration domain` (measured; the same fold hits a zero source).\n17. POWERS ARE `**`: `x[1]^2` is Python's XOR on a UFL expression and dies in as_tensor with `Expecting a tuple of Index objects` (measured).\n18. UFL CONDITIONS DO NOT COMBINE WITH `|` OR `&`: `lt(...) | lt(...)` dies with `unsupported operand type(s) for |: 'LT' and 'LT'` (measured). Build 0/1 indicators with `conditional(lt(abs(x[0] - X0), eps), 1, 0)`, ADD them for a union of edges, and take `1 - ind` for the complement (the outer boundary is `1 - <interface indicator>`); `ufl.Or(a, b)` / `ufl.And(a, b)` also exist. There is NO `SubDomain` in ufl (`from ufl import SubDomain` is an ImportError; two of three trial scripts reached for one) and none is needed: `DirichletBC(space, value, <that 0/1 UFL indicator>)` takes the indicator directly.",
@@ -3520,7 +3520,15 @@ _FSI_FACTS = {
         "order, and the area integral changed by exactly the stretch applied; compare "
         "V1.tabulate_dof_coordinates()[:, :gdim] with msh.geometry.x[:, :gdim] before relying on it."
         "\n21. assemble_scalar IS dolfinx.fem.assemble_scalar(fem.form(...)); dolfinx.fem.petsc has none "
-        "(AttributeError)."),
+        "(AttributeError)."
+        "\n22. A VELOCITY-PRESSURE SYSTEM IS FACTORED WITH 'pc_type': 'lu' AND 'pc_factor_mat_solver_type': "
+        "'mumps'. PETSc's own LU (no solver package named) meets the zero diagonal of the pressure block: "
+        "NonlinearProblem.solve() then RETURNS after 0 Newton iterations with reason -3 and w unchanged, "
+        "LinearProblem.solve() returns inf, and with 'ksp_error_if_not_converged': True it raises Zero pivot "
+        "in LU factorization. Measured on a Taylor-Hood channel: with mumps the same solve converged in 3 "
+        "iterations. The residual takes u, p = ufl.split(w); w.split() there leaves the Jacobian empty on "
+        "those rows (Matrix is missing diagonal entry 0 with PETSc's LU; reason -3 after 0 iterations with "
+        "mumps)."),
 }
 _FSI_FACTS["fenicsx"] = _FSI_FACTS["dolfinx"] = _FSI_FACTS["fenics"]
 _FSI_FACTS["fourc"] = (
@@ -3546,7 +3554,13 @@ _FSI_FACTS["fourc"] = (
     "no VTU. `node_gid` is written too only with NODE_GID: true."
     "\n20. A FUNCTn NO CONDITION LISTS IS EVALUATED NOWHERE: a deck with an unused FUNCT1 ran normally and "
     "gave the same displacement as one without it. The load a FUNCT builds reaches 4C only through the "
-    "condition's FUNCT: [..] entry for that component.")
+    "condition's FUNCT: [..] entry for that component."
+    "\n21. A STATICS DECK WITHOUT ITS OWN TOLERANCES JUDGES THE RESIDUAL ABSOLUTE: with no TOLRES, NORM_RESF "
+    "and NORMCOMBI_RESFDISP in STRUCTURAL DYNAMIC, 4C asks the displacement update below 1e-10 AND the "
+    "residual below 1e-8, both absolute. Measured on a plane-strain wall: the coarse mesh converged; "
+    "refined, the same linear solve stalled at a residual of about 2e-8 (round-off) and 4C stopped with "
+    "'The nonlinear solver did not converge!'. TOLRES: 1e-08 with NORM_RESF: \"Rel\" and "
+    "NORMCOMBI_RESFDISP: \"Or\" converged every mesh.")
 _FSI_FACTS["4c"] = _FSI_FACTS["fourc"]
 
 _DECIDING_UNIVERSAL = (
@@ -6685,7 +6699,10 @@ def register_consolidated_tools(mcp: FastMCP):
                q_n(x) / (-du/dn)(x)  ==  k   at every interface point,
 
            so the flux is a CONSTANT multiple of -du/dn whatever k is — and
-           POSITIVE. A NEGATIVE multiple means your normal points the
+           POSITIVE. That holds for one number k only: where a side's
+           config.json (or, where it states no k, its program) sets K as a
+           matrix, the flux takes in the derivative along the interface too,
+           and that side reads NOT_APPLICABLE. A NEGATIVE multiple means your normal points the
            wrong way: the task defines q_n = -(K grad u) . n_out with n_out
            pointing OUT of the subdomain. A flux far from every constant
            multiple, level after level, does not follow from the field you
@@ -6843,11 +6860,48 @@ def register_consolidated_tools(mcp: FastMCP):
         out = {"levels_seen": levels, "per_side": [], "per_level": [],
                "files_refused": refused}
 
+        # THE WORK DIR THE FILES CAME FROM: the sides' folders and their config.json sit below it
+        # (a file inside a side's own folder is one level deeper).
+        try:
+            _kwork = _RawPath(str(_under_cell(_split(interface_files)[0]))).parent
+            if (_kwork / "config.json").is_file() and not any(_kwork.glob("*/config.json")):
+                _kwork = _kwork.parent
+        except Exception:                                    # noqa: BLE001
+            _kwork = None
+        # A SIDE WHOSE CONDUCTIVITY IS A TENSOR IS NOT JUDGED BY THE CONSTANT-MULTIPLE TEST. With a
+        # full tensor K the outward flux -(K grad u) . n takes in the derivative along the interface
+        # as well, so q_n / (-du/dn) is not one constant there even for an exact flux. Measured on a
+        # coupled round: this check called both sides of right tensor results INCONSISTENT at every
+        # level while the audit of the same files abstained. Both now read one answer
+        # (result_audit._conductivity_forms: the side's config.json, and where that states no k, its
+        # program); a side whose conductivity no file states is judged as before.
+        try:
+            from tools.result_audit import _conductivity_forms as _kforms
+            _tensor_k = _kforms(_kwork)[0] if _kwork is not None else {}
+        except Exception:                                    # noqa: BLE001
+            _tensor_k = {}
+        _na = sorted({s for (_l, s) in iface if s in _tensor_k})
+        if _na:
+            out["flux_from_field_not_checked"] = (
+                f"THE SIGN AND FLUX-FROM-FIELD CHECKS DO NOT JUDGE {' AND '.join('SIDE ' + s for s in _na)} "
+                f"(NOT_APPLICABLE): " + "; ".join(f"{_tensor_k[s][0]}'s config.json {_tensor_k[s][1]}" for s in _na)
+                + ". With a full tensor K the outward flux -(K grad u) . n takes in the derivative along the "
+                "interface as well, so q_n / (-du/dn) is not one constant there even for a right flux, and "
+                "this check's constant-multiple test does not apply. The two-sided jump below still judges "
+                "the files.")
+
         # ---- check 1: sign and self-consistency, per side and level
         for lvl in levels:
             for side in ("A", "B"):
                 got = iface.get((lvl, side))
                 if got is None:
+                    continue
+                if side in _tensor_k:
+                    out["per_side"].append({
+                        "level": lvl, "side": side, "verdict": "NOT_APPLICABLE",
+                        "detail": (f"{_tensor_k[side][0]}'s config.json {_tensor_k[side][1]}: q_n / (-du/dn) "
+                                   f"is not one constant along the interface with a tensor K, so this "
+                                   f"side's flux sign and its ratio to the field are not judged")})
                     continue
                 ipts, _iv, iq = got
                 fld = fields.get((lvl, side))
@@ -8431,6 +8485,19 @@ def register_consolidated_tools(mcp: FastMCP):
                     _f = _fn(_ea, _eb, _names[0], _names[1])
                     if _f:
                         presub.append(_f)
+            # A CONVERGED HISTORY THAT FELL LESS THAN 10-FOLD is read as not coupled when it is
+            # handed in, so it is said here, while the level can still be run again. Measured on a
+            # coupled round: a history fell at every step to 1.14 times the noise floor its DSMC
+            # side set, this reply said CONVERGED -- SAVE IT NOW, and the hand-in audit said the
+            # residual barely moved, with most of the run's time left.
+            _fin = [float(_v) for _v in (r.history or [])
+                    if isinstance(_v, (int, float)) and _v == _v and abs(_v) != float("inf")]
+            if (r.converged and len(_fin) >= 2 and _fin[-1] > 0
+                    and _fin[0] / _fin[-1] < 10.0
+                    and all(_b <= _a for _a, _b in zip(_fin, _fin[1:]))):
+                presub.append({"sequence": "residual history", "finding": _ra._fell_too_little(
+                    _fin[0], _fin[-1], len(_fin) - 1, floor=getattr(r, "noise_floor", None),
+                    tol=getattr(r, "tol_effective", None) or tol)})
             # per-level files already written (this or an earlier couple call)
             _root = str(cell_root) if cell_root is not None else None
             if _root is None:
@@ -8505,6 +8572,16 @@ def register_consolidated_tools(mcp: FastMCP):
                             _st = _fourc_deck_state(_wd, _wd.parent)
                             if _st:
                                 _disk += f" ON DISK IN {_wd.name}: {_st['what']} {_st['brief']}"
+                            # 4C'S OWN CONSOLE, READ FOR A STOP WHOSE CAUSE IS MEASURED. Measured on a
+                            # fluid-structure round: the finest level's 4C run stopped with "did not
+                            # converge" on an absolute residual test; this lead quoted the stderr tail
+                            # alone and the level was given up.
+                            from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+                            _con = _wd / "participant_output.log"
+                            _ans = (fourc_stop_answer(_con.read_text(errors="ignore")[-200000:])
+                                    if _con.is_file() else "")
+                            if _ans:
+                                _disk += f" 4C'S CONSOLE IN {_wd.name}: {_ans}."
                 except Exception:                               # noqa: BLE001
                     _disk = ""
                 # A STOP ON WHAT THE PARTNER EXPORTED NAMES THE PARTNER. Measured: side A's
@@ -8782,7 +8859,20 @@ def register_consolidated_tools(mcp: FastMCP):
             elif _pde_notes and pde_check:
                 _pde_said = ("YOUR EQUATION CHECK DID NOT RUN: " + "; ".join(_pde_notes[:3]) + ". ")
             _unchecked = ""
-            if not pde_check and not _IN_LADDER.get():
+            # A 3-D PAIR IS NOT ASKED FOR A 2-D BOX. Measured on a coupled 3-D round: this reminder
+            # told both sides to state "the box x0, x1, y0, y1" so the equation check could judge
+            # them, while that check reads a field on a 2-D box and says NOT JUDGED IN 3-D whatever
+            # the config holds.
+            try:
+                _3d_sides = [p.name for p in parts if _ra._dumps_are_3d(Path(str(p.work_dir)))]
+            except Exception:                            # noqa: BLE001
+                _3d_sides = []
+            if not pde_check and not _IN_LADDER.get() and _3d_sides:
+                _unchecked = ("THE EQUATION CHECK DOES NOT JUDGE A 3-D SIDE: " + " and ".join(_3d_sides)
+                              + " carry a z coordinate in their dumps, and that check reads a field on a "
+                                "2-D box, so no level of theirs is checked against its own equation; no key "
+                                "in a config.json changes that. ")
+            elif not pde_check and not _IN_LADDER.get():
                 # NO LONGER "UNTIL YOU HAND OVER THE FOUR STRINGS": couple_levels and the
                 # hand-in audit judge each side from its own config.json and dumps. The weak
                 # identity needs three levels; one level's own discrete system decides only a
@@ -9395,7 +9485,15 @@ def register_consolidated_tools(mcp: FastMCP):
                    "interface to the task's interface points with np.interp on the coordinate the interface "
                    "runs along -- griddata refuses points that lie on one line), and its per-level run log from "
                    "participant_output_level<k>.log plus the NDOF line; the coupling histories are already "
-                   "at the history paths above. Then audit_results(work_dir) and the summary.")
+                   "at the history paths above. NO NaN GOES INTO A FILE: griddata(method='linear') returns NaN "
+                   "at a probe outside the convex hull of the dump's nodes, and a probe on the side's edge can "
+                   "miss that hull by round-off (measured: 1e-14 outside a unit-size box is enough); count "
+                   "them with np.isnan before you write. A probe that round-off put outside is inside at "
+                   "P + 1e-6 * (c - P), c the mean of the dump's nodes: evaluate it there, or with the side's "
+                   "own point evaluation (deal.II: VectorTools::point_value). A NaN that remains marks a probe "
+                   "the side's mesh does not reach -- outside the side's region, or in a part of it the mesh "
+                   "misses -- to fix, never to fill; inside the hull, griddata's triangles bridge such a gap "
+                   "and give a value that is not the field. Then audit_results(work_dir) and the summary.")
         else:
             bad = out_levels[-1]["level"] if out_levels else "?"
             nxt = (f"LEVEL {bad} DID NOT CONVERGE (or errored): read its what_to_fix_next and the "
@@ -9560,6 +9658,12 @@ def register_consolidated_tools(mcp: FastMCP):
             for _f in _own_flux(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
                 if not _f.get("informational"):          # an abstention note is no fault
                     _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 700))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import flux_sign_3d_findings as _sign3d
+            for _f in _sign3d(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 700))
         except Exception:                                    # noqa: BLE001
             pass
         try:

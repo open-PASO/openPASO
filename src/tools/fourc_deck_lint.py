@@ -272,6 +272,28 @@ def fourc_error_lines(log_text: str, n: int = 8) -> str:
     return ""
 
 
+# MEASURED ON THIS INSTALL (a plane-strain WALL deck, statics, no tolerances of its own): 4C's status
+# test then joins the update norm (< 1e-10) and the residual norm (< 1e-8), both "(Unscaled 2-Norm,
+# Absolute)", with AND; a refined mesh stalled at a residual of 1.9e-8 at round-off and 4C stopped
+# with "The nonlinear solver did not converge!". With TOLRES 1e-08, NORM_RESF "Rel" and
+# NORMCOMBI_RESFDISP "Or" the same decks converged. A fluid-structure cell lost its finest level to
+# exactly this, and no answer of ours named it.
+_ABSOLUTE_RESIDUAL = re.compile(r"F-Norm = [^\n]*\n\s*\(Unscaled 2-Norm, Absolute\)")
+
+
+def fourc_stop_answer(console: str) -> str:
+    """What a 4C stop in this console means, when its cause was measured on this install, or ''."""
+    text = console or ""
+    if "The nonlinear solver did not converge" in text and _ABSOLUTE_RESIDUAL.search(text):
+        return ("4C judged the residual ABSOLUTE (its status test prints '(Unscaled 2-Norm, Absolute)'): "
+                "with no TOLRES, NORM_RESF and NORMCOMBI_RESFDISP in STRUCTURAL DYNAMIC it asks the update "
+                "below 1e-10 AND the residual below 1e-8, and a refined mesh stalls at round-off above "
+                "that. Measured on this install: a linear plane-strain wall stopped exactly so when refined "
+                "and converged on every mesh with TOLRES: 1e-08, NORM_RESF: \"Rel\" and "
+                "NORMCOMBI_RESFDISP: \"Or\" in STRUCTURAL DYNAMIC")
+    return ""
+
+
 def python_stop_lines(log_text: str) -> str:
     """The last lines of a Python traceback in a captured console (the participant's own stop), or ''."""
     i = log_text.rfind("Traceback (most recent call last)")

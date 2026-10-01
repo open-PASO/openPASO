@@ -93,15 +93,16 @@ Q_INIT    = 0.0           # iteration-1 fallback interface flux
 #    next to this script overrides NX, NY and names the level; the per-level
 #    dumps below carry that level so the coarse levels survive the fine ones.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))   # a multi-level call's level keys
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 
 # ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). x0, x1, y0, y1, k, outer, full_outer_dirichlet
 #    (true or false) and source_expr (a string in x and y, `^` allowed) in config.json replace the
@@ -121,11 +122,7 @@ def _expr_fn(expr):
         env = dict(names); env["x"] = x; env["y"] = y
         return eval(code, {"__builtins__": {}}, env) + 0.0 * x
     return f
-try:
-    _cfg_all = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _cfg_all.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-except (ValueError, TypeError, json.JSONDecodeError):
-    _cfg_all = {}
+_cfg_all = _cfg   # config.json and OPENPASO_CONFIG_JSON, read and checked by the level rule above
 _FROM_CFG = []
 if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
     X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
@@ -654,7 +651,20 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0:
     _chk_got = np.asarray(r.array, float)[_chk_ids]
     _chk_top = float(np.abs(_chk_want).max(initial=0.0))
     _chk_gap = float(np.abs(_chk_got - _chk_want).max(initial=0.0))
-    if _chk_top > 0 and _chk_gap > 0.5 * _chk_top:
+    # A LOAD UNDER THE SOLVE'S OWN RESIDUAL CANNOT BE SEEN COMING BACK. On the rows that carry no
+    # interface load and no held value, r is the solve's own leftover. Measured on a coupled round:
+    # a partner sent a flux of ~1e-15, the load was 1.3e-15 against a Krylov leftover of 8e-6, and
+    # this check stopped a correct side, naming its load. It says what it measured instead.
+    _chk_hd = np.concatenate([np.asarray(_bc.dof_indices()[0], int) for _bc in bcs] + [np.zeros(0, int)])
+    _chk_in = np.setdiff1d(np.arange(len(r.array)), np.concatenate([_chk_hd, np.asarray(iface_dofs, int)]))
+    _chk_noise = float(np.abs(np.asarray(r.array, float)[_chk_in]).max(initial=0.0))
+    if _chk_top > 0 and _chk_top < 2.0 * _chk_noise:
+        print(f"NOTE: the flux this side applied is ~0 for its own system: its load int g phi_i ds "
+              f"reaches {_chk_top:.2e} on the interface rows, under twice what this solve leaves on "
+              f"its other free rows ({_chk_noise:.2e}), so whether it entered the solve is not "
+              f"measured. The partner's flux was at most {np.abs(_chk_qin).max():.2e}.",
+              file=sys.stderr)
+    elif _chk_top > 0 and _chk_gap > 0.5 * _chk_top:
         _chk_share = float(np.dot(_chk_got, _chk_want) / np.dot(_chk_want, _chk_want))
         raise SystemExit(
             f"EXPORT SELF-CHECK: the flux this side applied did not come back from its own system. "
@@ -711,14 +721,13 @@ try:
         for (_px, _py), _t, _q in zip(_exp_co, T, Q):
             _f.write(f"{float(_px):.11e},{float(_py):.11e},{float(_t):.11e},{float(_q):.11e}\n")
 except Exception as _dump_exc:
-    # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-    # before it fails, so a dump that died mid-way leaves a header-only
-    # CSV -- a file that looks like a submission and carries no rows.
+    # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+    # truncated file, a whole field file with no interface file, or a file an
+    # earlier run wrote, and any of them could be read as this level's result.
+    # So both of this level's files go, whatever they hold.
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
     print(f"[fenics per-level dump] level {LEVEL} dump failed: "

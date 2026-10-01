@@ -386,6 +386,32 @@ def scalar_flux_components(spec: dict) -> tuple:
                 f"than assume the transmitted flux is a scalar conduction flux")
 
 
+
+def _nonfinite_note(pairs, c):
+    """A NOT_ASSESSED entry for component `c` when the reported flux or the field's normal
+    derivative holds a value that is not finite, else None. Every comparison with a NaN is
+    False, so a NaN fell through to CONSISTENT (measured: one NaN among eight points of a flux
+    twice the derivative read CONSISTENT here, and an inf read CONSISTENT in the multiple)."""
+    nq = sum(1 for r, _g in pairs if not math.isfinite(float(r[c])))
+    ng = sum(1 for _r, g in pairs if not math.isfinite(float(g[c])))
+    if not (nq or ng):
+        return None
+    what = " and ".join(w for w in (
+        f"the reported flux holds {nq} NaN or infinite value{'s' if nq != 1 else ''}" if nq else "",
+        f"the field's normal derivative holds {ng} NaN or infinite value{'s' if ng != 1 else ''}"
+        if ng else "") if w)
+    return {"component": c, "verdict": "NOT_ASSESSED",
+            "detail": f"{what}: nothing is checked and nothing passes"}
+
+
+def _not_assessed_detail(per_comp) -> str:
+    """The overall NOT_ASSESSED detail: a component's own reason when it is the one about a
+    non-finite value, so the verdict says why nothing passed."""
+    for d in per_comp:
+        if "NaN or infinite" in d.get("detail", ""):
+            return d["detail"]
+    return "no component could be assessed"
+
 def flux_ratio_consistency(reported, dudn, spread_tol: float = 0.30,
                            floor_frac: float = 0.05, components=None):
     """Is the reported flux the agent's own field times a CONSTANT?
@@ -430,6 +456,10 @@ def flux_ratio_consistency(reported, dudn, spread_tol: float = 0.30,
     rep_rms = [_rms([abs(r[c]) for r, _g in pairs]) for c in range(ncomp)]
     per_comp = []
     for c in want:
+        _nf = _nonfinite_note(pairs, c)
+        if _nf:
+            per_comp.append(_nf)
+            continue
         # A REPORTED FLUX OF ZERO IS NOT A CONSTANT RATIO. Measured on real
         # submissions: C10_27b_BARE_seed4 and C1_27b_BARE_seed4 export fluxes
         # that are identically zero, so every ratio is 0/x = 0, the spread is
@@ -505,7 +535,7 @@ def flux_ratio_consistency(reported, dudn, spread_tol: float = 0.30,
             + ", ".join(f"{d['implied_coefficient']:.4g} (+/-{d['spread']:.1%})"
                         for d in ok))
     else:
-        verdict, detail = "NOT_ASSESSED", "no component could be assessed"
+        verdict, detail = "NOT_ASSESSED", _not_assessed_detail(per_comp)
     return {"verdict": verdict, "detail": detail, "per_component": per_comp,
             "spread_tolerance": spread_tol}
 
@@ -541,6 +571,10 @@ def flux_multiple_consistency(reported, dudn, rtol: float = 0.30,
             else list(range(ncomp)))
     per_comp = []
     for c in want:
+        _nf = _nonfinite_note(pairs, c)
+        if _nf:
+            per_comp.append(_nf)
+            continue
         q = [float(r[c]) for r, _g in pairs]
         g = [float(d[c]) for _r, d in pairs]
         qq, gg = sum(v * v for v in q), sum(v * v for v in g)
@@ -583,7 +617,7 @@ def flux_multiple_consistency(reported, dudn, rtol: float = 0.30,
             "constant, as it must be: implied coefficient "
             + ", ".join(f"{d['implied_coefficient']:.4g} (misfit {d['misfit']:.1%})" for d in ok))
     else:
-        verdict, detail = "NOT_ASSESSED", "no component could be assessed"
+        verdict, detail = "NOT_ASSESSED", _not_assessed_detail(per_comp)
     return {"verdict": verdict, "detail": detail, "per_component": per_comp,
             "misfit_tolerance": rtol}
 

@@ -37,15 +37,16 @@ nx, ny = 32, 32
 #    next to this script overrides nx, ny and names the level; the per-level
 #    dumps below carry that level so the coarse levels survive the fine ones.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))   # a multi-level call's level keys
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         nx = int(_cfg.get("nx", nx))
         ny = int(_cfg.get("ny", ny))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -256,14 +257,13 @@ def main() -> None:
             for y, t, q in zip(y_if, T_if, q_out):
                 _f.write(f"{float(X1):.11e},{float(y):.11e},{float(t):.11e},{float(q):.11e}\n")
     except Exception as _dump_exc:
-        # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-        # before it fails, so a dump that died mid-way leaves a header-only
-        # CSV -- a file that looks like a submission and carries no rows.
+        # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+        # truncated file, a whole field file with no interface file, or a file an
+        # earlier run wrote, and any of them could be read as this level's result.
+        # So both of this level's files go, whatever they hold.
         for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
             try:
-                if Path(_partial).is_file() and len(
-                        Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[kratos per-level dump] level {LEVEL} dump failed: "

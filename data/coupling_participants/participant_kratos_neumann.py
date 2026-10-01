@@ -116,10 +116,11 @@ def source(x, y):
 #       "source_expr": "<f(x, y), or 0.0>", "outer": <the non-interface value, if any>}
 #    openPASO judges this side's field against them; without them it abstains.
 LEVEL, _REACTION = 1, 0.0
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))   # a multi-level call's level keys
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
@@ -134,8 +135,8 @@ if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
         IFACE_X = {"left": X0, "right": X1}.get(_ifc, IFACE_X)
         IFACE_AXIS = "y" if _ifc in ("bottom", "top") else IFACE_AXIS
         _REACTION = float(_cfg.get("reaction") or 0.0)
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 
 AX = 0 if IFACE_AXIS == "x" else 1         # the coordinate the interface FIXES
 AL = 1 - AX                                # the coordinate that RUNS ALONG it
@@ -463,14 +464,13 @@ def main():
             for n, t, q in zip(_if_nodes, T, Q):
                 _f.write(f"{float(n.X):.11e},{float(n.Y):.11e},{float(t):.11e},{float(q):.11e}\n")
     except Exception as _dump_exc:
-        # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-        # before it fails, so a dump that died mid-way leaves a header-only
-        # CSV -- a file that looks like a submission and carries no rows.
+        # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+        # truncated file, a whole field file with no interface file, or a file an
+        # earlier run wrote, and any of them could be read as this level's result.
+        # So both of this level's files go, whatever they hold.
         for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
             try:
-                if Path(_partial).is_file() and len(
-                        Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[kratos_neumann per-level dump] level {LEVEL} dump failed: "

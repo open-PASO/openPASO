@@ -121,11 +121,13 @@ def _expr_fn(expr):
         env = dict(names); env["x"] = x; env["y"] = y
         return eval(code, {"__builtins__": {}}, env) + 0.0 * x
     return f
-try:
-    _cfg_all = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _cfg_all.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-except (ValueError, TypeError, json.JSONDecodeError):
-    _cfg_all = {}
+_cfg_all = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
+    try:
+        _cfg_all.update(**json.loads(_txt or "{}"))
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
     X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
 if str(_cfg_all.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
@@ -242,15 +244,14 @@ def sample(imp, key, fallback, y):
 #    at the foot of this file carry that level in their NAME, so a mesh study
 #    leaves one file per level instead of the fine mesh overwriting the coarse.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
-    try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-        LEVEL = int(_cfg.get("level", LEVEL))
-        NX = int(_cfg.get("nx", NX))
-        NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+_cfg = _cfg_all   # config.json and OPENPASO_CONFIG_JSON, read and checked above
+try:
+    LEVEL = int(_cfg.get("level", LEVEL))
+    NX = int(_cfg.get("nx", NX))
+    NY = int(_cfg.get("ny", NY))
+except (ValueError, TypeError) as _cfg_exc:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON: the level and the mesh keys nx, ny "
+                     f"could not be read ({_cfg_exc!r}); fix them, nothing was solved")
 
 # MAKE THIS CODE SPEAK, BEFORE THE SOLVE RUNS. It is silent by default, and a
 # per-level run log carrying no line the solver itself emitted cannot
@@ -552,14 +553,13 @@ try:
             _f.write(f"{_px:.11e},{_py:.11e},{float(_ux):.11e},"
                      f"{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
 except Exception as _dump_exc:
-    # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-    # before it fails, so a dump that died mid-way leaves a header-only
-    # CSV -- a file that looks like a submission and carries no rows.
+    # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+    # truncated file, a whole field file with no interface file, or a file an
+    # earlier run wrote, and any of them could be read as this level's result.
+    # So both of this level's files go, whatever they hold.
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
     print(f"[skfem_elastic per-level dump] level {LEVEL} dump failed: "

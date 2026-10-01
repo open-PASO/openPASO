@@ -41,7 +41,10 @@ The text below is the tool's own description, exactly as the AI model receives i
            q_n(x) / (-du/dn)(x)  ==  k   at every interface point,
     
        so the flux is a CONSTANT multiple of -du/dn whatever k is — and
-       POSITIVE. A NEGATIVE multiple means your normal points the
+       POSITIVE. That holds for one number k only: where a side's
+       config.json (or, where it states no k, its program) sets K as a
+       matrix, the flux takes in the derivative along the interface too,
+       and that side reads NOT_APPLICABLE. A NEGATIVE multiple means your normal points the
        wrong way: the task defines q_n = -(K grad u) . n_out with n_out
        pointing OUT of the subdomain. A flux far from every constant
        multiple, level after level, does not follow from the field you

@@ -169,11 +169,22 @@ PER_CODE_SIGNATURES = {
     ],
     # dealii::LogStream's `DEAL:` sigil plus the `::`-delimited prefix stack.
     # The wording is "Convergence step N value X", not "converged in N".
+    # THE LIBRARY'S VERSION LINE. The deal.II programs openPASO serves print, before
+    # anything else, deal.II's package name, version and git revision from the
+    # library's own headers through its log stream, at the empty prefix:
+    #     DEAL::deal.II 9.8.0-pre, git revision 87abfb5eef18ca4ff650c61fa1e0b1db10174765
+    # (measured on this install). With a direct solve that is the only line of
+    # deal.II's own in the console, and without this pattern such a side was
+    # proven by the code-agnostic NDOF line alone (measured on a steady coupled
+    # round: five of five cells). Narration does not take the form: the `DEAL::`
+    # sigil at the start of the line, the library's own spelling, and a hex
+    # revision of 7 to 40 digits.
     "dealii": [
         r"^DEAL:\w+::Convergence step (\d+) value [-\d.eE+]+$",
         r"^DEAL:\w+::Check (\d+)\t[-\d.eE+]+$",
         r"^DEAL:\w+::Starting value [-\d.eE+]+$",
         r"^\| Section\s+\| no\. calls \|\s+wall time \| % of total \|$",
+        r"^DEAL::deal\.II (\d+\.\d+\.\d+[\w.+-]*), git revision ([0-9a-f]{7,40})[ \t]*$",
     ],
     # 4C: pipe-delimited fixed field order with its own abbreviations
     # (nlniter/wct), Teuchos TimeMonitor rows labelled with 4C C++ namespace

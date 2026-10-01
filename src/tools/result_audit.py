@@ -780,6 +780,29 @@ def diverged_exports_findings(work: Path) -> list[dict]:
         "iterations: data that grow by a constant factor each step are that expansion.")}]
 
 
+def _fell_too_little(first: float, last: float, steps: int, floor=None, tol=None) -> str:
+    """The finding for a residual history that went down at every step and fell less than
+    10-fold: what stopped it is the noise floor of a sampled side or the tolerance, so it names
+    both, with the floor and the tolerance when the caller measured them."""
+    f = first / max(last, 1e-300)
+    head = (f"RESIDUAL BARELY MOVED: {first:.3g} -> {last:.3g}, a factor of {f:.2g}. Every one of "
+            f"its {steps} step(s) went down, so the iteration did not stand still; it stopped "
+            f"after that fall, and a history that falls less than 10-fold is read as not coupled. ")
+    if floor is not None and floor > 0:
+        return head + (
+            f"The noise floor couple() measured for this coupling is {floor:.3g} (replicate runs on "
+            f"the same imports differ by that much), and a history cannot fall below its floor, "
+            f"so from {first:.3g} it can fall at most {first / floor:.2g}-fold. For a side that "
+            f"samples (DSMC, Monte-Carlo), sampling more (more particles per cell, a longer "
+            f"averaging window) lowers the floor; then run the level again.")
+    return head + (
+        "If a side samples (DSMC, Monte-Carlo), couple() reports the noise floor it measured "
+        "(noise_floor): a history cannot fall below it, and sampling more (more particles per "
+        "cell, a longer averaging window) lowers it. Otherwise the iteration stopped at its "
+        "tolerance" + (f" ({tol:.3g})" if tol else "") + ", and a tighter tol lets it fall "
+        "further. Then run the level again.")
+
+
 def residual_findings(work: Path) -> list[dict]:
     """What the coupling residual history says about itself.
 
@@ -920,6 +943,14 @@ def residual_findings(work: Path) -> list[dict]:
                     "exchange: each side exports its OWN outward normal flux (the "
                     "two report opposite signs at the same point), and both "
                     "exchange the same interface points in the same order.")
+            # A HISTORY THAT WENT DOWN AT EVERY STEP DID NOT STAND STILL. Measured on a coupled
+            # round: six steps, every one down, to 1.14 times the noise floor its DSMC side set,
+            # were told "the iteration standing still". What stops such a history is its floor or
+            # its tolerance, and each has its own remedy.
+            if not ups and len(vals) >= 2:
+                out.append({"sequence": name, "values": [vals[0], vals[-1]],
+                            "finding": _fell_too_little(vals[0], vals[-1], len(vals) - 1)})
+                continue
             out.append({"sequence": name, "values": [vals[0], vals[-1]],
                         "finding": (
                             f"RESIDUAL BARELY MOVED: {vals[0]:.3g} -> "
@@ -2349,6 +2380,36 @@ def _worst_leg(rows: list) -> dict:
                 f"leg {r['leg']}: {_ratio_words(r)}" for r in rows)}
 
 
+def _conductivity_forms(work: Path) -> tuple:
+    """({side: (folder, how)} for the sides whose conductivity is a tensor, {side: folder} for the
+    sides whose conductivity no file states) -- read from each side's own config.json, and where
+    that states no k, from the side's own program (see _k_in_program). Sides are keyed by the
+    letter their folder stands for (side_A -> 'A'). The flux sign and flux-from-field checks of the
+    audit and verify_interface_flux read the same answer here."""
+    tensor: dict = {}
+    said, silent = set(), {}
+    for d in sorted({p.parent for p in work.glob("*/config.json")}
+                    | {d for d in _side_dirs(work) if (d / "config.json").is_file()}):
+        try:
+            cfg = json.loads((d / "config.json").read_text() or "{}")
+        except (OSError, ValueError):
+            continue
+        why = _k_tensor(cfg)
+        if why:
+            tensor.setdefault(_owner_side(d.name), (d.name, why))
+        elif not _k_unstated(cfg):
+            said.add(_owner_side(d.name))
+        else:
+            form, src = _k_in_program(d)
+            if form == "tensor":
+                tensor.setdefault(_owner_side(d.name), (d.name, f"states no k, and {src} there sets K as a matrix"))
+            elif form == "scalar":
+                said.add(_owner_side(d.name))
+            else:
+                silent.setdefault(_owner_side(d.name), d.name)
+    return tensor, {s: n for s, n in silent.items() if s not in said and s not in tensor}
+
+
 def interface_sign_findings(work: Path) -> list[dict]:
     """The interface flux sign, from the agent's OWN files. Coupled problems
     only.
@@ -2417,36 +2478,20 @@ def interface_sign_findings(work: Path) -> list[dict]:
     # is silent the side's own program is read (see _k_in_program): a matrix there is a tensor,
     # a number a scalar, and where neither says, the coefficient is unknown and nothing that
     # needs it is judged.
-    _tensor: dict = {}
-    _unknown: dict = {}
     try:
-        _said, _silent = set(), {}
-        for _d in sorted({p.parent for p in work.glob("*/config.json")}
-                         | {d for d in _side_dirs(work) if (d / "config.json").is_file()}):
-            try:
-                _cfg_d = json.loads((_d / "config.json").read_text() or "{}")
-            except (OSError, ValueError):
-                continue
-            _why_t = _k_tensor(_cfg_d)
-            if _why_t:
-                _tensor.setdefault(_owner_side(_d.name), (_d.name, _why_t))
-            elif not _k_unstated(_cfg_d):
-                _said.add(_owner_side(_d.name))
-            else:
-                _form, _src = _k_in_program(_d)
-                if _form == "tensor":
-                    _tensor.setdefault(_owner_side(_d.name), (
-                        _d.name, f"states no k, and {_src} there sets K as a matrix"))
-                elif _form == "scalar":
-                    _said.add(_owner_side(_d.name))
-                else:
-                    _silent.setdefault(_owner_side(_d.name), _d.name)
-        _unknown = {s: n for s, n in _silent.items() if s not in _said and s not in _tensor}
+        _tensor, _unknown = _conductivity_forms(work)
     except Exception:                                    # noqa: BLE001
         _tensor, _unknown = {}, {}
     tensor_skipped: set = set()
     unknown_skipped: set = set()
+    three_d_skipped: set = set()
     for (lvl, side), path in sorted(ifs.items()):
+        # A PLANE IS NOT READ ALONG x AND y. The field is read below with two coordinates, so
+        # a 3-D file's z would be taken for the field; such a level is left to the 3-D check of
+        # the sides' own dumps (flux_sign_3d_findings) and said so once.
+        if _csv_has_varying_z(path):
+            three_d_skipped.add(str(side).upper())
+            continue
         gi = _read_iface(path, _IF)
         if gi is None:
             continue
@@ -3184,8 +3229,21 @@ def interface_sign_findings(work: Path) -> list[dict]:
             "derivative along the interface as well. Without the coefficient neither the flux's "
             f"sign nor its ratio to the field is judged for {'that side' if len(_us) == 1 else 'those sides'}. "
             "The checks that compare the two sides' files still do.")})
+    if three_d_skipped:
+        # A 3-D INTERFACE IS NOT A MISSING FILE. Measured on a coupled 3-D result set with every
+        # level's field and interface file handed in: the branch below told it to "write the
+        # per-level field file ... and this check becomes available", while the check reads x and
+        # y only and no file makes it judge a plane.
+        out.append({"sequence": "interface flux sign", "values": [],
+                    "informational": True,
+                    "finding": (
+            "THE INTERFACE FLUX SIGN CHECK OF THE HANDED-IN FILES DOES NOT JUDGE A 3-D "
+            "INTERFACE: it reads q_n against -du/dn along x and y, and no file written on any "
+            "grid makes it judge a plane. Each side's flux against its own field is judged from "
+            "the side's own field_level<k>.csv and interface_level<k>.csv by the 3-D flux sign "
+            "check, which names a side whose flux has the wrong sign.")})
     # a side left unjudged for another reason is still said so, beside the note above
-    _left = {str(s).upper() for _l, s in ifs} - tensor_skipped - unknown_skipped
+    _left = {str(s).upper() for _l, s in ifs} - tensor_skipped - unknown_skipped - three_d_skipped
     if not out and assessed == 0 and (_left or _unknown_note is None):
         if vector_layout:
             # Say WHY, accurately. Measured: a correct thermo-mechanical
@@ -3802,6 +3860,16 @@ def ndof_ladder_findings(work: Path) -> list[dict]:
                         for c in cols[:1]):
             continue        # headerless: try the next file for a header
         break
+    # THE SIDES' OWN DUMPS SAY IT TOO. Measured on two coupled 3-D ladders read before any
+    # deliverable existed: no field file of the kind read above was on disk, the dimension
+    # stayed 2, and two right halvings (NDOF 6.54x and 7.19x) were called "NOT the halving ...
+    # halving gives ~4x" with the remedy to double every cell count.
+    if dim == 2:
+        try:
+            if any(_dumps_are_3d(d) for d in _side_dirs(work)):
+                dim = 3
+        except Exception:                                    # noqa: BLE001
+            pass
     lo, hi = (2.6, 6.0) if dim == 2 else (5.2, 12.0)
     factors: dict[str, list] = {}
     bad: list = []                     # (side, a, b, ndof_a, ndof_b, factor)
@@ -5465,6 +5533,142 @@ def own_field_flux_findings(work: Path, dirs=None, since=None, levels=None,
     return out
 
 
+def _flux_sign_3d(side_dir: Path, lvl: int):
+    """(verdict, misfit) of one 3-D side at one level: whether the flux in its own
+    interface_level<k>.csv is a constant multiple of -du/dn read from its own
+    field_level<k>.csv along the outward normal of its side of the interface plane
+    (blind_eval.interface.flux_multiple_consistency); None where the files cannot say: no
+    qn column, a field of more than one value column, a non-finite value, an interface that
+    is not one plane, a field that is not a tensor grid of nodes, or fewer than three points
+    left once the rim is out.
+
+    THE RIM AND THE RING NEXT TO IT ARE LEFT OUT, as the two end nodes and their neighbours
+    are on a 2-D interface: where the plane meets the outer faces a node's reaction carries
+    the outer face's flux too, and a one-sided derivative is least accurate there."""
+    import numpy as np
+    try:
+        from blind_eval import interface as _IF
+    except Exception:                                    # noqa: BLE001
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from blind_eval import interface as _IF
+        except Exception:                                # noqa: BLE001
+            return None
+    try:
+        hf, rf = _read_named_csv(side_dir / f"field_level{lvl}.csv")
+        hi, ri = _read_named_csv(side_dir / f"interface_level{lvl}.csv")
+    except (OSError, StopIteration):
+        return None
+    xyz = ("x", "y", "z")
+    if not (set(xyz) <= set(hf) and set(xyz) <= set(hi)) or "qn" not in hi \
+            or len(rf) < 27 or len(ri) < 9:
+        return None
+    vcols = [hf.index(c) for c in hf if c not in xyz]
+    if len(vcols) != 1:
+        return None                          # one scalar field, or this reading means nothing
+    vc = vcols[0]
+    F, I = np.asarray(rf, float), np.asarray(ri, float)
+    if not (np.isfinite(F).all() and np.isfinite(I).all()):
+        return None                          # a non-finite dump has its own finding
+    P = I[:, [hi.index(c) for c in xyz]]
+    X = F[:, [hf.index(c) for c in xyz]]
+    span = np.ptp(P, axis=0)
+    ax = int(np.argmin(span))
+    if span[ax] > 1e-9 * max(float(span.max()), 1e-30) or sorted(span)[1] <= 0:
+        return None                          # not one plane spanning two directions
+    plane = float(np.median(P[:, ax]))
+    outward = 1.0 if float(X[:, ax].mean()) < plane else -1.0
+    keep = np.ones(len(P), bool)
+    for a in (b for b in range(3) if b != ax):
+        u = np.unique(np.round(P[:, a], 9))
+        lay = 2 if len(u) > 6 else 1
+        if len(u) <= 2 * lay:
+            return None
+        c = np.round(P[:, a], 9)
+        keep &= (c > u[lay - 1]) & (c < u[-lay])
+    if keep.sum() < 3:
+        return None
+    dn = _IF.recover_normal_derivative([tuple(r) for r in X], [(float(v),) for v in F[:, vc]],
+                                       [tuple(r) for r in P[keep]], ax, plane, outward)
+    res = _IF.flux_multiple_consistency([(float(v),) for v in I[keep, hi.index("qn")]], dn)
+    comp = (res.get("per_component") or [{}])[0]
+    if not isinstance(comp.get("misfit"), (int, float)):
+        return None
+    return str(res.get("verdict")), float(comp["misfit"])
+
+
+def flux_sign_3d_findings(work: Path, dirs=None, since=None, levels=None,
+                          scan: bool = True) -> list[dict]:
+    """A 3-D side whose own flux has the opposite sign to the flux its own field carries.
+
+    EVERY OTHER CHECK OF A SIDE'S FIELD ABSTAINS IN 3-D (see _dumps_are_3d), and this one
+    needs neither the box nor the coefficient: an outward flux -k du/dn has the sign of
+    -du/dn wherever k > 0, so the flux a side writes is a POSITIVE multiple of -du/dn from its
+    own field. Measured on a coupled round: a Kratos side built its tetrahedra all negative
+    (the served Kuhn tuples on a hex numbered another way), its reaction flux came out with
+    the sign flipped and nothing printed, the partner applied it, and three levels converged
+    to a field whose error did not fall with the mesh, through couple() and couple_levels()
+    with no word on the sign. Measured over the fifteen 3-D sides on record (eleven with a
+    finite field and flux): it names that side at all three levels and one other side whose
+    tetrahedra were negative and overlapping, and none of the sides built on a tested mesh or
+    a DUNE grid. It reads a side whose interface is one plane and whose field is a tensor grid
+    of nodes; elsewhere it says nothing."""
+    out: list[dict] = []
+    seen, folders = set(), []
+    for d in list(dirs or []) + (_side_dirs(work) if scan else []):
+        try:
+            key = Path(d).resolve()
+        except OSError:
+            continue
+        if key not in seen and Path(d).is_dir():
+            seen.add(key)
+            folders.append(Path(d))
+    for d in folders:
+        if not _dumps_are_3d(d):
+            continue
+        flipped = []
+        for p in sorted(d.glob("field_level*.csv")):
+            m = re.fullmatch(r"field_level(\d+)\.csv", p.name)
+            if not m or (levels is not None and int(m.group(1)) not in levels):
+                continue
+            try:
+                _cut = _cutoff_for(d, since)
+                if _cut is not None and p.stat().st_mtime < _cut:
+                    continue                 # the last run's dump, not this one's
+                got = _flux_sign_3d(d, int(m.group(1)))
+            except Exception:                                # noqa: BLE001
+                got = None
+            if got and got[0] == "SIGN_CONVENTION":
+                flipped.append((int(m.group(1)), got[1]))
+        if not flipped:
+            continue
+        try:
+            name = str(d.relative_to(work))
+        except ValueError:
+            name = d.name
+        flipped.sort()
+        out.append({
+            "sequence": f"flux sign against own field {name}", "values": [m for _l, m in flipped],
+            "priority": 4,
+            "finding": (
+                f"SIDE {name}'S FLUX HAS THE OPPOSITE SIGN TO THE FLUX ITS OWN FIELD CARRIES: at "
+                f"level(s) {', '.join(str(l) for l, _m in flipped)} the qn column of its "
+                f"interface_level<k>.csv is a NEGATIVE multiple of -du/dn taken from its own "
+                f"field_level<k>.csv along the normal pointing out of its side of the interface "
+                f"(misfit of that multiple "
+                + " -> ".join(f"{m:.1%}" for _l, m in flipped)
+                + "; the rim of the interface and the ring next to it left out). An outward flux "
+                "-k du/dn has the sign of -du/dn wherever k is positive, so this flux is the "
+                "inward one, and a partner that applies it applies the opposite of what this "
+                "field carries: the coupling still converges, to a field that is wrong at every "
+                "level. This measures the sign, not its cause. Measured on this install: a Kratos "
+                "side whose tetrahedra all have negative volume returns the right field for the "
+                "data it holds and the reaction with its sign flipped, and prints nothing; a flux "
+                "written with the inward normal reads the same.")})
+    return out
+
+
 def nonfinite_field_findings(work: Path, dirs=None, since=None, levels=None,
                              scan: bool = True) -> list[dict]:
     """A side's own field dump holding NaN or inf.
@@ -5549,6 +5753,11 @@ def nonfinite_interface_findings(work: Path, dirs=None, since=None, levels=None,
         m = re.search(r"level_?(\d+)", q.name, re.I)
         if levels is not None and not (m and int(m.group(1)) in levels):
             continue
+        # A FILE THE RUN DELIVERED IS NOT THE SIDE'S DUMP: its NaN may come from the step that sampled
+        # it, and "run this side standalone" sent a run after a solve that was finite. It is named by
+        # nonfinite_deliverable_findings, with what the side's own dump of that level says.
+        if not _is_served_dump(q, work):
+            continue
         if dirs is not None and not scan and q.parent not in [Path(d) for d in dirs]:
             continue
         files.setdefault(q.parent, []).append(q)
@@ -5614,6 +5823,195 @@ def nonfinite_interface_findings(work: Path, dirs=None, since=None, levels=None,
     return out
 
 
+# THE FILES A RUN DELIVERS, NOT ONLY ITS PARTICIPANTS' DUMPS. Measured on a coupled run: both codes
+# proven, three levels coupled, and every delivered solution_level<k>_A.csv held NaN at the same probe
+# points. Its sampling script called griddata(method='linear'), which returns NaN at a probe outside the
+# convex hull of the nodes it is given, and that side's mesh did not reach those probes; an independent
+# reader refused the files. Nothing of ours had named it: nonfinite_field_findings reads the
+# participants' own field_level<k>.csv dumps, which were finite; the delivered field files were read only
+# by the self-convergence reader, which parses "nan" as a number, got a NaN difference between levels
+# and dropped that sequence without a word; and the ladder counted each level's files as written.
+_SERVED_DUMP = re.compile(r"^(?:field|interface)_level\d+\.csv$")
+
+
+def _is_served_dump(q: Path, work: Path) -> bool:
+    """A participant's own per-level dump: field_level<k>.csv or interface_level<k>.csv, no side
+    token, in a participant's folder (the served contracts write them there). Every other per-level
+    file is one the run delivered."""
+    if not _SERVED_DUMP.match(q.name) or q.parent == work:
+        return False
+    d = q.parent
+    try:
+        return ((d / "exports.json").is_file() or (d / "imports.json").is_file()
+                or (d / "config.json").is_file()
+                or any(".replaced-" not in p.name for p in d.glob("participant*.py")))
+    except OSError:
+        return False
+
+
+def _nonfinite_rows(q: Path):
+    """(header, data rows, rows holding a NaN or inf, the columns holding one, the coordinate rows of
+    those rows) of one CSV file; None when it cannot be read. A token that parses as a number and is
+    not finite counts; other text is left to the checks that read names and headers."""
+    try:
+        lines = [ln for ln in q.read_text(errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+
+    def _num(t):
+        try:
+            return float(t.strip().strip('"'))
+        except ValueError:
+            return None
+    first = [c.strip().strip('"') for c in lines[0].split(",")]
+    has_hdr = any(_num(c) is None for c in first)
+    hdr = [c.lower() for c in first] if has_hdr else []
+    body = lines[1:] if has_hdr else lines
+    coord = [hdr.index(c) for c in ("x", "y", "z") if c in hdr]
+    bad, cols, where = 0, [], []
+    for ln in body:
+        toks = ln.split(",")
+        vals = [_num(t) for t in toks]
+        hit = [i for i, v in enumerate(vals) if v is not None and not math.isfinite(v)]
+        if not hit:
+            continue
+        bad += 1
+        for i in hit:
+            name = hdr[i] if i < len(hdr) else f"column {i + 1}"
+            if name not in cols:
+                cols.append(name)
+        if len(coord) >= 2 and all(i < len(vals) and vals[i] is not None and math.isfinite(vals[i])
+                                   for i in coord):
+            where.append([vals[i] for i in coord])
+    return hdr, len(body), bad, cols, where
+
+
+def _side_folder(work: Path, side: str):
+    """The participant folder a side token names (side_A for A), when exactly one does."""
+    if not side:
+        return None
+    try:
+        hits = [d for d in _side_dirs(work)
+                if re.search(rf"(?:^|[_\-]|side){re.escape(side)}$", d.name, re.I)]
+    except OSError:
+        return None
+    return hits[0] if len(hits) == 1 else None
+
+
+def _nonfinite_where(work: Path, q: Path, level: int, side: str, role: str, where: list) -> str:
+    """What the side's own dump of that level says about a delivered file's non-finite rows, in one
+    measured sentence; '' when there is no dump to read."""
+    d = _side_folder(work, side)
+    dump = (d / f"{'interface' if role == 'interface' else 'field'}_level{level}.csv") if d else None
+    if dump is None or not dump.is_file():
+        return ""
+    try:
+        name = str(dump.relative_to(work))
+    except ValueError:
+        name = dump.name
+    got = _nonfinite_rows(dump)
+    if got is None:
+        return ""
+    hdr, n_nodes, bad_nodes, _c, _w = got
+    if bad_nodes:
+        return (f"{name}, that side's own dump of level {level}, holds NaN or inf at {bad_nodes} of "
+                f"{n_nodes} rows too, so the side's solve made it (named on its own).")
+    said = f"{name}, that side's own dump of level {level}, is finite, so the NaN came from the step that wrote this file"
+    if role == "interface" or not where:
+        return said + "."
+    try:
+        import numpy as np
+        from scipy.spatial import Delaunay
+        dims = ["x", "y", "z"] if "z" in hdr else ["x", "y"]
+        if len(where[0]) != len(dims) or not all(c in hdr for c in dims):
+            return said + "."
+        _h, rows = _read_named_csv(dump)
+        nodes = np.array([[r[_h.index(c)] for c in dims] for r in rows], float)
+        if len(nodes) < len(dims) + 1 or len(nodes) > 100000:
+            return said + "."
+        P = np.array(where, float)
+        tri = Delaunay(nodes)
+        # the coordinates a file prints are rounded: a probe the script held a hair outside the hull can
+        # print on it. So each row is moved a millionth of its distance to the nodes' centroid, inward and
+        # outward -- round-off is far smaller, a gap in a mesh far larger: still outside after the inward
+        # move, the mesh does not reach it; outside only after the outward move, it is on the hull's edge
+        # within round-off; inside after both, griddata over this dump gives it a value.
+        step = 1e-6 * (nodes.mean(0) - P)
+        far = tri.find_simplex(P + step) < 0
+        edge = ~far & (tri.find_simplex(P - step) < 0)
+    except Exception:                                       # noqa: BLE001  (Qhull refuses a flat set)
+        return said + "."
+    n, n_far, n_edge = len(P), int(far.sum()), int(edge.sum())
+    n_in = n - n_far - n_edge
+    parts = []
+    if n_far:
+        parts.append(f"{'all ' if n_far == n and n > 1 else ''}{n_far} of those {n} rows stay outside the convex "
+                     f"hull of that dump's nodes when moved toward the nodes' centroid by a millionth of the "
+                     f"distance -- farther than round-off, so that side's mesh does not reach them, and "
+                     f"griddata(method='linear') returns NaN there")
+    if n_edge:
+        parts.append(f"{'all ' if n_edge == n and n > 1 else ''}{n_edge} of those {n} rows lie on the hull's edge "
+                     f"within round-off, and griddata(method='linear') returns NaN even 1e-14 outside the hull, "
+                     f"so a probe on the side's edge gets NaN from round-off alone")
+    if n_in:
+        parts.append(f"{'all ' if n_in == n and n > 1 else ''}{n_in} of those {n} rows lie inside the hull, "
+                     f"where griddata(method='linear') over that dump gives a value, so their NaN did not come "
+                     f"from that call")
+    return said + ": " + "; ".join(parts) + "."
+
+
+def _nonfinite_deliverables(work: Path, levels=None) -> list[dict]:
+    """Every per-level field or interface file the run wrote, other than its participants' own dumps,
+    that holds a NaN or inf: file, level, side, counts and the columns."""
+    out = []
+    for q, kind, k, s in _level_files(work, "csv"):
+        if levels is not None and k not in levels:
+            continue
+        role = _csv_role(q, kind)
+        if role == "history" or _is_served_dump(q, work):
+            continue
+        got = _nonfinite_rows(q)
+        if not got or not got[2]:
+            continue
+        hdr, n, bad, cols, where = got
+        try:
+            rel = str(q.relative_to(work))
+        except ValueError:
+            rel = q.name
+        out.append({"path": q, "rel": rel, "level": k, "side": s,
+                    "role": "interface" if role == "interface" else "field",
+                    "rows": n, "bad": bad, "cols": cols, "where": where})
+    return out
+
+
+def nonfinite_deliverable_findings(work: Path, levels=None) -> list[dict]:
+    """A per-level field or interface file the run delivered holding NaN or inf, named file by file
+    with its count, and with what that side's own dump of the level says about where it came from."""
+    bad = _nonfinite_deliverables(work, levels=levels)
+    if not bad:
+        return []
+    listed = "; ".join(f"{t['rel']} at {t['bad']} of {t['rows']} rows (column {', '.join(t['cols'][:3])})"
+                       for t in bad[:6]) + (f"; and {len(bad) - 6} more file(s)" if len(bad) > 6 else "")
+    cause = ""
+    for t in bad:
+        cause = _nonfinite_where(work, t["path"], t["level"], t["side"], t["role"], t["where"])
+        if cause:
+            cause = f" Of {t['rel']}: {cause}"
+            break
+    return [{"sequence": "nonfinite deliverable", "values": [float(len(bad)), float(sum(t['bad'] for t in bad))],
+             "priority": 3, "finding": (
+        f"A PER-LEVEL FILE YOU WROTE HOLDS NaN OR inf: {listed}. A reader of the result cannot read such a file."
+        + cause
+        + " Write each file again so that no value is NaN or inf. A probe that round-off put outside the "
+        "hull of a side's nodes (one on the side's edge) is inside at P + 1e-6 * (c - P), c the mean of "
+        "the dump's nodes: evaluate it there, or with the side's own point evaluation. A probe the side's "
+        "mesh does not reach is never filled: it lies outside the side's region (keep only that side's "
+        "own probes), or the mesh misses part of the region the task gives that side (fix the mesh and "
+        "couple the levels again).")}]
+
+
 def exports_not_the_field_findings(work: Path, dirs=None, since=None, levels=None,
                                    scan: bool = True) -> list[dict]:
     """A side's interface dump does not carry its own field at the same points.
@@ -5671,6 +6069,12 @@ def exports_not_the_field_findings(work: Path, dirs=None, since=None, levels=Non
                 continue
             I = _np.asarray(ri, float)
             F = _np.asarray(rf, float)
+            # A DUMP HOLDING NaN IS NAMED BY ITS OWN CHECK (nonfinite_field_findings), not here.
+            # Measured on a coupled 3-D round: a field of NaN beside an interface trace of zeros
+            # made the scale below max(0.0, nan) = 0.0, and this check stopped the whole audit
+            # screen's line with ZeroDivisionError.
+            if not (_np.isfinite(I).all() and _np.isfinite(F).all()):
+                continue
             ci, cf = [hi.index(c) for c in coords], [hf.index(c) for c in coords]
             vi, vf = [hi.index(c) for c in vals], [hf.index(c) for c in vals]
             span = float(_np.ptp(F[:, cf], axis=0).max()) or 1.0
@@ -5820,6 +6224,30 @@ def _dumps_are_3d_uncached(d: Path) -> bool:
                             break
             except OSError:
                 continue
+    return False
+
+
+def _csv_has_varying_z(q) -> bool:
+    """Whether a csv's header names z and its z column varies (a 3-D file)."""
+    try:
+        with Path(q).open() as fh:
+            hdr = [h.strip().lower() for h in (fh.readline() or "").split(",")]
+            if "z" not in hdr:
+                return False
+            iz, first = hdr.index("z"), None
+            for i, line in enumerate(fh):
+                try:
+                    z = float(line.split(",")[iz])
+                except (IndexError, ValueError):
+                    continue
+                if first is None:
+                    first = z
+                elif abs(z - first) > 1e-12 * max(1.0, abs(first)):
+                    return True
+                if i > 20000:
+                    break
+    except OSError:
+        return False
     return False
 
 
@@ -8135,12 +8563,37 @@ def coupled_ladder(work: Path, converged_now: bool = False) -> dict | None:
                         "a = numpy.loadtxt('field_level<k>.csv', delimiter=',', skiprows=1); "
                         "v = scipy.interpolate.griddata(a[:, :2], a[:, 2], P, method='linear') with P the "
                         "(n, 2) probe points -- one such call per value column (a[:, 2], a[:, 3], ... for a "
-                        "field with several components, T then ux, uy for a thermo-elastic one); a NaN in v "
-                        "is a probe outside this side's subdomain (leave it to the other side); write x, y "
+                        "field with several components, T then ux, uy for a thermo-elastic one). griddata returns "
+                        "NaN at a probe outside the convex hull of the dump's nodes, and no NaN goes into a file: "
+                        "evaluate each NaN row again at P + 1e-6 * (a[:, :2].mean(0) - P), which brings in a probe "
+                        "that round-off put outside (one on the side's edge); a NaN that remains is a probe this "
+                        "side's mesh does not reach -- one outside its region (it belongs to the other side, not "
+                        "in this side's file) or a part of the region its mesh misses (fix the mesh) -- and is "
+                        "never filled. Write x, y "
                         "and the value columns in the task's order. Then each level's run log per side: a VERBATIM "
                         "copy of participant_output_level<k>.log next to that side's exports.json (never a summary). "
-                        "CHECK: every coupled level has both sides' field files, interface files and run logs, and "
-                        "audit_results(work_dir) reports no missing-fields and no run-log finding.", as_is=False)
+                        "CHECK: every coupled level has both sides' field files, interface files and run logs, none "
+                        "of them holds a NaN, and audit_results(work_dir) reports no missing-fields and no run-log "
+                        "finding.", as_is=False)
+        # A WRITTEN FILE IS NOT A READABLE ONE. Measured: every level's field file of one side held NaN
+        # at the probes its mesh did not reach, and this ladder counted the level as delivered and said
+        # "ARE COMPLETE ON DISK" (see _nonfinite_deliverables).
+        _nf = _nonfinite_deliverables(work, levels=set(done_levels))
+        if any(t["level"] == k for t in _nf):
+            _said = "; ".join(f"{t['rel']} at {t['bad']} of {t['rows']} rows" for t in _nf[:6]) + (
+                f"; and {len(_nf) - 6} more file(s)" if len(_nf) > 6 else "")
+            return step(4, f"THE DELIVERABLES OF LEVEL(S) {sorted({t['level'] for t in _nf})} HOLD NaN OR inf: "
+                           f"{_said}. A reader of the result cannot read such a file.",
+                        "Write each of these files again from that side's own per-level dumps "
+                        "(field_level<k>.csv and interface_level<k>.csv next to its exports.json) so that no value is "
+                        "NaN or inf: " + ", ".join(t["rel"] for t in _nf[:6]) + ". griddata(..., method='linear') "
+                        "returns NaN at a probe outside the convex hull of the nodes it is given: evaluate each NaN "
+                        "row again at the probe moved toward the nodes' centroid, P + 1e-6 * (a[:, :2].mean(0) - P), "
+                        "which brings in a probe that round-off put outside (one on the side's edge). A NaN that "
+                        "remains marks a probe the side's mesh does not reach: one outside that side's region (keep "
+                        "only its own probes) or a part of the region its mesh misses (fix the mesh and couple the "
+                        "levels again). Never fill such a row. CHECK: audit_results(work_dir) names no NaN or inf in "
+                        "any per-level file.")
         sides_l = set()
         for q in logs:
             if _level_of(q) != k or not _side_of(q):
@@ -8303,11 +8756,12 @@ def summary_names_findings(work: Path) -> list[dict]:
     return out
 
 
-# THE LINES A SOLVER LIBRARY PRINTS ITSELF THAT THE EVIDENCE TABLE DOES NOT LIST. The served
-# deal.II program prints deal.II's version and git revision, from the library's headers, through
-# deal.II's own log stream (`DEAL::deal.II 9.8.0-pre, git revision <sha>`). With a direct solve
-# it prints no other line of the library's, and the checks below called its console, passed
-# through verbatim, "your own summary" 15 to 23 times per cell of one coupled round (measured).
+# THE LINES A SOLVER LIBRARY PRINTS ITSELF, BEYOND THE EVIDENCE TABLE. The served deal.II program
+# prints deal.II's version and git revision, from the library's headers, through deal.II's own log
+# stream (`DEAL::deal.II 9.8.0-pre, git revision <sha>`). With a direct solve it prints no other line
+# of the library's, and the checks below called its console, passed through verbatim, "your own
+# summary" 15 to 23 times per cell of one coupled round (measured). The evidence table now takes
+# that line with a revision of 7 to 40 hex digits; this one also takes a build that prints none.
 LIBRARY_LINES = (r"^DEAL::deal\.II \d+\.\d+\.\d+[\w.+-]*, git revision [0-9a-f]*[ \t]*$",)
 
 
@@ -8614,7 +9068,9 @@ def audit(work_dir: str, claimed_order: float | None = None,
     findings.extend(_guarded("unsolved_field_findings", unsolved_field_findings, work))
     findings.extend(_guarded("nonfinite_field_findings", nonfinite_field_findings, work))
     findings.extend(_guarded("nonfinite_interface_findings", nonfinite_interface_findings, work))
+    findings.extend(_guarded("nonfinite_deliverable_findings", nonfinite_deliverable_findings, work))
     findings.extend(_guarded("own_field_flux_findings", own_field_flux_findings, work))
+    findings.extend(_guarded("flux_sign_3d_findings", flux_sign_3d_findings, work))
     findings.extend(_guarded("exports_not_the_field_findings", exports_not_the_field_findings, work))
     findings.extend(_guarded("completeness_findings", completeness_findings, work))
     findings.extend(_guarded("exact_ladder_findings", exact_ladder_findings, work))   # the provable one leads the band one
@@ -9003,6 +9459,11 @@ def deliverable_proof_due(work: Path, levels_done) -> list[dict]:
         out += completeness_findings(work, only_levels=lv, skip_participant_dirs=True)
     except Exception:                                    # noqa: BLE001
         pass
+    # A FILE THAT HOLDS NaN IS OWED AS MUCH AS A MISSING ONE: a reader of the result cannot read it.
+    try:
+        out += nonfinite_deliverable_findings(work, levels=lv)
+    except Exception:                                    # noqa: BLE001
+        pass
     # run_log_identity_findings IS DELIBERATELY NOT HERE, and it was in the
     # first draft. Measured against the recorded runs it spoke on more than a
     # quarter of the correct ones -- runs whose logs are 76 to 242 bytes of the
@@ -9125,6 +9586,10 @@ def field_quality_due(work: Path, levels_done, converged: bool | None = None) ->
         pass
     try:
         out += [f for f in own_field_flux_findings(work, levels=lv) if not f.get("informational")]
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        out += flux_sign_3d_findings(work, levels=lv)
     except Exception:                                    # noqa: BLE001
         pass
     try:

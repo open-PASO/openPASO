@@ -97,7 +97,7 @@ MOVE_MESH  = True        # SET False ONLY to suppress the structure->fluid direc
 LEVEL = 1
 try:
     _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+    _cfg.update(**json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
     LEVEL = int(_cfg.get("level", LEVEL))
     NX, NY = int(_cfg.get("nx", NX)), int(_cfg.get("ny", NY))
 except (ValueError, TypeError, AttributeError) as _cfg_exc:
@@ -460,12 +460,77 @@ def main():
                          "means the stress was never evaluated on the interface "
                          "facets. Fix the recovery; do not couple on")
 
+    # ── STRESS AND MOMENTUM SELF-CHECK ─ keep this block. Both compare the flow with the stress of an
+    #    incompressible Newtonian fluid of the edit block's MU, -p I + MU (grad u + grad u^T), which is
+    #    -p I + 2 MU sym(grad u). Measured over three agent-written fluid sides of coupled runs: each
+    #    carried half of its viscous part -- MU sym(grad u) as sigma, or MU sym(grad u):sym(grad v)
+    #    in the momentum form -- and the two that solved exported half the traction their own flow
+    #    gives with the full term (x2.00 and x1.99 when corrected); every check of the coupling
+    #    passed them. (1) sigma.n on the interface against that traction: the
+    #    same expression gives the same numbers, so a gap there is sigma's own. (2) the net force of
+    #    that stress over the whole boundary, less the momentum the flow carries out (and the step's
+    #    inertia when DT > 0): measured on the served flow at four meshes, with a moved interface, a
+    #    time step and a hundred times smaller MU, a solved flow left at most 0.7 % of the forces;
+    #    a momentum form with half the viscous term left 24-34 %, and a solve that returned after 0
+    #    Newton iterations 62-99 %.
+    _sv = MU * (ufl.grad(uh) + ufl.grad(uh).T)
+    _sn = -ph * ufl.Identity(gdim) + _sv
+    _said = []
+    try:                                   # MU as the edit block writes it, or a fem.Constant of it
+        _mu = f"{float(np.asarray(getattr(MU, 'value', MU), dtype=float).reshape(-1)[0]):g}"
+    except (TypeError, ValueError, IndexError):
+        _mu = str(MU)
+    _tv = ufl.dot(_sv, n)
+    _ts = ufl.dot(sigma + ph * ufl.Identity(gdim), n)
+    _vv = float(fem.assemble_scalar(fem.form(ufl.inner(_tv, _tv) * ds(4))))
+    if _vv > 0.0:
+        _gap = (float(fem.assemble_scalar(fem.form(ufl.inner(_ts - _tv, _ts - _tv) * ds(4)))) / _vv) ** 0.5
+        _scl = float(fem.assemble_scalar(fem.form(ufl.inner(_ts, _tv) * ds(4)))) / _vv
+        print(f"[fluid self-check] sigma.n beside the pressure: {_scl:.4g} x MU (grad u + grad u^T).n "
+              f"on the interface, gap {_gap:.2e}", flush=True)
+        if _gap > 0.05:
+            _said.append(
+                f"STRESS SELF-CHECK: on the interface, sigma.n beside the pressure is {_scl:.3g} times "
+                f"MU (grad u + grad u^T).n, with MU = {_mu} from the edit block, and differs from it by "
+                f"{_gap:.0%}. The stress of an incompressible Newtonian fluid is -p I + MU (grad u + "
+                f"grad u^T) = -p I + 2 MU sym(grad u): MU sym(grad u) is half of its viscous part. Use "
+                f"that stress in sigma and in the momentum form.")
+    _bal, _mag = [], []
+    for _i in range(gdim):
+        _flux = RHO_F * uh[_i] * ufl.dot(uh, n)
+        _f = float(fem.assemble_scalar(fem.form((ufl.dot(_sn, n)[_i] - _flux) * ufl.ds(domain=msh))))
+        _m = float(fem.assemble_scalar(fem.form((abs(ufl.dot(_sn, n)[_i]) + abs(_flux)) * ufl.ds(domain=msh))))
+        if DT > 0.0:
+            _f -= float(fem.assemble_scalar(fem.form((RHO_F / DT) * uh[_i] * ufl.dx(domain=msh))))
+            _m += float(fem.assemble_scalar(fem.form(abs((RHO_F / DT) * uh[_i]) * ufl.dx(domain=msh))))
+        _bal.append(_f)
+        _mag.append(_m)
+    _rel = [abs(_f) / _m if _m > 0.0 else 0.0 for _f, _m in zip(_bal, _mag)]
+    _c = int(np.argmax(_rel))
+    print(f"[fluid self-check] momentum balance of -p I + MU (grad u + grad u^T): "
+          + ", ".join(f"{'xyz'[_k]} {_r:.2e}" for _k, _r in enumerate(_rel)), flush=True)
+    if max(_rel) > 0.05:
+        _said.append(
+            f"MOMENTUM SELF-CHECK: the solved flow does not balance the stress -p I + MU (grad u + "
+            f"grad u^T) of the edit block's MU = {_mu}: over the whole boundary its net force in "
+            f"{'xyz'[_c]}, less the momentum the flow carries out"
+            + (" and the step's inertia" if DT > 0.0 else "")
+            + f", is {_rel[_c]:.0%} of the forces that make it up; a solved flow leaves its "
+            f"discretisation error. Measured on record, each left this: a momentum form whose viscous "
+            f"term was half of MU (grad u + grad u^T):grad(v) -- MU sym(grad u):sym(grad v), or "
+            f"MU sym(grad u):grad(v) -- and a flow solve that returned after 0 Newton iterations "
+            f"(reason -3) with w unchanged. Read the solve's converged reason "
+            f"(problem.solver.getConvergedReason() for a NonlinearProblem) and the viscous term of "
+            f"your form.")
+    if _said:
+        raise SystemExit(" ".join(_said) + " Nothing was exported; do not couple on")
+
 
     # PER-LEVEL PERSISTENCE: this level's whole flow field, at the nodes of the moved mesh, and its
     # interface data -- the reference coordinates, the displacement imposed there, the traction
     # exported -- named by LEVEL and never overwritten by the next level (exports.json is).
     # Interpolate THESE onto the points your task names. A DUMP DEFECT MUST NOT COST THE SOLVE:
-    # exports.json is written after them either way, and a half-written dump is removed.
+    # exports.json is written after them either way, and a failed dump keeps neither file.
     _dumps = (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv")
     try:
         def _at_nodes(value, space):
@@ -492,10 +557,9 @@ def main():
             for (_px, _py), (_dx, _dy), (_tx, _ty) in zip(ref_coords, d_iface, traction):
                 _f.write(f"{_px:.11e},{_py:.11e},{_dx:.11e},{_dy:.11e},{_tx:.11e},{_ty:.11e}\n")
     except Exception as _dump_exc:
-        for _partial in _dumps:
+        for _partial in _dumps:                     # both files or neither, whatever they hold
             try:
-                if Path(_partial).is_file() and len(Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[fsi-fluid per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "

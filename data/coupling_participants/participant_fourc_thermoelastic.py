@@ -24,9 +24,10 @@ from pathlib import Path
 
 import numpy as np
 
-CFG = json.loads(Path("config.json").read_text())
-# a multi-level coupling call hands this level's keys in OPENPASO_CONFIG_JSON instead of this file
-CFG.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+try:
+    CFG = {**json.loads(Path("config.json").read_text()), **json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}")}
+except (ValueError, TypeError) as _e:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON could not be read: {_e}")
 NX, NY = int(CFG["nx"]), int(CFG["ny"])
 X0, X1, Y0, Y1 = (float(CFG["x0"]), float(CFG["x1"]),
                   float(CFG["y0"]), float(CFG["y1"]))
@@ -495,11 +496,9 @@ except Exception as _dump_exc:
     print(f"[4C thermo-elastic per-level dump] level {_LVL} dump failed: "\
           f"{_dump_exc!r}. exports.json was already written, so the coupling\n"\
           f"continues, but this level has no field file to hand in.")
-    for _partial in (f"field_level{_LVL}.csv", f"interface_level{_LVL}.csv"):
+    for _partial in (f"field_level{_LVL}.csv", f"interface_level{_LVL}.csv"):   # both files or neither
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
 # THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its own (T, ux, uy per node), then the descriptive line.

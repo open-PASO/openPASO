@@ -147,7 +147,7 @@ MONITOR_REACTION = False  # ask 4C for the clamp reaction forces, so the applied
 LEVEL = 1
 try:
     _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+    _cfg.update(**json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
     LEVEL = int(_cfg.get("level", LEVEL))
     NXS, NYS = int(_cfg.get("nx", NXS)), int(_cfg.get("ny", NYS))
 except (ValueError, TypeError, AttributeError) as _cfg_exc:
@@ -382,6 +382,32 @@ def neumann_resultant(exprs):
     return out
 
 
+# ── HOLE NAMES IN WORDS ─ begin
+#   pwlin_expr  a function (xs, vs) returning the text of one 4C
+#          SYMBOLIC_FUNCTION_OF_SPACE_TIME expression in x that equals the
+#          piecewise-linear interpolant of the samples vs at the sorted points
+#          xs, held flat past both ends (the form the docstring writes out);
+#          the served lines put it in FUNCT1 / FUNCT2 and read its text back
+#          at the samples to report the fit
+#   poly_expr  a function (xs, vs, deg) returning the text of the
+#          least-squares polynomial in x of degree deg through the samples,
+#          for TRACTION_FIT = "poly"
+#   monitor  True when the 4C run that finished kept the reaction monitor
+#          (MONITOR_REACTION, and 4C accepted it), else False: the served
+#          lines read the monitor csv only then
+#   n_nodes  the number of nodes of the deck's mesh; NDOF is 2 * n_nodes
+#   wall   the wall time of the 4C run in seconds, a float
+#   r      the finished 4C run, what subprocess.run(..., capture_output=True,
+#          text=True) returned: its stdout, 4C's own console, is echoed below
+#          as this side's run log
+#   pts    the point coordinates of the last step's VTU,
+#          out-vtk-files/structure-<step>-0.vtu, an (m, 2) array of x, y with
+#          one row per VTU point (a node repeats once per element)
+#   dsp    the point array `displacement` of that VTU, its first two
+#          columns, an (m, 2) array in the rows of pts
+# ── HOLE NAMES IN WORDS ─ end
+
+
 def main():
     imp = read_imports() if FEEDBACK else None
     xs, vals = import_samples(imp, T_INIT, ncomp=2)
@@ -438,6 +464,12 @@ def main():
     pts = np.asarray(m.points)[:, :2]
     dsp = np.asarray(m.point_data["displacement"])[:, :2]
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+    # 4C's OWN CONSOLE, ECHOED (served): this script's stdout becomes the level's run log, and a run
+    # log is credited to 4C only by 4C's own lines, never by this script's summary. Measured on
+    # coupled runs: this contract printed its summary line alone, and three runs rebuilt their run
+    # logs by hand (one of them took 34 run-log findings and four minutes).
+    sys.stdout.write(r.stdout if isinstance(getattr(r, "stdout", None), str) else "")
 
     mask = np.abs(pts[:, 1] - Y0) < 1e-9
     if not mask.any():
@@ -535,7 +567,7 @@ def main():
     # interface data -- the displacement and the traction applied there -- named by LEVEL and never
     # overwritten by the next level (exports.json is). Interpolate THESE onto the points your task
     # names. A DUMP DEFECT MUST NOT COST THE SOLVE: exports.json is written after them either way,
-    # and a half-written dump is removed.
+    # and a failed dump keeps neither file.
     _dumps = (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv")
     try:
         # a 4C VTU repeats each node once per element: one row per node
@@ -549,10 +581,9 @@ def main():
             for _px, (_ux, _uy), (_tx, _ty) in zip(ux, D, t_applied):
                 _f.write(f"{_px:.11e},{float(Y0):.11e},{_ux:.11e},{_uy:.11e},{_tx:.11e},{_ty:.11e}\n")
     except Exception as _dump_exc:
-        for _partial in _dumps:
+        for _partial in _dumps:                     # both files or neither, whatever they hold
             try:
-                if Path(_partial).is_file() and len(Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[4C solid per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "

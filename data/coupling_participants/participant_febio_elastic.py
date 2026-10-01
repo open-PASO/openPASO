@@ -114,11 +114,13 @@ NX, NY    = 26, 26        # this subdomain's OWN mesh; need not match the partne
 #    x0, x1, y0, y1, iface ("left"|"right"|"bottom"|"top"|coordinate), iface_axis, E and nu
 #    (or lam and mu), udx, udy (4 coefficients of 1, x, y, y*y, or the 6 above), source_ux,
 #    source_uy (strings in x, y): they override the constants above, as the audit reads them.
-try:
-    _C = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _C.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-except (ValueError, TypeError, json.JSONDecodeError):
-    _C = {}
+_C = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
+    try:
+        _C.update(**json.loads(_txt or "{}"))
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 if all(_k in _C for _k in ("x0", "x1", "y0", "y1")):
     X0, X1, Y0, Y1 = (float(_C[_k]) for _k in ("x0", "x1", "y0", "y1"))
 if str(_C.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
@@ -178,15 +180,14 @@ LOG_E = "cpl_e.csv"        # sx, sxy per element (Neumann side only)
 # ── THE PER-LEVEL RULE (served). ./config.json {"level": k, "nx": .., "ny": ..}
 #    sets the mesh and names the level; the dumps below carry it in their NAME.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
-    try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-        LEVEL = int(_cfg.get("level", LEVEL))
-        NX = int(_cfg.get("nx", NX))
-        NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+_cfg = _C   # read and checked above
+try:
+    LEVEL = int(_cfg.get("level", LEVEL))
+    NX = int(_cfg.get("nx", NX))
+    NY = int(_cfg.get("ny", NY))
+except (ValueError, TypeError) as _cfg_exc:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON: level, nx or ny could not be read "
+                     f"({_cfg_exc!r}); nothing was solved")
 
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 def _n(v):
@@ -753,13 +754,12 @@ try:
               f"this level has no field to hand in. Add <node_data "
               f'data="x;y;z;ux;uy;uz" delim="," file="{LOG_F}"/> (no node_set) '
               f"inside <Output><logfile> and run this level again.")
+        raise FileNotFoundError(LOG_F)   # the handler keeps neither file
 except Exception as _dump_exc:
-    # Leave no header-only CSV behind: it looks like a submission.
+    # Both files or neither: half a pair could be read as this level's result.
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
     print(f"[febio_elastic per-level dump] level {LEVEL} dump failed: {_dump_exc!r}; "

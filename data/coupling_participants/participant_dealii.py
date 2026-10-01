@@ -102,12 +102,14 @@ def read_imports():
 #    string in x and y, `^` allowed). They override the constants above; the
 #    audit's equation check reads the same keys.
 LEVEL = 1
-try:
-    _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-    _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-    LEVEL, NX, NY = int(_cfg.get("level", LEVEL)), int(_cfg.get("nx", NX)), int(_cfg.get("ny", NY))
-except (ValueError, TypeError, AttributeError):
-    _cfg = _cfg if isinstance(locals().get("_cfg"), dict) else {}
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
+    try:
+        _cfg.update(**json.loads(_txt or "{}"))
+        LEVEL, NX, NY = int(_cfg.get("level", LEVEL)), int(_cfg.get("nx", NX)), int(_cfg.get("ny", NY))
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 if all(_k in _cfg for _k in ("x0", "x1", "y0", "y1")):
     X0, X1, Y0, Y1 = (float(_cfg[_k]) for _k in ("x0", "x1", "y0", "y1"))
 if str(_cfg.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
@@ -339,9 +341,13 @@ try:
             _f.write(_head + "\n" + "".join(",".join(f"{v:.11e}" for v in _row) + "\n" for _row in _data))
     print(f"[dealii {SIDE}] field_level{LEVEL}.csv: {len(_fld)} points")
 except Exception as _dump_exc:
+    # both files or neither: half a pair, a truncated file or an earlier run's file could
+    # be read as this level's result
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
-        if Path(_partial).is_file() and len(Path(_partial).read_text().splitlines()) <= 1:
-            Path(_partial).unlink()             # a header-only CSV looks like a submission
+        try:
+            Path(_partial).unlink(missing_ok=True)
+        except OSError:
+            pass
     print(f"[dealii per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "
           f"still written, but this level has no field file to hand in; run it again.")
 

@@ -1673,6 +1673,14 @@ def _fourc_run_check(command: str, output: str, workdir: Path) -> str:
         out += _deck_findings_text("[run check]", deck.name, findings, "in this deck")
     if err and not finished:
         out += "\n[run check] 4C's own stop: " + err.strip()
+    if not finished:
+        try:
+            from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+            _ans = fourc_stop_answer(console)
+            if _ans:
+                out += "\n[run check] " + _ans
+        except Exception:                                # noqa: BLE001
+            pass
     if finished:
         try:
             from tools.fourc_deck_lint import field_scale_findings   # noqa: PLC0415
@@ -1732,6 +1740,13 @@ def _fourc_after_shell_check(workdir: Path, started_at: float, command: str = ""
             if direct is not None and deck is not None and deck.resolve() == direct.resolve():
                 continue
             line = f"\n[run check] 4C stopped in {lg.relative_to(root)}: {err}"
+            try:
+                from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+                _ans = fourc_stop_answer(txt)
+                if _ans:
+                    line += "\n[run check] " + _ans
+            except Exception:                            # noqa: BLE001
+                pass
             if deck is not None:
                 findings = deck_judgement(deck.read_text(errors="ignore"))
                 real = [f for f in findings if not str(f).startswith("(section names not judged")]

@@ -1567,6 +1567,29 @@ def _interface_balance_core(export_a, export_b, label_a="A", label_b="B",
 ENDS_ONLY_MARK = "Interface flux imbalance at the interface ENDS only"
 
 
+def _plane_rim(pts):
+    """A mask of the points on the edge of a PLANAR interface that spans two directions (one
+    coordinate constant, two varying): the points at the least or greatest value of either
+    in-plane coordinate. None for a curve, a set that is not one plane, or a plane whose
+    inside would keep fewer than three points."""
+    try:
+        p = _np.atleast_2d(_np.asarray(pts, float))
+    except (TypeError, ValueError):
+        return None
+    if p.ndim != 2 or p.shape[1] < 3 or p.shape[0] < 9 or not _np.isfinite(p).all():
+        return None
+    span = _np.ptp(p[:, :3], axis=0)
+    ax = int(_np.argmin(span))
+    tan = [a for a in range(3) if a != ax]
+    if span[ax] > 1e-9 * max(float(span.max()), 1e-30) or min(span[a] for a in tan) <= 0:
+        return None
+    tol = [1e-9 * span[a] for a in range(3)]
+    rim = _np.zeros(len(p), bool)
+    for a in tan:
+        rim |= (p[:, a] <= p[:, a].min() + tol[a]) | (p[:, a] >= p[:, a].max() - tol[a])
+    return rim if (~rim).sum() >= 3 else None
+
+
 def _bent_ends(pts):
     """(first, last): the rows of `pts` at the two ends of a BENT curve, taken
     along the curve; None for a straight set, or one that is not one curve (the
@@ -1910,6 +1933,15 @@ def check_interface_flux_profile(export_a, export_b, label_a="A", label_b="B",
     # outer reaction -- so the end rows measured the convention, not the
     # exchange (measured: they alone drove a "does NOT shrink" verdict whose
     # interior read 6.2 / 11.7 / 5.3 %). The ends are named by the balance check.
+    # A PLANE IN 3-D HAS A RIM, NOT TWO ENDS. Where the interface spans two directions, every
+    # point on the edge of its extent meets an outer face, and leaving out two points left the
+    # rest of the rim in. Measured on a 3-D Dirichlet-Neumann ladder of two hand-written sides
+    # on matching meshes: the rim read 71 %, 75 % and 76 % at three levels and drove "does NOT
+    # shrink" and NOT VERIFIED, while the rest of the plane read 2.6 %, 3.2 % and 3.3 %.
+    _rim = _plane_rim(P) if len(A) >= 4 else None
+    if _rim is not None:
+        _keep = [i for i in range(len(A)) if not _rim[i]]
+        A, B, P = A[_keep], B[_keep], P[_keep]
     # THE ENDS ARE WHERE THE INTERFACE ENDS, NOT THE FIRST AND LAST ROWS. Where both sides leave
     # the end nodes out of their lists, the first and last rows are the nodes NEXT to the ends,
     # and leaving them out hid the one defect there: measured on a coupled round, a Neumann side
@@ -1917,7 +1949,7 @@ def check_interface_flux_profile(export_a, export_b, label_a="A", label_b="B",
     # segments, its flux missed its partner's by 16-19 % at the end-adjacent nodes at every
     # level, and this check passed every level. Where the caller knows the ends (the sides' own
     # mesh dumps), only rows at them are left out.
-    if len(A) >= 4:
+    elif len(A) >= 4:
         _ends = _bent_ends(P)
         _at = None
         if _ends is None and ends is not None:

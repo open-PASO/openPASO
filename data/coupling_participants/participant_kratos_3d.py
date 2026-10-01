@@ -154,16 +154,17 @@ NX, NY, NZ = 8, 8, 8         # this subdomain's OWN mesh; need NOT match the par
 #    study leaves one file per level instead of the fine mesh overwriting the
 #    coarse ones.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
         NZ = int(_cfg.get("nz", NZ))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 
 
 # Which outer faces carry a Dirichlet condition.  Names are "<axis><0|1>" with
@@ -913,14 +914,13 @@ def main():
                 _f.write(f"{float(_p[0]):.11e},{float(_p[1]):.11e},{float(_p[2]):.11e},"
                          f"{float(_t):.11e},{float(_q):.11e}\n")
     except Exception as _dump_exc:
-        # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-        # before it fails, so a dump that died mid-way leaves a header-only
-        # CSV -- a file that looks like a submission and carries no rows.
+        # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+        # truncated file, a whole field file with no interface file, or a file an
+        # earlier run wrote, and any of them could be read as this level's result.
+        # So both of this level's files go, whatever they hold.
         for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
             try:
-                if Path(_partial).is_file() and len(
-                        Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[kratos_ per-level dump] level {LEVEL} dump failed: "

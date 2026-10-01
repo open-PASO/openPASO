@@ -56,6 +56,22 @@ surfs"; a = 0 means every grid cell is inside a body, create_particles makes 0
 particles, and the run still exits 0 with every tally zero.  The PARTICLE
 SELF-CHECK below stops on that and on any run that ends with 0 particles.
 
+SURF_FILE IS THE INTERFACE AND NOTHING ELSE.  Every line in it takes the
+partner's temperature (TSURF_IN) and sends its flux to the partner.  A wall
+with its own temperature is a box face (boundary s, bound_modify <face> collide
+<id>) or a second read_surf after SURF_FILE's, with its own group, surf_collide
+and surf_modify.  The INTERFACE SELF-CHECK below stops on a line the partner's
+interface points do not lie along.
+
+THE GAS IN THE DECK.  `global nrho` is the gas's NUMBER density, molecules per
+m^3 (not a mass density, not a count per cell), and `global fnum` the number
+of molecules one simulated particle stands for.  `create_particles <mix> n 0`
+makes nrho x V / fnum particles, V the flow volume (in 2-D the area: SPARTA
+gives a 2-D cell unit depth); `create_particles <mix> n N` makes N particles in
+all, not per cell, and the gas is then N x fnum / V whatever nrho says.  DSMC
+collides the particles of one grid cell with each other, so each cell needs
+several.  The DECK SELF-CHECK and the PARTICLE SELF-CHECK below measure this.
+
 STOCHASTICITY.  DSMC output is a Monte-Carlo estimate.  With a fixed RNG seed
 and identical input the run is bit-reproducible (so a fixed-point iteration
 can appear to "converge" even when the physics has not); with a varying seed
@@ -212,6 +228,8 @@ def read_surf_elements():
                              f"it with no blank line)")
     lines.sort()
     cen = np.array([[0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])] for _, a, b in lines])
+    global SURF_LEN
+    SURF_LEN = np.array([np.hypot(b[0] - a[0], b[1] - a[1]) for _, a, b in lines])
     return len(lines), cen
 
 
@@ -317,6 +335,48 @@ def parse_dump(path, n):
     return a
 
 
+def deck_gas(text):
+    """What the deck's create_particles line makes, read the way SPARTA reads the deck: the nrho
+    and fnum in effect at that line (SPARTA's defaults are 1 and 1, and a mixture's own nrho wins
+    over the global one), the box's volume (in 2-D its area) and the line's own count. None when
+    the deck uses what this reading does not follow (a variable, a region, a density per cell,
+    cell weights, axisymmetry, more than one create_particles)."""
+    g, mix, box, dim, made, collide = {"nrho": 1.0, "fnum": 1.0}, {}, None, 3, [], False
+    for raw in text.splitlines():
+        t = raw.split("#")[0].split()
+        if not t:
+            continue
+        cmd, a = t[0], t[1:]
+        try:
+            if cmd == "dimension":
+                dim = int(a[0])
+            elif cmd == "boundary" and any("a" in x for x in a):
+                return None
+            elif cmd == "create_box":
+                box = [float(x) for x in a[:6]]
+            elif cmd == "global":
+                if "weight" in a:
+                    return None
+                for k in ("nrho", "fnum"):
+                    if k in a:
+                        g[k] = float(a[a.index(k) + 1])
+            elif cmd == "mixture" and "nrho" in a:
+                mix[a[0]] = float(a[a.index("nrho") + 1])
+            elif cmd == "collide":
+                collide = True
+            elif cmd == "create_particles":
+                if len(a) < 3 or a[1] != "n" or {"region", "density", "custom"} & set(a[3:]):
+                    return None
+                made.append({"mix": a[0], "n": int(a[2]), "nrho": mix.get(a[0], g["nrho"]),
+                             "fnum": g["fnum"]})
+        except (ValueError, IndexError):
+            return None
+    if len(made) != 1 or box is None or len(box) < 6 or made[0]["fnum"] <= 0:
+        return None
+    vol = (box[1] - box[0]) * (box[3] - box[2]) * ((box[5] - box[4]) if dim == 3 else 1.0)
+    return dict(made[0], dim=dim, volume=vol, collide=collide) if vol > 0 else None
+
+
 # ── THE BINARY (served) ─ keep this block. A bare name runs only from PATH, and a SPARTA
 #    built in a checkout is often not on it: measured, the placeholder name died on
 #    FileNotFoundError in two runs.
@@ -350,6 +410,33 @@ for f in (SURF_FILE, SPECIES, VSS):
 
 n_elem, cen = read_surf_elements()
 imp = read_imports()
+
+# ── INTERFACE SELF-CHECK (served) ─ keep this block. Every line of SURF_FILE takes the partner's
+#    temperature and sends its flux to the partner. Measured on a coupled round: a far wall listed
+#    in SURF_FILE took the partner's interface temperature, its own wall model was never bound,
+#    and the gas between two walls at one temperature carried almost no flux.
+_chk_pts = np.asarray((imp or {}).get("coordinates") or [], float)
+if _chk_pts.ndim == 2 and len(_chk_pts) >= 2 and _chk_pts.shape[1] >= 2 and len(cen):
+    _chk_pts = _chk_pts[:, :2]
+    _chk_h = float(np.median(np.linalg.norm(np.diff(_chk_pts, axis=0), axis=1)))
+    _chk_d = np.min(np.linalg.norm(cen[:, None, :] - _chk_pts[None, :, :], axis=2), axis=1)
+    for _a, _b in zip(_chk_pts[:-1], _chk_pts[1:]):           # and to the segments between them
+        _ab = _b - _a
+        if _ab @ _ab > 0:
+            _s = np.clip((cen - _a) @ _ab / (_ab @ _ab), 0.0, 1.0)
+            _chk_d = np.minimum(_chk_d, np.linalg.norm(_a + _s[:, None] * _ab - cen, axis=1))
+    _chk_off = np.where(_chk_d > np.maximum(0.5 * _chk_h, 0.25 * SURF_LEN))[0]
+    if _chk_off.size:
+        raise SystemExit(
+            f"INTERFACE SELF-CHECK: line(s) {', '.join(str(i + 1) for i in _chk_off[:8])} of "
+            f"{SURF_FILE} lie off the interface the partner sent: their midpoints are up to "
+            f"{_chk_d[_chk_off].max():.3g} from its {len(_chk_pts)} interface points (spaced "
+            f"{_chk_h:.3g}). Every line of {SURF_FILE} takes the partner's temperature through "
+            f"{TSURF_IN} and sends its flux to the partner, so {SURF_FILE} holds the interface lines "
+            f"and no other wall. A wall with its own temperature is a box face (boundary s, "
+            f"bound_modify <face> collide <id>) or a second read_surf after {SURF_FILE}'s, with its "
+            f"own group, surf_collide and surf_modify.")
+
 t_wall = sample_on(imp, "values", T_INIT, cen)
 write_tsurf(t_wall)
 
@@ -360,6 +447,38 @@ if ctr.is_file():
 ctr.write_text(str(it + 1))
 seed = SEED if SEED_MODE == "fixed" else SEED + 1000 * (it + 1)
 write_deck(seed)
+
+# ── DECK SELF-CHECK (served) ─ keep this block. It reads the gas the deck's create_particles
+#    line makes before SPARTA runs. Measured on a coupled round: decks that wrote nrho as a count
+#    per cell or as a mass density made 0 particles; one then switched to an explicit count and
+#    ran a gas hundreds of times thinner than its own density, another one tens of thousands of times
+#    denser, whose collisions kept SPARTA busy until the run was killed.
+_gas = deck_gas(Path(DECK).read_text())
+if _gas:
+    _V = f"{_gas['volume']:.4g} (the box's {'area' if _gas['dim'] == 2 else 'volume'})"
+    _made = _gas["nrho"] * _gas["volume"] / _gas["fnum"]
+    _what = (" nrho is the gas's number density, molecules per m^3 (not a mass density, not a count "
+             "per cell); fnum is how many molecules one simulated particle stands for. With n 0 "
+             "SPARTA makes nrho x V / fnum particles, V the flow volume (in 2-D the area: a 2-D cell "
+             "has unit depth), so fnum = nrho x V / (particles per cell x grid cells) gives that many "
+             "in each cell.")
+    if _gas["n"] == 0 and _made < 1.0:
+        raise SystemExit(
+            f"DECK SELF-CHECK: create_particles {_gas['mix']} n 0 makes nrho x V / fnum particles, "
+            f"and with the nrho {_gas['nrho']:.4g} and fnum {_gas['fnum']:.4g} in effect at that line "
+            f"(SPARTA's defaults are 1 and 1 when no global line sets them before it) and V = {_V} "
+            f"that is {_made:.3g}: SPARTA would create no particle and run an empty box." + _what)
+    if _gas["n"] > 0:
+        _dens = _gas["n"] * _gas["fnum"] / _gas["volume"]
+        _apart = (max(_dens / _gas["nrho"], _gas["nrho"] / _dens) if _gas["nrho"] > 0
+                  else float("inf"))
+        if _apart > 10.0:
+            raise SystemExit(
+                f"DECK SELF-CHECK: create_particles {_gas['mix']} n {_gas['n']} makes {_gas['n']} "
+                f"particles in all, not per cell. With fnum {_gas['fnum']:.4g} they are a gas of "
+                f"N x fnum / V = {_dens:.4g} molecules per m^3 (V = {_V}), while the nrho in effect "
+                f"at that line is {_gas['nrho']:.4g}: the deck states two densities {_apart:.3g} "
+                f"times apart." + _what)
 
 # ── THE RUN (served) ─ keep this block. SPARTA's console is passed through: the
 #    per-level run log your task asks for is that console, and a log carrying only
@@ -405,12 +524,46 @@ if _chk_np and int(_chk_np[-1]) == 0:
            "gas has room; " if _chk_cells else "")
         + (f"create_particles made {_chk_made[-1]} particles. " if _chk_made else
            "no create_particles line ran. ")
-        + ("With 'Created 0 particles', the count comes from 'global nrho <n> fnum <F>', which "
-           "must come before create_particles (after it, or left out, SPARTA uses nrho = 1 and "
-           "fnum = 1). " if _chk_made and int(_chk_made[-1]) == 0 else
+        + ("With 'Created 0 particles': create_particles <mix> n 0 makes nrho x V / fnum "
+           "particles, V the flow volume, with the nrho and fnum in effect at that line. SPARTA's "
+           "defaults 1 and 1 hold when no 'global nrho <n> fnum <F>' comes before it, and a nrho "
+           "written as a mass density or as a count per cell makes the count fall below one "
+           "(nrho is molecules per m^3). " if _chk_made and int(_chk_made[-1]) == 0 else
            "None of them was left at the end; the end-of-run lines 'Boundary exits' and "
            "'Particles stuck' count where they went. " if _chk_made else "")
         + "Read the console above before changing anything else.")
+# THE GAS THIS RUN SIMULATED, from SPARTA's own console: particles, grid cells and, with the
+# deck's fnum, the density N x fnum / V. A deck with a collide command whose run made no
+# collision attempt ran a collisionless gas: measured on a coupled round, far fewer particles
+# than grid cells (two particles share a cell too rarely), and a hundred particles per cell that
+# stood for a gas whose nrho was written as a mass density (a near vacuum); both coupled to a
+# wrong flux.
+_chk_grid = re.findall(r"^Created (\d+) child grid cells", _chk_con, re.M)
+_chk_fv = re.findall(r"^\s*\S+\s+(\S+) = cell-wise and global flow volume", _chk_con, re.M)
+_chk_att = re.findall(r"^Collide attempts\s*=\s*(\d+)", _chk_con, re.M)
+if _chk_np and int(_chk_np[-1]) > 0:
+    _n = int(_chk_np[-1])
+    _cells = int(_chk_grid[-1]) if _chk_grid else 0
+    _gasline = f"GAS: {_n} particles" + (f" in {_cells} grid cells ({_n / _cells:.3g} per cell)"
+                                         if _cells else "")
+    if _gas:
+        try:
+            _vol = float(_chk_fv[-1]) if _chk_fv else _gas["volume"]
+        except ValueError:
+            _vol = _gas["volume"]
+        _gasline += (f", each standing for fnum = {_gas['fnum']:.4g} molecules: a gas of N x fnum / V"
+                     f" = {_n * _gas['fnum'] / _vol:.4g} molecules per m^3 (V = {_vol:.4g}, the flow "
+                     f"volume)")
+    print("\n" + _gasline)
+    _collides = any(l.split("#")[0].split()[:1] == ["collide"] for l in Path(DECK).read_text().splitlines())
+    if _collides and _chk_att and int(_chk_att[-1]) == 0:
+        raise SystemExit(
+            f"PARTICLE SELF-CHECK: SPARTA made 0 collision attempts in this run although the deck "
+            f"has a collide command, so its gas never collided: it ran as a free-molecular gas. "
+            f"{_gasline}. SPARTA tries pairs of particles of one grid cell, so a cell with one "
+            f"particle or none makes no pair, and the pairs it tries grow with the gas's density. "
+            f"Compare that density with your gas's number density, and the count per cell with "
+            f"several, before you couple this side.")
 # THE RUN-LOG CONTRACT LINE, in this code's own currency. A DSMC cell refines by
 # PARTICLE COUNT on a fixed grid, not by adding cells, so the `NDOF = <integer>`
 # line the log contract asks for carries the particle count SPARTA reported at the

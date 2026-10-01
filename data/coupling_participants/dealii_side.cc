@@ -463,8 +463,14 @@ int main(int argc, char **argv)
     // are the two edges the interface ends on when in.full_outer is 1 (when
     // it is 0 they are free). On the Dirichlet role every interface dof is
     // held at partner.value of its support point, on the Neumann role none
-    // is. An interface end that lies on a held edge is held too: at either
-    // value on the Dirichlet role, at in.outer on the Neumann role. On the
+    // is. An interface end that lies on a held edge is held too: on the
+    // Dirichlet role at in.outer or at partner.value of its support point,
+    // on the Neumann role at in.outer. That partner value is the partner's
+    // own value at its end: in.outer when the partner holds its end too, the
+    // value its solve left there when it does not, and the wrapper's starting
+    // value on a coupling's first iteration. The lines after it accept
+    // either, so they cannot see a partner end left free. Held at in.outer,
+    // the end does not depend on the partner. On the
     // Neumann role system_rhs (equal to volume_rhs on entry) also carries the
     // partner's flux as a load with its sign unchanged, the partner's outward
     // flux being this side's inward one: system_rhs minus volume_rhs equals
@@ -548,13 +554,19 @@ int main(int argc, char **argv)
            (got < 1e-12 * size ? ": the flux never entered system_rhs"
             : flip < 0.05 * size ? ": it entered with the opposite sign; apply the partner's number unchanged" : ""));
 
+    // served: the system hole 5 answers for, as holes 3 and 4 left it
+    const Vector<double> rhs_before_solve(system_rhs);
+
     // HOLE 5 OF 5 -- THE SOLVE.
     // Uses: system_matrix and system_rhs as holes 3 and 4 left them,
     // boundary_values, sparsity and n.
     // Leaves: `solution` (length n) equal to boundary_values on every held
     // dof and satisfying system_matrix solution = system_rhs, to round-off,
-    // on every other row. system_matrix and system_rhs leave this hole as they
-    // came in: the flux recovery after it reads their held rows.
+    // on every other row. system_matrix and volume_rhs leave this hole as
+    // they came in: the flux recovery after it reads both
+    // (r = system_matrix u - volume_rhs). system_rhs is not read after it:
+    // the lines after it judge `solution` against rhs_before_solve, the copy
+    // taken above.
     // The lines after it stop when a held row of system_matrix was emptied,
     // when every dof is held, or when `solution` misses either condition.
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
@@ -592,16 +604,17 @@ int main(int argc, char **argv)
         held_inside += p[0] > in.x0 + tol && p[0] < in.x1 - tol && p[1] > in.y0 + tol && p[1] < in.y1 - tol;
       }
       else
-        ++n_free, r_free = std::max(r_free, std::abs(r(i) - system_rhs(i)));
+        ++n_free, r_free = std::max(r_free, std::abs(r(i) - rhs_before_solve(i)));
     }
     if (n_free == 0 && held_inside > 0)
       fail("SOLVE: every dof is held: boundary_values holds all " + std::to_string(n) + " of them, " +
            std::to_string(held_inside) + " inside the box, so no row of system_matrix u = system_rhs was left to "
            "solve and nothing was solved: `solution` is boundary_values alone. A dof inside the box is never held");
-    const double scale = std::max(system_rhs.linfty_norm(), row_max * solution.linfty_norm());
+    const double scale = std::max(rhs_before_solve.linfty_norm(), row_max * solution.linfty_norm());
     if (!std::isfinite(solution.l2_norm()) || kept > 1e-9 * (1 + solution.linfty_norm()) || r_free > 1e-8 * scale)
       fail("SOLVE: `solution` misses boundary_values by " + num(kept) + " and leaves system_matrix u - system_rhs at " +
-           num(r_free) + " on the free dofs (system scale " + num(scale) + "): it does not solve this system");
+           num(r_free) + " on the free dofs, system_rhs as holes 3 and 4 left it (system scale " + num(scale) +
+           "): it does not solve this system");
     std::cout << "residual of the solve: " << num(r_free) << " on the " << n_free << " free rows, " << num(kept)
               << " on the " << n - n_free << " held dofs (system scale " << num(scale) << ")"
               << (n_free ? "" : "; every dof is held, and nothing was solved") << std::endl;

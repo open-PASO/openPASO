@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import catalog, config, files, runs, sessions, viz
 from .outcome import fold as outcome_fold
-from .privacy import scrub, scrub_text
+from .privacy import is_encoded, scrub, scrub_text
 from .runner import _session_workdir
 
 logging.basicConfig(level=logging.INFO,
@@ -340,66 +340,65 @@ def _is_text(p: Path) -> bool:
     return True
 
 
+_PIECE = 1024 * 1024                   # characters read at a time
 _ENCODED_KEY = re.compile(r'"(?:frames|mask|data|image)"\s*:\s*"')
-_LOOKS_ENCODED = re.compile(r"[A-Za-z0-9+/=\s]{64}")
-_PEEK = 64          # how much of a value is examined before trusting the key
+_NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/=]")
+_BREAK = re.compile(r'[\s"]')
+
+
+def _cut_at_a_break(text: str, limit: int) -> int:
+    """Where a piece may end: just after the last space or quote before `limit`, which no path
+    crosses. At a fixed position the cut could fall inside a path, and its two halves were each
+    judged alone: "/home/" with the first letters of the name became "~", and the rest of the
+    name went out after it (measured)."""
+    last = 0
+    for m in _BREAK.finditer(text, max(0, limit - _CARRY), max(0, limit)):
+        last = m.end()
+    return last or max(0, limit)
 
 
 def _scrubbed_stream(p: Path):
     """The file, scrubbed, in pieces, so a huge log need not be held in memory.
 
-    Each piece keeps the tail of the one before it in view, so a path across a
-    boundary is still found — and the encoded payloads are passed through as
-    they are, which the whole-file path does by looking at the value entire.
-    A field file is tens of megabytes, so its frames cannot be held to be
-    examined: this follows the key that opens the value and copies everything
-    until the quote that closes it, however many pieces that takes. Without it
-    a chunk boundary inside the base64 put the payload back in the scrubber's
-    way, and the numbers a solver produced could be rewritten again."""
-    carry, inside = "", False
+    Prose is handed out up to a break shortly before the end of what has been read, and the rest
+    is judged with the next piece, so a path or a key across the end of a piece is still found.
+    Encoded payloads pass through as they are, decided by privacy.is_encoded on the WHOLE value,
+    the rule the whole-file path and the object walk use. A field file's frames are tens of
+    megabytes, so the value is read on, piece after piece, until it closes or shows a character
+    base64 cannot hold. Deciding on its first 64 characters and copying the rest unread let
+    'A' * 64 + ' /home/<user>/x' out unscrubbed, and a long path written under "data" too (Copilot
+    on the org PR; measured); a chunk boundary inside the base64, before that, put the payload in
+    the scrubber's way, and the numbers a solver produced were rewritten."""
     with p.open("r", encoding="utf-8", errors="replace") as fh:
+        text, eof = "", False
         while True:
-            chunk = fh.read(1024 * 1024)
-            if not chunk:
-                break
-            text = carry + chunk
-            carry = ""
-            while text:
-                if inside:                      # copying an encoded value
-                    end = text.find('"')
-                    if end < 0:
-                        yield text.encode("utf-8")
-                        text = ""
-                        break
-                    yield text[:end + 1].encode("utf-8")
-                    text, inside = text[end + 1:], False
-                    continue
-                m = _ENCODED_KEY.search(text)
-                if m:
-                    # the key is not enough: a "data" field can hold prose, and
-                    # passing that through unread would carry a home path out
-                    value = text[m.end():]
-                    if len(value) < _PEEK and len(text) < 1024 * 1024:
-                        carry = text          # decide once the value is in view
-                        text = ""
-                        break
-                    if _LOOKS_ENCODED.match(value[:_PEEK]):
-                        yield scrub_text(text[:m.end()]).encode("utf-8")
-                        text, inside = text[m.end():], True
-                        continue
-                    yield scrub_text(text[:m.end()]).encode("utf-8")
-                    text = text[m.end():]     # ordinary text: scrub it as prose
-                    continue
-                # no key in view: scrub all but a tail, which may hold half of
-                # a path or half of a key and is judged with the next piece
-                if len(text) > _CARRY:
-                    yield scrub_text(text[:-_CARRY]).encode("utf-8")
-                    carry = text[-_CARRY:]
-                else:
-                    carry = text
-                text = ""
-    if carry:
-        yield (carry if inside else scrub_text(carry)).encode("utf-8")
+            m = _ENCODED_KEY.search(text)
+            if m is None:
+                if eof:
+                    if text:
+                        yield scrub_text(text).encode("utf-8")
+                    return
+                cut = _cut_at_a_break(text, len(text) - _CARRY)
+                if cut:
+                    yield scrub_text(text[:cut]).encode("utf-8")
+                    text = text[cut:]
+                piece = fh.read(_PIECE)
+                eof = not piece
+                text += piece
+                continue
+            yield scrub_text(text[:m.end()]).encode("utf-8")
+            text = text[m.end():]
+            seen = 0
+            while (bad := _NOT_BASE64.search(text, seen)) is None and not eof:
+                seen = len(text)
+                piece = fh.read(_PIECE)
+                eof = not piece
+                text += piece
+            end = bad.start() if bad is not None else len(text)
+            if bad is not None and text[end] == '"' and is_encoded(text[:end]):
+                yield text[:end + 1].encode("utf-8")       # the numbers a solver produced
+                text = text[end + 1:]
+            # anything else under the key is text: it stays in view and is scrubbed as prose
 
 
 @app.get("/sandbox-file/{rel:path}")

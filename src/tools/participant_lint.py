@@ -139,6 +139,20 @@ _DOLFINX_COLLAPSE_PAIR_FIX = (
     "condition is fem.dirichletbc(g, dofs, W.sub(0)) with g a fem.Function on V0")
 _DOLFINX_SCALAR_FIX = (
     "assemble_scalar is dolfinx.fem.assemble_scalar(fem.form(...)); dolfinx.fem.petsc has none")
+# MEASURED ON THIS INSTALL (dolfinx 0.10, PETSc 3.24), a Taylor-Hood channel, each case in its own
+# process: PETSc's own LU printed "Zero pivot in LU factorization" with ksp_error_if_not_converged and
+# otherwise let NonlinearProblem.solve() return after 0 iterations (reason -3, w unchanged); a residual
+# written with w.split() printed "Matrix is missing diagonal entry 0". With u, p = ufl.split(w) and
+# mumps the same solve converged in 3 iterations. A fluid side of a fluid-structure round gave up on the
+# missing diagonal after reading it as a pressure null space; none of our answers named either cause.
+_DOLFINX_SADDLE_LU_FIX = (
+    "two causes print this on a velocity-pressure solve, each measured on this install. PETSc's own LU "
+    "('pc_type': 'lu' with no solver package) meets the zero diagonal of the pressure block: Zero pivot in "
+    "LU factorization; add 'pc_factor_mat_solver_type': 'mumps' (with mumps the measured solve converged "
+    "in 3 Newton iterations). A residual written with w.split() or w.sub(i) has an empty Jacobian on those "
+    "rows: Matrix is missing diagonal entry 0; build it from u, p = ufl.split(w) and keep w.split() for "
+    "reading the solved parts. Without 'snes_error_if_not_converged' both stop nothing: solve() returns "
+    "after 0 iterations with reason -3")
 _DOLFINX_UFL_CONSTANT_FIX = (
     "ufl.Constant(mesh, ...) takes a domain and a SHAPE and holds no number: an array given there is "
     "read as the shape, and the form fails on it. A constant in a form is fem.Constant(mesh, value) -- "
@@ -1021,6 +1035,8 @@ _ERROR_FIXES: tuple = (
     (("fenics",), "module 'dolfinx.fem.petsc' has no attribute 'NewtonSolver'", "FEniCSx: " + _DOLFINX_NONLINEAR_FIX),
     (("fenics",), "module 'dolfinx.mesh' has no attribute 'move'", "FEniCSx: " + _DOLFINX_MOVE_FIX),
     (("fenics",), "cannot import name 'assemble_scalar' from 'dolfinx.fem.petsc'", "FEniCSx: " + _DOLFINX_SCALAR_FIX),
+    (("fenics",), "Zero pivot in LU factorization", "FEniCSx: " + _DOLFINX_SADDLE_LU_FIX),
+    (("fenics",), "Matrix is missing diagonal entry", "FEniCSx: " + _DOLFINX_SADDLE_LU_FIX),
     (("fenics",), "module 'dolfinx.fem.petsc' has no attribute 'assemble_scalar'", "FEniCSx: " + _DOLFINX_SCALAR_FIX),
     # raised inside ufl's own operators when a ufl.Constant was given an array: its frame is ufl's
     (("fenics",), re.compile(r'ufl/\w+\.py", line \d+, in \w+[^\n]*\n(?:[^\n]*\n){0,4}?[^\n]*?'
@@ -1267,10 +1283,13 @@ _ERROR_FIXES: tuple = (
      "there is no gas, create_particles makes 0 particles and the run still exits 0. "
      + _SPARTA_FLOW_SIDE + " Swap p1 and p2 of each line whose gas is on its right"),
     (("sparta",), "Created 0 particles",
-     "SPARTA: create_particles made none, and the run goes on with an empty domain. Two causes "
-     "measured on this install: no `global nrho <n> fnum <F>` before create_particles (SPARTA then "
-     "uses nrho = 1, fnum = 1), and no grid cell on the flow side of any surface line (read_surf's "
-     "line '<a> <b> <c> = cells outside/inside/overlapping surfs' then has a = 0)"),
+     "SPARTA: create_particles made none, and the run goes on with an empty domain. With `n 0` it "
+     "makes nrho x V / fnum particles (V the flow volume, in 2-D the area). Three causes measured on "
+     "this install: no `global nrho <n> fnum <F>` before create_particles (SPARTA then uses nrho = 1, "
+     "fnum = 1); a nrho that is not the gas's number density in molecules per m^3 (a mass density or "
+     "a count per cell), which puts that count below one; and no grid cell on the flow side of any "
+     "surface line (read_surf's line '<a> <b> <c> = cells outside/inside/overlapping surfs' then has "
+     "a = 0)"),
     # ── FEBio: THE MESSAGES THAT DO NOT NAME THEIR CAUSE. Measured on three coupled rounds with a
     # FEBio elastic side: 'invalid value for attribute "lid"' 30 times in 13 of 15 cells and
     # 'Invalid load curve ID' in 11, and no run check answered either. Each entry was reproduced on
@@ -1422,6 +1441,61 @@ _UNNAMED_CRASH = ("the program was KILLED BY SIGSEGV (exit 139, 'dumped core'): 
                   "Measured on this install.")
 _OTHER_CODE = re.compile(r"envs/dune[-\w]*/bin/python|/dune/|dolfinx|ngsolve|netgen|skfem|\bdune\.")
 
+# A RUN ENDED FROM OUTSIDE, IN PETSC'S WORDS. dune-fem starts PETSc, and PETSc's signal handler
+# turns the SIGTERM that `timeout N` sends after N seconds into "PETSC ERROR: Caught signal number
+# 15 Terminate", then either a RuntimeError "PETSc Error in the PETSc function 'User provided
+# function' ... 'Signal received'" or an abort whose stack runs through PetscSignalHandlerDefault
+# (and `timeout` adds "the monitored command dumped core"). Measured on a coupled round: DUNE runs
+# were killed so four times by the cells' own `timeout 120`, `180` and `300`, three of them while
+# DUNE was compiling (the last line before the handler a "Compiling ... (new)", or the stack in the
+# poll that waits for the compiler); nothing answered, and one cell gave up writing that "DUNE-fem
+# crashes with PETSc error during UFL form compilation". Reproduced on this install from that
+# cell's own script with neutral data: the same stack under `timeout`, and the same script run
+# without it compiled on.
+_PETSC_SIGNAL = re.compile(r"Caught signal number \d+|PetscSignalHandlerDefault|"
+                           r"PETSc function 'User provided function'[^\n]*'Signal received'")
+_TIMEOUT_CMD = re.compile(r"(?:^|[\s;&|(])timeout\s+(?:-\S+\s+)*(\d+(?:\.\d+)?)([smhd]?)(?=\s)")
+_DUNE_FIRST_RUN = (
+    "A DUNE side's first run compiles every form and expression it builds into a C++ module before "
+    "it solves, one 'DUNE-INFO: Compiling ... (new)' line each: measured on this install, the served "
+    "3-D contract's first run compiled 16 modules in 11.6 minutes with its grid and space already "
+    "cached, and the next run of the same script took 2.9 s. A run ended mid-compile keeps the "
+    "modules it finished for the next run and loses the one it was building. Give a first run no "
+    "timeout, or one longer than that. Measured on this install.")
+
+
+def _petsc_signal_finding(text: str, command: str = "") -> str:
+    """'' unless the output carries PETSc's signal handler for SIGTERM (or a cut copy of its stack
+    under a `timeout` command); then what ended the run, the timeout when the command has one, and,
+    for a DUNE run, what its first run costs on this install."""
+    if not _PETSC_SIGNAL.search(text or ""):
+        return ""
+    nums = re.findall(r"Caught signal number (\d+)", text)
+    sig = int(nums[0]) if nums else None
+    t = _TIMEOUT_CMD.search(command or "") if isinstance(command, str) else None
+    if sig is not None and sig != 15:
+        return ""                        # another signal: a crash, answered as one
+    if sig is None and not t:
+        return ""
+    if sig == 15:
+        head = ("the run was ENDED FROM OUTSIDE, not by an error in it: PETSc, which the solver starts, caught "
+                "signal 15 (SIGTERM, 'Caught signal number 15 Terminate')"
+                + (" and raised it as \"PETSc Error ... 'Signal received'\"" if "Signal received" in text else "")
+                + (", then aborted -- the stack and 'dumped core' are its signal handler's"
+                   if ("dumped core" in text or "PetscSignalHandlerDefault" in text) else "") + ".")
+    else:
+        pipe = re.search(r"\|\s*(tail|head)\b", command or "")
+        head = ("PETSc's signal handler printed this: the run received a signal, and the line that names it "
+                "('Caught signal number <n>') is not in this output"
+                + (f" -- the `| {pipe.group(1)}` in the command cut it" if pipe else "") + ".")
+    if t:
+        unit = {"": " s", "s": " s", "m": " min", "h": " h", "d": " d"}[t.group(2)]
+        head += (f" This command runs under `timeout {t.group(1)}{t.group(2)}`, which sends SIGTERM when "
+                 f"{t.group(1)}{unit} are up.")
+    dune = bool(re.search(r"/dune/|dune-py|envs/dune|\bdune\.|DUNE-INFO", (text or "") + " " + (command or "")))
+    return head + " " + (_DUNE_FIRST_RUN if dune else
+                         "Run it again without a timeout shorter than the run needs.")
+
 
 def findings_from_output(output: str, command: str = "") -> list:
     """What a run already told you, with the call that works.
@@ -1441,9 +1515,14 @@ def findings_from_output(output: str, command: str = "") -> list:
     # three times while the first error was a std::map keyed on Point (measured).
     _first_cxx = next((ln for ln in text.splitlines() if re.search(r":\d+:(?:\d+:)? (?:fatal )?error: ", ln)), "")
     _dealii_build = "dealii" in codes or "dealii::" in text or "/deal.II/" in text
+    # A RUN ENDED FROM OUTSIDE IS NOT A CRASH (see _PETSC_SIGNAL): its abort and 'dumped core' are
+    # PETSc's signal handler, so the SIGSEGV answers below do not speak for it.
+    _ended = _petsc_signal_finding(text, command)
+    if _ended:
+        out.append(_ended)
     # A PROGRAM KILLED BY SIGSEGV IS NAMED AS A CRASH, not an install fault (measured: a cell
     # gave up 0.4 minutes after a bare failure, blaming the install).
-    if _CRASH.search(text) and (_dealii_build or re.search(r"deal\.?ii", text, re.I)):
+    elif _CRASH.search(text) and (_dealii_build or re.search(r"deal\.?ii", text, re.I)):
         # THE BUILD THE WRAPPER NAMES DECIDES THE ADVICE. Measured: a cell whose DEBUG line was already
         # on was told again to turn it on, after deal.II had printed its assertion.
         # DEBUG REACHES DEAL.II'S HEADERS, NOT ITS LIBRARY. Measured on this install: a SparseMatrix
@@ -3338,6 +3417,14 @@ def _axes_of(tree, array: str):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             given.setdefault(node.targets[0].id, set()).update(
                 n.id for n in ast.walk(node.value) if isinstance(n, ast.Name))
+        # x, y, z = X0 + i * hx, Y0 + j * hy, Z0 + k * hz: each name from its own expression
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple)
+              and len(node.targets[0].elts) == len(node.value.elts)):
+            for tn, tv in zip(node.targets[0].elts, node.value.elts):
+                if isinstance(tn, ast.Name):
+                    given.setdefault(tn.id, set()).update(
+                        n.id for n in ast.walk(tv) if isinstance(n, ast.Name))
 
     def names_in(a):
         found = {n.id for n in ast.walk(a) if isinstance(n, ast.Name)}
@@ -3445,6 +3532,222 @@ def _written_splits(content: str, own: set) -> list:
                 out.append((f"the table of corner numbers read with {array}[i + (b & 1), ...]",
                             node.lineno, [tuple(str(b) for b in r) for r in rows], offs,
                             _axes_of(tree, array)))
+    if not bits:
+        out += _splits_on_corner_lists(tree, own)
+    return out
+
+
+# ── a hex's eight corners as a LIST the author wrote, and the tetrahedra as its positions ──
+#
+# Measured on a coupled round: three cells wrote their own Kratos side, and each built its
+# tetrahedra from a list of the eight corners of a hex, indexed by position -- two with a
+# comprehension, [nid[i + dx, j + dy, k + dz] for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)]
+# (corner 1 is then the offset along z), one with the eight offsets written out. Two of them
+# indexed that list with the served Kuhn tuples, which number the corners b = i + 2*j + 4*k: all
+# six tetrahedra negative, the flux sign flipped and nothing printed (one handed in a converged,
+# unphysical result); the third mixed signs and overlapped ('Error zero sum'). The check read
+# neither numbering and gave all three its general note.
+
+def _offset_values(it):
+    """[0, 1] for a loop over (0, 1), [0, 1], range(2) or range(0, 2); None for anything else."""
+    import ast
+    if isinstance(it, (ast.Tuple, ast.List)) and all(
+            isinstance(c, ast.Constant) and type(c.value) is int for c in it.elts):
+        vals = [c.value for c in it.elts]
+    elif (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
+          and not it.keywords and all(isinstance(a, ast.Constant) and type(a.value) is int
+                                      for a in it.args)):
+        vals = list(range(*[a.value for a in it.args]))
+    else:
+        return None
+    return vals if sorted(vals) == [0, 1] else None
+
+
+def _unwrap_array(e):
+    """`np.array(x)`, `numpy.asarray(x)`, `list(x)` or `tuple(x)` read as `x`."""
+    import ast
+    while (isinstance(e, ast.Call) and len(e.args) == 1 and not e.keywords and (
+            (isinstance(e.func, ast.Attribute) and e.func.attr in ("array", "asarray"))
+            or (isinstance(e.func, ast.Name) and e.func.id in ("list", "tuple", "array")))):
+        e = e.args[0]
+    return e
+
+
+def _slot_terms(e):
+    """(array or None, [(loop name, offset term)] * 3) of a corner written nid[i + a, j + b, k + c]
+    or (i + a, j + b, k + c), where each offset term is 0, 1 or a name; None for anything else."""
+    import ast
+    e = _unwrap_array(_unwrap(e))
+    array = None
+    if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name):
+        array, e = e.value.id, e.slice
+    if not (isinstance(e, (ast.Tuple, ast.List)) and len(e.elts) == 3):
+        return None
+    out = []
+    for x in e.elts:
+        x = _unwrap(x)
+        if isinstance(x, ast.Name):
+            out.append((x.id, 0))
+        elif isinstance(x, ast.BinOp) and isinstance(x.op, ast.Add):
+            for a, b in ((x.left, x.right), (x.right, x.left)):
+                if isinstance(a, ast.Name) and isinstance(b, ast.Constant) and b.value in (0, 1) \
+                        and not isinstance(b.value, bool):
+                    out.append((a.id, int(b.value)))
+                    break
+                if isinstance(a, ast.Name) and isinstance(b, ast.Name):
+                    out.append((a.id, b.id))                     # i + dx: dx decided by the loop
+                    break
+            else:
+                return None
+        else:
+            return None
+    return array, out
+
+
+def _corner_lists(tree, own) -> dict:
+    """{name: (line, [offsets of corner 0..7 along the array's three indices], array or None)} for
+    every list of a hex's eight corners the author's lines build: written out, or by a
+    comprehension over 0 and 1 (its first loop the slowest, so corner 1 is the last loop's step)."""
+    import ast
+    import itertools
+    out = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and getattr(node, "lineno", 0) in own):
+            continue
+        v = _unwrap_array(node.value)
+        offs, array = None, None
+        if isinstance(v, (ast.List, ast.Tuple)) and len(v.elts) == 8:
+            got = [_slot_terms(e) for e in v.elts]
+            if all(got) and len({g[0] for g in got}) == 1 and all(
+                    isinstance(o, int) for g in got for _n, o in g[1]):
+                names = {tuple(n for n, _o in g[1]) for g in got}
+                if len(names) == 1 and len(set(next(iter(names)))) == 3:
+                    array = got[0][0]
+                    offs = [tuple(o for _n, o in g[1]) for g in got]
+        elif isinstance(v, (ast.ListComp, ast.GeneratorExp)) and not any(g.ifs for g in v.generators):
+            got = _slot_terms(v.elt)
+            loops = [(g.target.id, _offset_values(g.iter)) for g in v.generators
+                     if isinstance(g.target, ast.Name)]
+            if got and len(loops) == len(v.generators) and all(vals for _n, vals in loops) \
+                    and len({n for n, _o in got[1]}) == 3:
+                array = got[0]
+                offs = []
+                for combo in itertools.product(*[vals for _n, vals in loops]):
+                    val = dict(zip([n for n, _v in loops], combo))
+                    row = []
+                    for _n, o in got[1]:
+                        row.append(o if isinstance(o, int) else val.get(o))
+                    if any(r is None for r in row):
+                        offs = None
+                        break
+                    offs.append(tuple(row))
+        if offs and len(offs) == 8 and len(set(offs)) == 8:
+            out[node.targets[0].id] = (node.lineno, offs, array)
+    return out
+
+
+def _splits_on_corner_lists(tree, own) -> list:
+    """The hex splits whose tetrahedra are positions in a corner list (see _corner_lists): rows of
+    name[b], or a table of numbers 0..7 that a loop reads through name[...]. Each corner list's
+    numbering is read from its own text; its axes from the node-id array it fills."""
+    import ast
+    lists = _corner_lists(tree, own)
+    if not lists:
+        return []
+    # the array of node ids whose axes can be read: the one the corners index, else the only one
+    arrays = {n.value.id for n in ast.walk(tree)
+              if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
+    readable = {a: ax for a in sorted(arrays) for ax in [_axes_of(tree, a)] if ax is not None}
+
+    def _perm(name):
+        """(array, slot order) where the corners are read component by component,
+        nid[base[t][0], base[t][1], base[t][2]]; None otherwise."""
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
+                    and isinstance(n.slice, ast.Tuple) and len(n.slice.elts) == 3):
+                continue
+            comp = []
+            for x in n.slice.elts:
+                if (isinstance(x, ast.Subscript) and isinstance(x.slice, ast.Constant)
+                        and isinstance(x.value, ast.Subscript) and isinstance(x.value.value, ast.Name)
+                        and x.value.value.id == name and type(x.slice.value) is int):
+                    comp.append(x.slice.value)
+            if sorted(comp) == [0, 1, 2]:
+                return n.value.id, tuple(comp)
+        return None
+
+    def _numbering(name):
+        line, offs, array = lists[name]
+        order = (0, 1, 2)
+        if array is None:
+            got = _perm(name)
+            if got:
+                array, order = got
+            elif len(readable) == 1:
+                array = next(iter(readable))
+        offs = [tuple(o[order[s]] for s in range(3)) for o in offs]
+        return line, {str(b): offs[b] for b in range(8)}, (readable.get(array) if array else None)
+
+    # A TABLE IS READ THROUGH A CORNER LIST ONLY WHERE A LOOP SAYS SO: its rows run through a
+    # loop, and an entry of a row indexes the list (corners[idx] for idx in tet). A table of six
+    # rows of four corner numbers can be a hex's faces as well.
+    rows_of, entries_of = {}, {}
+    for n in ast.walk(tree):
+        gens = ([(n.target, n.iter)] if isinstance(n, ast.For) else
+                [(g.target, g.iter) for g in n.generators]
+                if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp)) else [])
+        for tgt, it in gens:
+            key = it.id if isinstance(it, ast.Name) else id(it) if isinstance(it, (ast.List, ast.Tuple)) \
+                else None
+            if isinstance(tgt, ast.Name) and key is not None:
+                rows_of.setdefault(key, set()).add(tgt.id)
+    for tab, rows in rows_of.items():
+        for r in rows:
+            entries_of.setdefault(tab, set()).update(rows_of.get(r, set()))
+    tied = {}                       # table (its name, or the node of a table written in a loop)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id in lists \
+                and isinstance(n.slice, ast.Name):
+            for tab, ents in entries_of.items():
+                if n.slice.id in ents:
+                    tied.setdefault(tab, set()).add(n.value.id)
+    table_name = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            table_name[id(n.value)] = n.targets[0].id
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.List, ast.Tuple)) and 5 <= len(node.elts) <= 6
+                and getattr(node, "lineno", 0) in own):
+            continue
+        rows, named = [], set()
+        for r in node.elts:
+            if not (isinstance(r, (ast.List, ast.Tuple)) and len(r.elts) == 4):
+                break
+            if all(isinstance(c, ast.Constant) and type(c.value) is int and 0 <= c.value <= 7
+                   for c in r.elts):
+                rows.append(tuple(c.value for c in r.elts))
+            elif all(isinstance(c, ast.Subscript) and isinstance(c.value, ast.Name)
+                     and c.value.id in lists and isinstance(c.slice, ast.Constant)
+                     and type(c.slice.value) is int and 0 <= c.slice.value <= 7 for c in r.elts):
+                rows.append(tuple(c.slice.value for c in r.elts))
+                named.update(c.value.id for c in r.elts)
+            else:
+                break
+        else:
+            if named:
+                users = named if len(named) == 1 else set()
+            else:
+                users = tied.get(table_name.get(id(node)), set()) | tied.get(id(node), set())
+            for name in sorted(users)[:1]:
+                line, offs, axes = _numbering(name)
+                # four corners on one face of the hex in every row: a table of faces, not of tetrahedra
+                if all(any(len({offs[str(b)][s] for b in r}) == 1 for s in range(3)) for r in rows):
+                    continue
+                how = (f"the rows of {name}[...], the corner list of line {line}" if named else
+                       f"the table of corner numbers read through the corner list {name} of line {line}")
+                out.append((how, node.lineno, [tuple(str(b) for b in r) for r in rows], offs, axes))
     return out
 
 
@@ -3517,6 +3820,33 @@ def _split_defects(tets, offs, axes, swapped: bool) -> list:
     return out
 
 
+def _numbering_note(tets, offs, axes) -> str:
+    """'' unless the rows are the six served Kuhn tuples and the script numbers a hex's corners
+    other than b = i + 2*j + 4*k; then which corners sit elsewhere, along x, y, z."""
+    kuhn = [tuple(int(x) for x in re.findall(r"\d", t)) for t in _KUHN_LINE.split(") (")]
+    try:
+        rows = [tuple(int(b) for b in t) for t in tets]
+    except ValueError:
+        return ""
+    if axes is None or sorted(rows) != sorted(kuhn):
+        return ""
+    at = {}
+    for b in range(8):
+        p = [0, 0, 0]
+        for s in range(3):
+            p[axes[s]] = offs[str(b)][s]
+        at[b] = tuple(p)
+    moved = [b for b in range(8) if at[b] != (b & 1, (b >> 1) & 1, (b >> 2) & 1)]
+    if not moved:
+        return ""
+    say = lambda q: "(" + ", ".join(str(c) for c in q) + ")"          # noqa: E731
+    return ("; its rows are the six served Kuhn tuples, but this script numbers a hex's corners "
+            "differently from the fact's b = i + 2*j + 4*k: its corners "
+            + ", ".join(str(b) for b in moved) + " sit at " + ", ".join(say(at[b]) for b in moved)
+            + " along x, y, z, where the fact's sit at "
+            + ", ".join(say((b & 1, (b >> 1) & 1, (b >> 2) & 1)) for b in moved))
+
+
 def unoriented_tetrahedra(content: str) -> str:
     """'' unless the author's own lines build tetrahedra that a mesh test would reject, or build
     them with no test at all where nothing served tests them either."""
@@ -3535,7 +3865,8 @@ def unoriented_tetrahedra(content: str) -> str:
         bad = _split_defects(tets, offs, axes, swapped)
         if bad:
             return (f"the hex split this script writes ({how}, line {line}) is not one Kratos can "
-                    f"solve right: " + "; ".join(bad) + f". {_TET_SYMPTOMS}. {fact}")
+                    f"solve right: " + "; ".join(bad) + _numbering_note(tets, offs, axes)
+                    + f". {_TET_SYMPTOMS}. {fact}")
     body = _strip_strings_and_comments(content)
     if re.search(r"^\s*check_tets\s*\(", body, re.M):
         return ""                        # the served mesh test judges the split when the run starts
@@ -3759,8 +4090,12 @@ def hand_written_beside_a_served_side(content: str, near=None) -> str:
     # THE CALL NAMES THE CONTRACT THIS SIDE IS: its role, read from the partner (and the side the
     # file states), is the variant the writer takes. Measured: a Kratos side whose script says
     # SIDE = "neumann" was offered the call without variant='neumann', which writes the Dirichlet side.
+    # The fluid-structure roles are writer variants too. Measured: a FEniCSx fluid side written by hand
+    # beside the served 4C structure contract was read as fsi_fluid and offered the call without it 46
+    # times -- a call that writes the scalar heat contract.
     _roles = sorted({r for k, r in _side_roles(content, partner_txt) if k == code})
-    _variant = _roles[0] if len(_roles) == 1 and _roles[0] in _DOOR_ROLES else ""
+    _variant = (_roles[0] if len(_roles) == 1
+                and (_roles[0] in _DOOR_ROLES or _roles[0].startswith("fsi_")) else "")
     call = (f"write_participant_contract(solver='{code}', "
             + (f"variant='{_variant}', " if _variant else "") + f"path='{rel}')" if code
             else f"write_participant_contract(solver=<this side's code>, path='{rel}')")
