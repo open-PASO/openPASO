@@ -144,3 +144,30 @@ def test_a_data_uri_is_judged_by_the_same_rule(served):
         assert not leaked, f"the {path} handed out the home directory after a data: URI"
     kept = served("ok.html", ok) == ok and scrub_text(ok) == ok
     assert kept, "a real data: URI must come back byte for byte"
+
+
+def test_a_short_home_is_kept_out_too():
+    """Copilot on the org PR: only a home of eight characters or more was looked for inside a value,
+    so with HOME=/root, 40 letters glued to '/root/secret' passed as encoded data and went out."""
+    import subprocess
+    import textwrap
+    code = textwrap.dedent("""
+        import base64, json, os, sys
+        sys.path.insert(0, sys.argv[1])
+        from webui.privacy import is_encoded, scrub, scrub_text
+        value = "A" * 40 + "/root/secret"
+        frames = base64.b64encode(os.urandom(3000)).decode()
+        print(json.dumps({"encoded": is_encoded(value), "walk": scrub({"data": value})["data"],
+                          "document": scrub_text(json.dumps({"data": value})),
+                          "prose": scrub_text("wrote /root/run/out.vtu"),
+                          "frames": scrub({"frames": frames})["frames"] == frames}))
+    """)
+    env = dict(os.environ, HOME="/root", USER="root", LOGNAME="root")
+    run = subprocess.run([sys.executable, "-c", code, str(REPO)], capture_output=True, text=True,
+                         env=env, timeout=120)
+    assert run.returncode == 0, run.stderr[-1500:]
+    got = json.loads(run.stdout.strip().splitlines()[-1])
+    assert got["encoded"] is False, got
+    assert "/root/" not in got["walk"] and "/root/" not in got["document"], got
+    assert got["prose"] == "wrote ~/run/out.vtu", got
+    assert got["frames"] is True, "real frames still come back byte for byte"

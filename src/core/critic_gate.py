@@ -51,6 +51,13 @@ class CriticGateError(Exception):
     """Raised when a run is attempted without a valid, matching review."""
 
 
+def _over_rejection(turned: "ReviewRecord") -> str:
+    first = (turned.findings.strip().splitlines() or [""])[0][:200]
+    return (f"a critic REJECTED this exact setup ({first}); an approval of the same text does not "
+            f"lift it. It stays NOT VERIFIED until the text changes and a critic approves the "
+            f"changed text.")
+
+
 def setup_digest(*parts: str) -> str:
     """Stable digest of everything that defines the run being reviewed."""
     h = hashlib.sha256()
@@ -92,7 +99,9 @@ class ReviewRecord:
     source_name: str = ""
 
     def expired(self, now: float | None = None) -> bool:
-        return (now or time.time()) > self.created + self.ttl_s
+        # a rejection does not time out: it never lets anything pass, and it holds until the text
+        # changes (it expired with the approvals' hour, and the same text could then be approved)
+        return not self.rejected and (now or time.time()) > self.created + self.ttl_s
 
 
 class CriticRegistry:
@@ -118,9 +127,22 @@ class CriticRegistry:
                            solver=solver, findings=text, created=time.time(),
                            ttl_s=ttl_s, setup_text=setup_text or "",
                            rejected=bool(rejected), source_name=source_name or "")
+        turned = None if rec.rejected else self.rejection_of(solver=solver, digest=digest)
+        if turned is not None:
+            # THE SAME TEXT CANNOT BE BOTH REJECTED AND APPROVED, here as in the verdict: an
+            # approval of text a critic turned down was accepted and handed a token (Copilot on
+            # the org PR), which the run then refused. It is logged and issues nothing.
+            self._append_audit("approval_refused_over_rejection", rec)
+            raise CriticGateError(_over_rejection(turned))
         self._reviews[rec.token] = rec
         self._append_audit("review_submitted", rec)
         return rec
+
+    def rejection_of(self, *, solver: str, digest: str) -> ReviewRecord | None:
+        """The latest rejection on record of exactly this text for this solver, if any."""
+        turned = [r for r in self._reviews.values()
+                  if r.rejected and r.solver == solver and r.digest == digest]
+        return max(turned, key=lambda r: r.created) if turned else None
 
     # ── redeeming ────────────────────────────────────────────────────────
     def consume(self, token: str | None, *, digest: str, solver: str,
@@ -156,6 +178,9 @@ class CriticRegistry:
                 "critic review does not match the setup being run: the input "
                 "changed after it was reviewed. Review the setup you intend to "
                 "run.")
+        turned = self.rejection_of(solver=solver, digest=digest)
+        if turned is not None:                 # an approval filed before a rejection of the same text
+            raise CriticGateError(_over_rejection(turned))
         rec.consumed_by = job_id or "unnamed-job"
         rec.consumed_at = time.time()
         self._append_audit("review_consumed", rec)

@@ -23,13 +23,14 @@ except Exception:
 # a boundary in front leaves encoded data alone and still catches every path in
 # prose, JSON, logs and tracebacks.
 #
-# This machine's own home directory is the exception once it is eight characters or longer: base64
-# holds a given string of eight characters by chance about once in 64**8 positions, so the home is
-# never in encoded data by chance and is removed wherever it stands, glued to letters included
-# ('A' * 40 + '<home>/x' kept its home behind the boundary rule).
+# This machine's own home directory is the exception, from five characters on ("/root"): it is
+# removed wherever it stands as a path, glued to letters included ('A' * 40 + '<home>/x' kept its home
+# behind the boundary rule). Base64 holds the home and the "/" after it by chance about once in
+# 64**6 positions at five characters, about once in five thousand 12 MB fields, and practically
+# never for a /home/<name> of nine or more; a shorter home names nobody.
 _BOUNDARY = r"(?<![A-Za-z0-9+/])"   # "=" stays a boundary: --prefix=/home/... is a path
-_LONG_HOME = len(_HOME) >= 8
-_HOME_RE = re.compile(("" if _LONG_HOME else _BOUNDARY) + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
+_HOMELY = len(_HOME) >= 5
+_HOME_RE = re.compile(("" if _HOMELY else _BOUNDARY) + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
 _ANY_HOME_RE = re.compile(_BOUNDARY + r"/(?:home|Users|media)/[A-Za-z0-9._-]+")
 _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-9_-])") if len(_USER) >= 3 else None
 
@@ -51,7 +52,8 @@ _DATA_URI = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,([A-Za-z0-9+/=]+)")
 # encoder writes it: groups of four of A-Z a-z 0-9 + /, only the last group of a block padded ("xx=="
 # or "xxx="), blocks possibly joined, and possibly an unpadded group of two or three at the end. It is
 # at least 40 characters long, it does not begin where a home directory begins, and it never holds
-# this machine's home directory (see _LONG_HOME). Anything else is text and is scrubbed as text.
+# this machine's home directory as a path (see _HOMELY). Anything else is text and is scrubbed as
+# text.
 # Each weaker form let a home path out, measured on all three paths: judged by the first 64
 # characters, or with spaces allowed, 'A' * 64 + ' <home>/x' and a long path a run wrote under
 # "data"; with "=" allowed anywhere, 'A' * 40 + '=<home>/x' (Copilot on the org PR, three rounds).
@@ -70,9 +72,8 @@ def _is_base64(value: str) -> bool:
 
 def is_encoded(value: str) -> bool:
     """Whether `value`, met under one of the encoded keys, is encoded data to pass on untouched."""
-    return (_is_base64(value)
-            and _HOME_RE.match(value) is None and _ANY_HOME_RE.match(value) is None
-            and not (_LONG_HOME and _HOME in value))
+    return (_is_base64(value) and _ANY_HOME_RE.match(value) is None
+            and (_HOME_RE.search(value) if _HOMELY else _HOME_RE.match(value)) is None)
 
 
 def _scrub_prose(t: str) -> str:
