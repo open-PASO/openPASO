@@ -180,6 +180,9 @@ class JobHandle:
     return_code: Optional[int] = None
     elapsed: Optional[float] = None
     error: Optional[str] = None
+    # When the run started (time.time()), for a backend that tells this run's output
+    # files from those an earlier run left in a reused work directory.
+    started_at: Optional[float] = None
 
 
 class SolverBackend(ABC):

@@ -244,11 +244,11 @@ def build(backend: str, source_root: Path,
     if background:
         proc = subprocess.Popen(["bash", str(script_path)],
                                 stdout=log_file, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+                                start_new_session=True, stdin=subprocess.DEVNULL)
         return log_path, proc
     else:
         r = subprocess.run(["bash", str(script_path)],
-                           stdout=log_file, stderr=subprocess.STDOUT)
+                           stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             raise RuntimeError(f"Build failed for {backend} "
                                f"(rc={r.returncode}); see {log_path}")

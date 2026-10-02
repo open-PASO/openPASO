@@ -87,6 +87,7 @@ def register_simulation_tools(mcp: FastMCP):
             [python, str(gen_path)],
             capture_output=True, text=True,
             cwd=str(work_dir),
+            stdin=subprocess.DEVNULL,
         )
 
         if gen_result.returncode != 0:

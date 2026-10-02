@@ -25,8 +25,8 @@ from pathlib import Path
 from fastapi import WebSocket
 
 from . import config, proctree, sessions
-from .outcome import (RUNNING, SOLVER_TOOLS, classify_solver_result,
-                      clean_outcome, fold)
+from .outcome import (RUNNING, SOLVER_TOOLS, classify_solver_result, clean_outcome, fold,
+                      turn_typed_steps, without_typed_steps)
 
 log = logging.getLogger("openpaso.webui.runs")
 
@@ -119,7 +119,10 @@ class Run:
         # a result was verified while this rule called it unverified. What the
         # server decided is what the page shows; the page keeps its own reading
         # only for records written before this stamp existed.
-        if event.get("type") == "tool_result" and event.get("tool") in SOLVER_TOOLS:
+        if (event.get("type") == "tool_result" and event.get("tool") in SOLVER_TOOLS
+                and "verdict" not in event):
+            # only where the tool layer did not judge the full result already:
+            # this text may be a shortened copy, and that is not the evidence
             event["verdict"] = classify_solver_result(event.get("result") or "")
         if event.get("type") == "done" and event.get("outcome"):
             event["by"] = "server"
@@ -215,7 +218,8 @@ class Run:
                     mcp_on="openpaso" in self.state.get("mcp_servers", []),
                     workdir=self.workdir, emitter=self.emit, get_mode=self.mode,
                     gate=self.gate, checkpointer=self.saver,
-                    take_steers=self._take_steers, steps=self.steps) as agent:
+                    take_steers=self._take_steers, steps=self.steps,
+                    get_request=self._person_request) as agent:
                 if not ready.done():
                     ready.set_result(agent)
                 await stop.wait()
@@ -227,6 +231,20 @@ class Run:
         finally:
             if self.agent is not None and self._keeper is asyncio.current_task():
                 self.agent = None
+
+    def _person_request(self) -> str:
+        """What the person asked in this run, in their own words: a critic judges the work
+        against this, not against the working agent's account of it. The first message and the
+        latest ones are kept when a long run does not fit."""
+        texts = [e["text"].strip() for e in self.state["events"]
+                 if e.get("type") == "user_msg" and (e.get("text") or "").strip()]
+        if not texts:
+            return ""
+        joined = "\n\n".join(texts)
+        if len(joined) <= 6000:
+            return joined
+        rest = "\n\n".join(texts[1:])
+        return texts[0][:3000] + "\n\n[… earlier follow-ups left out …]\n\n" + rest[-2800:]
 
     async def close_agent(self):
         keeper, self._keeper = self._keeper, None
@@ -338,7 +356,11 @@ class Run:
                 outcome = clean_outcome(self.state["events"][start:])
             if outcome != "interrupted":
                 self._turn_ended = True
-                await self.emit({"type": "done", "outcome": outcome})
+                done = {"type": "done", "outcome": outcome}
+                typed = turn_typed_steps(self.state["events"][start:])
+                if typed:
+                    done["typed_steps"] = typed
+                await self.emit(done)
             self.save()
             if outcome != "interrupted":
                 asyncio.get_running_loop().call_soon(
@@ -504,72 +526,130 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f" […{len(text) - limit} more characters]"
 
 
-def _history(events: list[dict]) -> list[tuple[str, str]]:
+def _short_args(args: dict, limit: int = 1500) -> dict:
+    """A call's arguments for the record: a long string (a whole script) keeps its
+    start and its end, and says how much is left out between them."""
+    out = {}
+    for k, v in (args or {}).items():
+        if isinstance(v, str) and len(v) > limit:
+            half = limit // 2
+            v = f"{v[:half]} […{len(v) - 2 * half} characters left out of this record…] {v[-half:]}"
+        out[k] = v
+    return out
+
+
+def _history(events: list[dict]) -> list:
     """Earlier turns of this run, for a thread that has lost its memory (server
     restart, or a stop).
 
     Only the prompts and the model's messages used to be handed back. After a
     Stop the model then read its own plan with none of the steps it had taken,
     and told the person nothing had been computed while the page showed three
-    solved meshes. Each turn now carries a record of its steps: what was run,
-    what came back (shortened), and how the turn ended."""
-    turns: list[tuple[str, list[str]]] = []
-    calls: dict[str, dict] = {}
+    solved meshes. So each turn carries its steps: what was run, what came back
+    (shortened), and how the turn ended.
+
+    The steps are handed back the way the model takes one: its message with the
+    tool calls it made, then each call's result. Measured 2026-09-30: handed back
+    as text in the model's own voice ("[step] visualize {...} → ..." under "These
+    steps really ran."), the next reply wrote three steps in that form, with
+    results, and called no tool. None of them ran, and the reply read as if they
+    had. A critic's own messages and steps are not the main model's: they are
+    left out, and its conclusion comes back as the result of the call that
+    spawned it."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    turns: list[list] = []                 # one list of messages per user message
+    calls: dict[str, dict] = {}            # call_id -> its tool_call_pending event
+    results: dict[str, str] = {}           # call_id -> what the record says came back
+    current: dict | None = None            # the model message being rebuilt
+    inside_subagent = 0
+
+    def flush(missing: str) -> None:
+        nonlocal current
+        if current is None or not turns:
+            current = None
+            return
+        tool_calls = [{"name": c.get("tool", "?"), "args": _short_args(c.get("args") or {}),
+                       "id": c["call_id"], "type": "tool_call"} for c in current["calls"]]
+        if current["text"] or tool_calls:
+            turns[-1].append(AIMessage(content=current["text"], tool_calls=tool_calls))
+            for c in current["calls"]:
+                turns[-1].append(ToolMessage(content=results.get(c["call_id"], missing),
+                                             tool_call_id=c["call_id"], name=c.get("tool", "?")))
+        current = None
+
     for e in events:
         t = e.get("type")
         if t == "user_msg":
-            turns.append((e.get("text", ""), []))
+            flush("[no result was recorded for this step]")
+            if (e.get("text") or "").strip():
+                turns.append([("user", e["text"])])
             continue
         if not turns:
             continue
-        work = turns[-1][1]
-        if t == "agent_msg" and (e.get("text") or "").strip():
-            work.append(e["text"].strip())
+        if t == "subagent_spawned":
+            inside_subagent += 1
+        elif t == "subagent_returned":
+            inside_subagent = max(0, inside_subagent - 1)
+        elif t == "agent_msg":
+            if inside_subagent:
+                continue                   # the critic's words, not the model's
+            flush("[no result was recorded for this step]")
+            current = {"text": without_typed_steps((e.get("text") or "").strip()), "calls": []}
         elif t == "tool_call_pending":
-            calls[e.get("call_id", "")] = e
+            if e.get("agent") not in (None, "main"):
+                continue                   # a step the critic took
+            cid = e.get("call_id") or f"call_{len(calls)}"
+            calls[cid] = e
+            if current is None:
+                current = {"text": "", "calls": []}
+            current["calls"].append({**e, "call_id": cid})
         elif t in ("tool_result", "tool_error", "tool_call_rejected"):
-            call = calls.get(e.get("call_id", ""), {})
-            who = "" if call.get("agent") in (None, "main") else f"{call.get('agent')} "
-            args = json.dumps(call.get("args") or {}, default=str)
-            if len(args) > 1500:
-                args = args[:1500] + " …"
+            cid = e.get("call_id", "")
+            if cid not in calls:
+                continue
             if t == "tool_call_rejected":
-                got = "[the user skipped this step; it did not run]"
+                results[cid] = "[the user skipped this step; it did not run]"
             else:
                 got = str(e.get("result") if t == "tool_result" else e.get("error"))
                 if len(got) > 2500:
                     got = got[:1200] + "\n … \n" + got[-1200:]
-            work.append(f"[{who}step] {call.get('tool', e.get('tool', '?'))} {args}\n→ {got}")
-        elif t == "subagent_returned" and (e.get("result") or "").strip():
-            work.append("[critic/helper conclusion] " + _clip(e["result"], 2000))
+                results[cid] = got
         elif t == "error" and e.get("outcome") == "interrupted":
-            unfinished = [f"{c.get('tool')} {json.dumps(c.get('args') or {}, default=str)[:300]}"
-                          for cid, c in calls.items()
-                          if not any(x.get("call_id") == cid and x.get("type") in
-                                     ("tool_result", "tool_error", "tool_call_rejected")
-                                     for x in events)]
-            work.append("[the user stopped the run here"
-                        + (f"; this step was running and has no result: {unfinished[-1]}"
-                           if unfinished else "; a step that was running has no result")
-                        + "]")
+            flush("[no result: the user stopped the run while this step was running]")
+            turns[-1].append(AIMessage(content="(The user stopped the run here.)"))
         elif t == "error":
-            work.append(f"[the turn failed: {_clip(str(e.get('message')), 500)}]")
-    out: list[tuple[str, str]] = []
-    for prompt, work in turns:
-        out.append(("user", prompt))
-        if work:
-            out.append(("assistant", "[Record of what I did for this message, rebuilt from the run log "
-                                     "because the conversation was restarted. These steps really ran.]\n\n"
-                                     + "\n\n".join(work)))
-    # keep the most recent work when a long run does not fit
-    total = 0
-    for i in range(len(out) - 1, -1, -1):
-        total += len(out[i][1])
-        if total > _HISTORY_LIMIT:
-            role, text = out[i]
-            out[i] = (role, "[… earlier part shortened …]\n" + text[-(_HISTORY_LIMIT // 4):])
-            out = out[i:] if role == "user" else [("user", "(earlier messages shortened)")] + out[i:]
-            break
+            flush("[no result: the turn failed while this step was running]")
+            turns[-1].append(AIMessage(
+                content=f"(This turn ended with an error: {_clip(str(e.get('message')), 500)})"))
+    flush("[no result was recorded for this step]")
+
+    # keep the most recent turns whole when a long run does not fit: a call is
+    # never separated from its result
+    def size(msgs: list) -> int:
+        n = 0
+        for m in msgs:
+            if isinstance(m, tuple):
+                n += len(m[1])
+            else:
+                n += len(str(m.content))
+                n += sum(len(json.dumps(c.get("args") or {}, default=str))
+                         for c in (getattr(m, "tool_calls", None) or []))
+        return n
+
+    left_out = 0
+    while len(turns) > 1 and sum(size(tn) for tn in turns) > _HISTORY_LIMIT:
+        turns.pop(0)
+        left_out += 1
+    if turns and size(turns[0]) > _HISTORY_LIMIT:
+        for m in turns[0]:
+            if isinstance(m, ToolMessage) and len(str(m.content)) > 600:
+                m.content = str(m.content)[:300] + "\n … \n" + str(m.content)[-300:]
+    out = [m for tn in turns for m in tn]
+    if left_out and out and isinstance(out[0], tuple):
+        n = (f"{left_out} earlier turns of this run are" if left_out != 1
+             else "1 earlier turn of this run is")
+        out[0] = ("user", f"({n} left out of this record.)\n\n{out[0][1]}")
     return out
 
 

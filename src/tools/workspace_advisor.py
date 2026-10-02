@@ -1,7 +1,7 @@
 """Workspace advisor: openPASO's checks on what an agent leaves behind.
 
 EVERY CHECK IN THIS MODULE IS PRODUCT CODE, NOT EVALUATION CODE. The external
-harness that drives development runs (langgraph_eval/agent.py) fires these at
+harness that drives recorded runs (langgraph_eval/agent.py) fires these at
 its hook points -- a file written, a shell command's output, a result set
 delivered -- but defines none of them:
 the boundary, set explicitly on 2026-09-03, is that the harness carries no
@@ -37,7 +37,30 @@ def _flat(v):
     elif isinstance(v, (int, float)):
         yield v
 
+# ONCE PER STATE. Measured on a coupled round: a cell filed COULD_NOT_COMPLETE,
+# read this advisory, and re-wrote RESULT.txt twenty-seven times in a row --
+# the same text back each time, the same 1.6k characters served each time --
+# until it stopped with eighteen minutes unused. The information is in the
+# first serving; the identical repeat is a nag that a weak model answers by
+# rewriting the same file. The same text for the same work directory is served
+# once; when the disk changes (a file appears, a history grows) the text
+# changes and is served again.
+_GIVE_UP_SERVED: dict = {}
+# The files already told that they carry no export self-check (see _participant_write_check).
+_SELFCHECK_NOTE_SERVED: set = set()
+
+
 def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
+    text = _work_on_disk_contradicting_a_give_up_once(work)
+    key = str(Path(work).resolve())
+    if text and _GIVE_UP_SERVED.get(key) == text:
+        return ""
+    if text:
+        _GIVE_UP_SERVED[key] = text
+    return text
+
+
+def _work_on_disk_contradicting_a_give_up_once(work: Path) -> str:
     """A give-up written on top of a finished run — reported structurally.
 
     Measured twice. Ten coupled runs drove a coupling to convergence, hit a
@@ -59,7 +82,7 @@ def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
     iface = _interface_files(work)
     resid = _history_files(work)
     # A PARTICIPANT'S OWN EXPORT COUNTS AS WORK. One run of a later batch of
-    # development runs wrote no CSV at all and still had exports.json for both
+    # recorded runs wrote no CSV at all and still had exports.json for both
     # halves of level 1 — a solve that ran and an interface exchange that
     # completed, filed as could-not-finish. Looking only for the task's
     # deliverables misses exactly the run that did the work and never wrote it
@@ -120,6 +143,8 @@ def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
     # this gate stayed silent.
     pscripts = []
     for q in sorted(work.rglob("*.py")):
+        if ".replaced-" in q.name or q.name.endswith((".bak", ".orig", "~")):
+            continue                      # a copy moved aside is not a participant script
         try:
             c = q.read_text(errors="replace")
         except OSError:
@@ -147,9 +172,54 @@ def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
         except OSError:
             pass
 
+    # SCREEN THE FIELD INVENTORY THE SAME WAY THE RESIDUAL ONE IS SCREENED.
+    #
+    # The comment fifty lines below records this exact incident for residual
+    # histories -- "the give-up gate endorsing files the auto-audit was
+    # simultaneously calling fabrication, and the agent obeyed the flattering
+    # voice" -- and the screen was never extended to the FIELD files.
+    #
+    # MEASURED on one coupled run. The auto-audit told it, correctly,
+    # "YOUR SOLUTION IS IDENTICAL ACROSS DISTINCT MESH LEVELS side A ... the
+    # difference is exactly zero". The agent understood it exactly and wrote
+    # the right diagnosis into its own give-up: "The 4C participant writes VTU
+    # files to out-vtk-files/ which are overwritten at each level." THIS GATE
+    # then answered, in the same reply, "YOU ARE FILING A GIVE-UP ON TOP OF
+    # WORK THAT IS ON DISK -- 6 per-level field file(s)" -- three of which were
+    # the byte-identical ones -- and closed with "a result set built from the
+    # numbers you already have stands on those numbers". It obeyed that,
+    # rewrote the summary, and stopped with 20 minutes left against a ladder
+    # that re-runs in 28 seconds.
+    #
+    # Across the recorded runs: 46 of 440 runs handed in byte-identical levels and
+    # this gate fired in 43 of them. It is net-positive -- it has converted 310
+    # give-ups into submissions -- so it is screened, not weakened.
+    _frozen = {}
+    try:
+        from tools.result_audit import (                    # noqa: PLC0415
+            identical_solution_levels_findings as _ident)
+        for f in _ident(work):
+            seq = str(f.get("sequence", ""))
+            if seq.startswith("identical solution levels"):
+                _frozen[seq.replace("identical solution levels", "").strip()] = f
+    except Exception:                                       # noqa: BLE001
+        _frozen = {}
+
     bits = []
     if sol:
-        bits.append(f"{len(sol)} per-level field file(s)")
+        if _frozen:
+            _who = ", ".join(sorted(k for k in _frozen if k)) or "one side"
+            bits.append(
+                f"{len(sol)} per-level field file(s) — but on {_who} the levels "
+                f"are byte-identical, so that side's ladder carries NO "
+                f"refinement and those files are not work yet: it is one mesh "
+                f"saved to every level. Each participant writes "
+                f"field_level<k>.csv per level; rebuild that side's deliverable "
+                f"from those, one file per level, and check the `NDOF = <n>` "
+                f"line differs between levels. That is the one repair standing "
+                f"between this and a result set.")
+        else:
+            bits.append(f"{len(sol)} per-level field file(s)")
     if iface:
         bits.append(f"{len(iface)} per-level interface file(s)")
     if exports and not (sol or iface):
@@ -159,14 +229,32 @@ def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
     # PARTICIPANTS BUILT, ITERATION NEVER RUN. Structural statement only:
     # what is on disk, what is absent.
     if pscripts and not resid:
-        bits.append(
-            f"{len(pscripts)} script(s) implementing the "
-            f"imports.json/exports.json participant exchange "
-            f"({', '.join(pscripts[:4])}) — and NO partitioned-iteration "
-            f"residual history anywhere: the participants were built and "
-            f"the coupling iteration over them was never run. That "
-            f"single remaining step is what stands between the work on "
-            f"disk and a result set with coupling evidence.")
+        # SAY WHAT IS THERE, NOT MORE. This sentence told two cells that had
+        # ONE participant script, no second side and no exports.json that
+        # "the participants were built" and "that single remaining step"
+        # stood between them and a result -- twenty-eight and five times.
+        # A script that has not produced an exports.json is not a built
+        # participant, and one side is not a pair.
+        _n = len(pscripts)
+        _ran = len(exports) if exports else 0
+        if _n >= 2 and _ran >= 2:
+            bits.append(
+                f"{_n} script(s) implementing the imports.json/exports.json "
+                f"participant exchange ({', '.join(pscripts[:4])}), each with an "
+                f"exports.json — and NO partitioned-iteration residual history "
+                f"anywhere: both participants ran standalone and the coupling "
+                f"iteration over them was never run. That single remaining "
+                f"step is what stands between the work on disk and a result "
+                f"set with coupling evidence.")
+        else:
+            bits.append(
+                f"{_n} participant script(s) on disk ({', '.join(pscripts[:4])}), "
+                f"{_ran} of them with an exports.json"
+                + (", and no script for the other side" if _n < 2 else "")
+                + ": the coupling cannot run until BOTH sides produce an "
+                f"exports.json standalone. What is on disk is a start, not a "
+                f"result; the steps left are the missing side and the standalone "
+                f"runs, then the coupling iteration.")
     if ok_logs and native and not (sol or iface):
         bits.append(
             f"{len(ok_logs)} solver log(s) with the solver's own successful "
@@ -208,27 +296,45 @@ def _work_on_disk_contradicting_a_give_up(work: Path) -> str:
         elif finding:
             bits.append(
                 f"{name} with {n} iterations ending at {last:.3g} — but "
-                f"{finding}. The run behind it is real; the evidence is "
-                f"insufficient as it stands, so extend the iteration rather "
-                f"than deleting the file.")
+                f"{finding}. The run behind it is real; keep the file, and "
+                f"find why the residual stopped where it did before running "
+                f"it again -- a residual that stopped falling does not "
+                f"converge by iterating longer.")
         else:
             bits.append(f"{name} with {n} iterations ending at {last:.3g}")
     return (
         "YOU ARE FILING A GIVE-UP ON TOP OF WORK THAT IS ON DISK.\n  "
         + "\n  ".join(bits)
-        + "\nA could-not-finish report counts for nothing. A result set built "
+        + ("\nA could-not-finish report is not a result, and neither is a "
+           "ladder that is one mesh three times: repair the frozen side FIRST, "
+           "then build the result set. "
+           if _frozen else
+           "\nA could-not-finish report is not a result. ")
+        + ("Keep that report on disk until a complete result set replaces it: a run "
+           "that deletes it and then runs out of time ends with no report at all. ")
+        + ("A result set built "
           "from the numbers you already have stands on those numbers, PROVIDED "
           "it is complete: every level the task prescribes and, where the "
           "task names two subdomains, both files per level. A result set "
-          "missing a level or a side is unusable, worth the same "
-          "as no result set, so complete the sequence from what you have "
+          "missing a level or a side is unusable, no better "
+          "than no result set, so complete the sequence from what you have "
           "rather than filing part of it. A verification "
-          "finding — a flux imbalance, a failed conservation check — is NOT a "
-          "reason to withhold a field your solve already produced: those are "
-          "different verdicts and only one of them is worth zero. Write the "
-          "deliverables the task asks for from what you have, state the "
-          "finding alongside them, and keep working on the finding with "
-          "whatever time is left."
+          "finding about the EXCHANGE — a flux imbalance, a failed conservation "
+          "check — is NOT a reason to withhold a field your solve already "
+          "produced: a result with a named caveat is a result, a give-up over "
+          "it is not. Write the deliverables the task asks for from what you "
+          "have, state the finding alongside them, and keep working on the "
+          "finding with whatever time is left -- a caveat that does not shrink "
+          "under refinement is a wrong exchange, and then the result is not "
+          "mesh-independent whatever the residuals did. A finding about the "
+          "FIELD ITSELF is not a caveat: a field the audit calls near-zero, one "
+          "that was not solved inside its subdomain (exact zeros at its interior "
+          "nodes), one that does not satisfy the equation your own config states, a side "
+          "that returned the same export whatever it was sent (it does not use "
+          "its imports), or a side whose field does not hold at the interface "
+          "the values it imported to hold there -- each is wrong at every "
+          "level, because the last two never coupled at all, and handing it "
+          "in hands in a wrong answer.")
     )
 _REGISTRY_SIG = r"[A-Z][A-Za-z0-9_]*\d+D\d+N"
 _REGISTRY_NOT_A_COMPONENT = ("Utility", "Utilities", "Process", "Factory",
@@ -259,7 +365,7 @@ def _REGISTRY_MSG(name: str, where: str) -> str:
         "        mp.CreateNewCondition(\"" + name + "\", cid, [n1, n2], prop)\n"
         "        mp.CreateNewElement(\"LaplacianElement2D3N\", eid, "
         "[a, b, c], prop)\n"
-        "    DO NOT CHANGE CODES OVER THIS. A previous run on this problem read "
+        "    DO NOT CHANGE CODES OVER THIS. A previous recorded run read "
         "this same AttributeError as \"not available in version 10.3.0\", "
         "abandoned the two codes the task prescribes, went looking for a "
         "third, and delivered nothing at all.")
@@ -267,7 +373,7 @@ def _REGISTRY_MSG(name: str, where: str) -> str:
 def _registry_attribute_check(written: Path, content: str) -> str:
     """A registered component written as a module attribute never resolves.
 
-    MEASURED, one development run. The served pitfall NAMES the condition, and
+    MEASURED, one recorded run. The served pitfall NAMES the condition, and
     the write-time check hands over the exact factory line, and the run still
     wrote `KM.ConvectionDiffusionApplication.ThermalFace2D2N(condition_id,
     ...)`. Python raised `has no attribute 'ThermalFace2D2N'`; the agent
@@ -331,9 +437,9 @@ def _value_column(p: Path) -> list[str] | None:
 def _identical_levels_check(workdir: Path, written: Path) -> str:
     """The same field delivered at every level. An order cannot come from it.
 
-    MEASURED, one development run. Its side A is BIT-IDENTICAL at all three
+    MEASURED, one recorded run. Its side A is BIT-IDENTICAL at all three
     levels -- max|u_i - u_j| = 0.000e+00 for every pair, peak 0.1332715818041668
-    three times -- so it solved subdomain A once and wrote the same 1936 values
+    three times -- so it solved subdomain A once and wrote the same field values
     into the side-A field file at every one of the three levels.
     log2(|L1-L2| / |L2-L3|) is 0/0 on that. Its side B does refine
     (2.307290e-03, 2.364044e-03, 2.370374e-03), which is what makes the copied
@@ -371,11 +477,12 @@ def _identical_levels_check(workdir: Path, written: Path) -> str:
                 "them is exactly zero. A convergence order is computed from "
                 "level DIFFERENCES: log2(|L1-L2|/|L2-L3|) on identical levels "
                 "is 0/0, and a result set whose levels do not differ cannot "
-                "show an order however correct each level is. Either the solve "
-                "ran once and the result was written into every level file, or "
-                "the level index never reached the mesh -- print the node or "
-                "DOF count inside the solve at each level and check that it "
-                "actually changes. A run that did this wrote the same 1936 "
+                "show an order however correct each level is. Two ways lead "
+                "here, measured: the level files written from one output while "
+                "the solve refined (each level's own field_level<k>.csv dump "
+                "tells: write each file from its own level's dump), or a solve "
+                "that ran one mesh at every level (print the node or DOF count "
+                "inside the solve at each level and check that it changes). A run that did this wrote the same field "
                 "values three times on one subdomain while the other subdomain "
                 "refined normally, so nothing else in the result set looked "
                 "wrong.")
@@ -407,8 +514,14 @@ _SOLVER_MARKERS = (
     "Solver Time", "Solution Time", "Total Time",
 )
 
-
 _CONTRACT_LINE = _re_mod.compile(r"^\s*NDOF\s*=\s*\d+\s*$", _re_mod.M | _re_mod.I)
+
+# A LINE THE SOLVER LIBRARY PRINTS ITSELF, in the format only it prints (result_audit's
+# LIBRARY_LINES: the served deal.II program's version line). The marker list above did not know
+# it, and the early check told every cell of one coupled round that the served program's own
+# console "PROVES A RUN, NOT WHICH CODE RAN IT" (measured).
+from tools.result_audit import LIBRARY_LINES as _LIBRARY_LINES      # noqa: E402
+_LIBRARY_LINE = _re_mod.compile("|".join(_LIBRARY_LINES), _re_mod.M | _re_mod.I)
 
 
 def _looks_like_captured_output(text: str) -> bool:
@@ -431,9 +544,19 @@ def _looks_like_captured_output(text: str) -> bool:
     this one accusing a solver of not existing.
     """
     low = text.lower()
-    if any(m.lower() in low for m in _SOLVER_MARKERS):
+    if any(m.lower() in low for m in _SOLVER_MARKERS) or _LIBRARY_LINE.search(text):
         return True
     return bool(_CONTRACT_LINE.search(text))
+
+
+# A SOLVER'S OWN TIMESTAMPED LOG LINE IS A SOLVER LINE. dolfinx prints its
+# console through spdlog -- `[2026-09-24 08:41:03.117] [info] Cell type: 0 ...`
+# -- and never the word "dolfinx", so the marker list read 12 of 12 genuine
+# FEniCSx consoles of one round as the agent's own words and said so to three
+# cells (measured). The hand-in audit already accepts this shape; the two
+# doors now agree.
+_STAMPED_SOLVER_LINE = _re_mod.compile(
+    r"^\[\d{4}-\d\d-\d\d[ T][\d:.]+\] \[(?:info|warning|debug|error)\]", _re_mod.M)
 
 
 def _only_the_contract_line(text: str) -> bool:
@@ -450,15 +573,15 @@ def _only_the_contract_line(text: str) -> bool:
     condemns it is the same drift as three doors resolving a path three ways.
     """
     low = text.lower()
-    if any(m.lower() in low for m in _SOLVER_MARKERS):
+    if (any(m.lower() in low for m in _SOLVER_MARKERS) or _STAMPED_SOLVER_LINE.search(text)
+            or _LIBRARY_LINE.search(text)):
         return False
     return bool(_CONTRACT_LINE.search(text))
-
 
 def _discarded_proof_check(written: Path, content: str) -> str:
     """An execution log carrying the agent's prose instead of the capture.
 
-    MEASURED, one development run that got everything else right on this
+    MEASURED, one recorded run that got everything else right on this
     problem: both participants really ran, the partitioned iteration really
     converged (1.3901141511 -> 4.3834e-07 in eight iterations at level 1), and
     the order, checked against an independent reference, came out 1.9367. Its
@@ -527,7 +650,7 @@ def _discarded_proof_check(written: Path, content: str) -> str:
         "summary line your task asks for, such as the DOF count\n"
         "    -- or drop capture_output and redirect instead, "
         "`cmd > <that side's run log> 2>&1`. Do not summarise it and do not "
-        "retype it. A run that got everything else right on this problem -- "
+        "retype it. A recorded run that got everything else right -- "
         "both codes really running, the interface iteration converging to "
         "4.4e-07, an order of 1.94 checked against an independent reference -- "
         "wrote three lines of its own prose here and "
@@ -541,7 +664,7 @@ _WRAPPERS = ("stdbuf", "timeout", "nice", "nohup", "ionice", "setsid")
 def _env_after_wrapper_check(command: str) -> str:
     """`stdbuf -oL VAR=x prog` runs VAR=x as the program. Measured.
 
-    One development run was served `stdbuf -oL -eL <binary> deck out` and also
+    One recorded run was served `stdbuf -oL -eL <binary> deck out` and also
     wanted a library path, so it wrote
 
         stdbuf -oL -eL LD_LIBRARY_PATH=/opt/4C-dependencies/lib .../4C deck out
@@ -612,7 +735,7 @@ def _env_after_wrapper_check(command: str) -> str:
 def _eaten_error_check(output: str) -> str:
     """A nonzero exit whose captured output does not contain the reason.
 
-    MEASURED, one development run. Its run_log.txt reads, in full: `4C stdout:`
+    MEASURED, one recorded run. Its run_log.txt reads, in full: `4C stdout:`
     (empty), then the MPI_ABORT boilerplate, then `4C return code: 1`. From
     that the run concluded "the 4C binary requires specific MPI environment
     configuration", listed it as blocker number one, and filed a
@@ -656,11 +779,23 @@ def _eaten_error_check(output: str) -> str:
         "bytes, the same. `No protocol specified` and `Invalid "
         "MIT-MAGIC-COOKIE-1 key` are X11 noise from a headless session and "
         "appear on successful runs too -- they are not the failure. A previous "
-        "run on this problem read this exact output as an MPI configuration "
+        "recorded run read this exact output as an MPI configuration "
         "issue and delivered nothing.")
 
 # ── A DELIVERABLE WRITTEN FROM A CONSTANT ────────────────────────────────────
 _DELIVERABLE_STEM = ("solution_level", "interface_level", "field_level")
+
+
+_COORD_TOKEN = _re_mod.compile(r"(?:x|y|z)\d*|(?:x|y|z)(?:if|iface|int|line|const|c)")
+_VALUE_TOKENS = frozenset({"u", "ux", "uy", "uz", "q", "qn", "flux", "val", "value", "t", "temp", "sol",
+                           "phi", "grad", "du", "dudn", "sigma", "p", "f", "k", "res", "residual"})
+
+
+def _coordinate_name(name: str) -> bool:
+    """True for a name that reads as a coordinate (x, iface_x, x_if, y0), never for a value (ux, flux_x)."""
+    toks = [t for t in name.lower().split("_") if t]
+    return (any(_COORD_TOKEN.fullmatch(t) for t in toks)
+            and not any(t in _VALUE_TOKENS for t in toks))
 
 
 def _constant_deliverable_check(written: Path, content: str) -> str:
@@ -695,7 +830,7 @@ def _constant_deliverable_check(written: Path, content: str) -> str:
     never assigned from anything else. A value read from an array, returned by a
     call, or interpolated from a solver field fails that test and stays silent.
 
-    HOW LOAD-BEARING THAT NARROWNESS IS, measured by the campaign session over
+    HOW LOAD-BEARING THAT NARROWNESS IS, measured by the evaluation session over
     the same 579 cells. They built the loose version -- any script mentioning a
     deliverable stem that also carries placeholder language ("placeholder",
     "replace with actual", "for now,", "# TODO") -- and it speaks on 159 cells,
@@ -754,7 +889,11 @@ def _constant_deliverable_check(written: Path, content: str) -> str:
                 names = {n.id for v in arg.values
                          if isinstance(v, ast.FormattedValue)
                          for n in ast.walk(v.value) if isinstance(n, ast.Name)}
-                written_consts = {n for n in names if n in literal and n not in other}
+                # A COORDINATE THAT IS CONSTANT BY GEOMETRY IS NOT AN INVENTED VALUE. Measured:
+                # a correct cell wrote its straight interface's x from one literal (iface_x)
+                # beside y, u and q read from its dumps, and was told every number was invented.
+                written_consts = {n for n in names if n in literal and n not in other
+                                  and not _coordinate_name(n)}
                 # ONE CONSTANT IS ENOUGH, and requiring two was a hole the
                 # size of the measured failure. The shape that produced 132
                 # interface points of literal 0.0 is
@@ -790,7 +929,7 @@ def _script_noop_check(written: Path, content: str) -> str:
     """A participant that sets a nodal flux and creates no condition is inert.
 
     MEASURED, and this is the reason this check exists rather than another
-    paragraph of advice. Over 18 development runs on this problem that were
+    paragraph of advice. Over 18 recorded runs that were
     served the fact: 18 of 18 called a knowledge door, 18 of 18 set
     FACE_HEAT_FLUX, and ZERO of
     18 created the condition that makes it do anything. They find openPASO, they
@@ -798,8 +937,7 @@ def _script_noop_check(written: Path, content: str) -> str:
     into a boundary condition does not survive into the code.
 
     The consequence is invisible at runtime: Kratos converges, exits 0, and
-    returns exactly the no-flux field -- 2.307291e-03 against 3.605675e-03
-    with the condition present, bit-identical to a zero-flux run.
+    returns exactly the no-flux field, bit-identical to a zero-flux run.
 
     So it is caught in the SCRIPT, when the script is written, before it has
     run once. Prose next to the fact did not work eighteen times.
@@ -808,7 +946,11 @@ def _script_noop_check(written: Path, content: str) -> str:
 
     if written.suffix != ".py":
         return ""
-    sets_flux = "FACE_HEAT_FLUX" in content
+    # SETS, not merely names: a script that only registers the variable
+    # (AddNodalSolutionStepVariable) applies nothing and needs no condition --
+    # measured on a probe script that was told it "sets FACE_HEAT_FLUX".
+    sets_flux = bool(_re.search(
+        r"Set(?:SolutionStep)?Value\s*\(\s*(?:\w+\.)*FACE_HEAT_FLUX\b", content))
     if not sets_flux:
         return ""
     has_cond = bool(_re.search(
@@ -822,7 +964,7 @@ def _extra_script_checks(written: Path, content: str) -> str:
     """Two more defects that are visible in the script and invisible at runtime.
 
     Both were reproduced by execution, and both are counted across the scripts
-    the development runs wrote (per file, so a correct usage elsewhere cannot
+    the recorded runs wrote (per file, so a correct usage elsewhere cannot
     excuse a broken one here):
 
       DUNE `solver="cg"` on an operator carrying advection -- 20 runs. cg is
@@ -836,8 +978,8 @@ def _extra_script_checks(written: Path, content: str) -> str:
       NGSolve x/y rebound before symbolic use -- 27 runs. After
         `from ngsolve import *`, any loop assigning x or y rebinds the
         symbolic coordinates to floats. Measured: type() goes
-        CoefficientFunction -> float with value 0.02514662, x and y left at
-        0.9886363636, and CoefficientFunction((float, float)) is accepted
+        CoefficientFunction -> float, x and y are left at the last probe
+        visited, and CoefficientFunction((float, float)) is accepted
         silently. A constant body force on a fully-Dirichlet incompressible
         domain gives u identically zero -- 7.16e-17, 3.60e-17, 1.30e-17,
         order 0.0000 -- against 1.2229e-02 with the symbolic source.
@@ -858,11 +1000,27 @@ def _extra_script_checks(written: Path, content: str) -> str:
     # amount of coupling iterations recovers the lost order. The consistent
     # (residual) recovery and the 3-point one-sided quadratic are both
     # second order (they agree to 2.7% rel-RMS at h=1/8, measured).
-    if (_re.search(r"argmin", content)
-            and _re.search(
-                r"\(\s*\w+(?:\[[^\]]+\])?\s*-\s*\w+\[[^\]]+\]\s*\)"
-                r"\s*/\s*(?:0\.\d+|h\b|dx\b|\w*spacing\w*)", content)
-            and _re.search(r"q_?n?\s*=|flux", content, _re.I)):
+    # THE TWO OPERANDS ARE FIELD VALUES PICKED BY A NEAREST-NODE INDEX, AND THE QUOTIENT IS A FLUX.
+    # Measured on a fluid-structure round: three loose patterns matched one fluid script 54 times --
+    # a parabolic inflow profile `(h - x[1]) / h`, an argmin that mapped the partner's displacements,
+    # and `v, q = ufl.TestFunctions(W)` read as a flux called q -- and it recovered no flux at all.
+    # So: one operand indexed by a name an argmin made (or by argmin itself), neither operand the
+    # coordinate array, and the quotient assigned (or appended) to a flux or derivative name.
+    _picked = set(_re.findall(r"^[ \t]*(\w+)[ \t]*=[^\n]*\bargmin\b", content, _re.M))
+    _two_point = False
+    for _m in _re.finditer(
+            r"^[ \t]*(?P<lhs>\w+)(?:\[[^\]\n]*\])?[ \t]*(?:=(?!=)|\.append\()[^\n]*?"
+            r"\(\s*(?P<a>\w+)(?:\[(?P<ia>[^\]\n]+)\])?\s*-\s*(?P<b>\w+)\[(?P<ib>[^\]\n]+)\]\s*\)"
+            r"\s*/\s*(?:0\.\d+|h\b|dx\b|\w*spacing\w*)", content, _re.M):
+        _subs = " ".join(filter(None, (_m.group("ia"), _m.group("ib"))))
+        _by_argmin = "argmin" in _subs or any(_re.search(rf"\b{_re.escape(_n)}\b", _subs) for _n in _picked)
+        _coords = {_m.group("a"), _m.group("b")} & {"x", "X", "xs", "coords", "coordinates", "points", "pts"}
+        _fluxy = _re.fullmatch(r"q\w*|\w*flux\w*|d\w*d[xyzn]\w*|\w*grad\w*|\w*deriv\w*|\w*trac\w*",
+                               _m.group("lhs"), _re.I)
+        if _by_argmin and not _coords and _fluxy:
+            _two_point = True
+            break
+    if _two_point:
         out.append(
             "  * THIS SCRIPT RECOVERS THE INTERFACE FLUX BY A TWO-POINT "
             "DIFFERENCE OVER NEAREST-NODE LOOKUPS. That recovery is first "
@@ -935,8 +1093,8 @@ def _extra_script_checks(written: Path, content: str) -> str:
                 "THEM SYMBOLICALLY. After `from ngsolve import *` those names "
                 "ARE the symbolic coordinates, so the assignment turns your "
                 "source into a CONSTANT -- measured, type() goes "
-                "CoefficientFunction -> float with value 0.02514662 and x, y "
-                "left at 0.9886363636, and CoefficientFunction((float, float)) "
+                "CoefficientFunction -> float and x, y are left at the last "
+                "probe visited, and CoefficientFunction((float, float)) "
                 "is accepted silently. A constant body force on a "
                 "fully-Dirichlet incompressible domain gives u identically "
                 "zero: 7.16e-17, 3.60e-17, 1.30e-17 across the levels, order "
@@ -958,21 +1116,21 @@ def _FLUX_NOOP_MSG(written: Path) -> str:
             "integrated BY a condition; with none on the interface edges "
             "Kratos runs, converges, exits 0 and returns exactly the field it "
             "would have returned with no flux at all. Measured on one mesh: "
-            "zero flux 2.307291e-03, flux on nodes with no condition "
-            "2.307291e-03 (BIT-IDENTICAL), flux with conditions 3.605675e-03. "
+            "flux on nodes with no condition gives the zero-flux field "
+            "BIT-IDENTICALLY; with the conditions the flux is applied. "
             "Add, over the interface edges in order:\n"
             "        for c in range(len(iface) - 1):\n"
             "            mp.CreateNewCondition(\"ThermalFace2D2N\", c + 1,\n"
             "                                  [iface[c] + 1, iface[c+1] + 1], "
             "prop)\n"
             "    then set FACE_HEAT_FLUX on those nodes. FluxCondition2D2N "
-            "works too. 18 of the last 18 runs on this problem omitted this and "
+            "works too. 18 recorded runs omitted this, and "
             "every one of them delivered the no-flux answer.")
 
 def _wrong_level_run_log_check(workdir: Path, written: Path) -> str:
     """A per-level run log written from ANOTHER level's console, named the moment it is written.
 
-    MEASURED (rounds 29-33 of the honest coupled campaign): six three-level couplings with refined
+    MEASURED (five rounds of recorded coupled runs): six three-level couplings with refined
     meshes (consoles 54, 187, 693 dofs) handed in run logs copied from one level at every level, and
     read as an unchanged mesh. The audit names it, but the parents wrote the logs last and
     called the audit 0-1 times; the write is the moment the finding can still be acted on.
@@ -994,7 +1152,7 @@ def _wrong_level_run_log_check(workdir: Path, written: Path) -> str:
 def _level_index_check(workdir: Path, written: Path) -> str:
     """`<k>` in a deliverable name is the LEVEL INDEX, not the mesh count.
 
-    MEASURED. One development run solved three levels and wrote them as
+    MEASURED. One recorded run solved three levels and wrote them as
     `level1/<stem>_level8_A.csv`, `.../<stem>_level16_A.csv` and so on --
     naming each file by the mesh resolution the task lists (h = 1/8, 1/16,
     1/32) instead of by k = 1, 2, 3. Whoever verifies the results reads
@@ -1033,7 +1191,7 @@ def _level_index_check(workdir: Path, written: Path) -> str:
             "REFINEMENT INDEX: 1, 2, 3 for the first, second and third mesh "
             "in the prescribed sequence. It is NOT the number of cells and "
             "NOT 1/h. A result set named by the mesh count is read as levels "
-            "8, 16 and 32, none of which the task asked for, so a complete "
+            "numbered by those counts, none of which the task asked for, so a complete "
             "three-level result is read as having no usable levels -- measured "
             "on a real run that had solved all three. Rename every per-level "
             "file by its refinement index (level1, level2, level3), the same "
@@ -1068,7 +1226,7 @@ def _early_artefact_check(workdir: Path, written: Path) -> str:
     """Check a per-level artefact THE MOMENT IT IS WRITTEN, not at hand-in.
 
     WHY, MEASURED. The hand-in audit is correct, it arrives, and it cannot
-    be acted on. File mtimes over six development runs of one coupled problem:
+    be acted on. File mtimes over six recorded runs of one coupled problem:
     five of them wrote their summary file at 93-99% of their whole
     file-activity span, with only 8 to 115 seconds of activity left afterwards.
     The one that wrote it at 68%, with 357 seconds still to go, is the ONLY one
@@ -1123,7 +1281,7 @@ def _early_artefact_check(workdir: Path, written: Path) -> str:
         if _lm and _ext == "csv" and _csv_role(written) == "history":
             from tools.result_audit import residual_findings
             # THE RESIDUAL FILE IS THE MOMENT TO CHECK IT AGAINST THE
-            # INTERFACE FILES: measured on one development run, the interfaces
+            # INTERFACE FILES: measured on one recorded run, the interfaces
             # existed first and the residual landed last, so a check that fires
             # only on interface writes never sees the finished pair.
             try:
@@ -1155,7 +1313,7 @@ def _early_artefact_check(workdir: Path, written: Path) -> str:
             # without re-running anything. Proven against an independent
             # reference: a result set verified correct at order 1.9796,
             # re-exported by nearest-node lookup, came out confidently wrong at
-            # 0.9815, nothing else changed. 99 development runs carry the
+            # 0.9815, nothing else changed. 99 recorded runs carry the
             # fingerprint.
             from tools.result_audit import export_findings
             found = [f for f in export_findings(workdir)
@@ -1230,6 +1388,44 @@ def _fourc_deck_write_check(written: Path, content: str) -> str:
     return _deck_findings_text("[write check]", written.name, findings, "before any run")
 
 
+def _config_write_check(written: Path, content: str) -> str:
+    """A config that states no body force beside a polynomial heat source is named the moment it
+    is written. MEASURED on a delivered run: source_T transcribed from the task, source_ux and
+    source_uy written as 0.0 on both sides; the displacement solved that other problem, came out
+    400 times too small and converged cleanly, the temperature was right, and nothing judged it
+    until the grade. Names the gap only; the task's data are the agent's to transcribe."""
+    if written.name.lower() != "config.json":
+        return ""
+    try:
+        import json as _json                                # noqa: PLC0415
+        cfg = _json.loads(content)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if not isinstance(cfg, dict) or "lam" not in cfg or "mu" not in cfg:
+        return ""
+    try:
+        from tools.result_audit import _source_is_zero      # noqa: PLC0415
+    except Exception:                                    # noqa: BLE001
+        return ""
+    heat = str(cfg.get("source_T") or cfg.get("source_expr") or "").strip().replace("^", "**")
+    if not heat or _source_is_zero(heat):
+        return ""
+    fx, fy = cfg.get("source_ux"), cfg.get("source_uy")
+    if fx is None and fy is None:
+        how = "absent"
+    elif fx is not None and fy is not None and _source_is_zero(str(fx).replace("^", "**")) \
+            and _source_is_zero(str(fy).replace("^", "**")):
+        how = "0"
+    else:
+        return ""
+    return (f"\n[write check] {written.name}: it states NO BODY FORCE (source_ux and source_uy {how}) "
+            f"beside a heat source that is a polynomial. A manufactured thermo-elastic problem states a "
+            f"body force for the momentum equation as it states a heat source; with none the "
+            f"displacement solves a different problem and converges cleanly to it, which no "
+            f"self-consistency check can see. Confirm against the problem you were given: if it states f_u, put "
+            f"both components here as the task writes them, on both sides.")
+
+
 def _participant_write_check(written: Path, content: str) -> str:
     """A participant script is judged the moment it is written, before the run that would teach it.
 
@@ -1240,6 +1436,18 @@ def _participant_write_check(written: Path, content: str) -> str:
     those 46 and fires on none of the 32 served participants. Names defects only, writes nothing; the
     mesh, the form, the material, the source and the solve are the agent's and are not judged here.
     """
+    if written.name.lower().endswith((".cc", ".cpp", ".cxx")) or written.name.lower() == "cmakelists.txt":
+        # A deal.II PROGRAM AND ITS CMakeLists ARE JUDGED TOO (measured: a missing update flag and
+        # a find_package without HINTS each cost a cell its deal.II side).
+        try:
+            from tools.participant_lint import cxx_findings, served_program_checks_lost   # noqa: PLC0415
+            _cx = cxx_findings(content, written.name)
+            # A PROGRAM WRITTEN IN PLACE OF THE SERVED ONE IS JUDGED FOR THE STOPS IT LOST (measured: a
+            # rewrite kept none of the served stops, and nothing said so at the write).
+            _lost = served_program_checks_lost(content, written.name, near=written)
+        except Exception:                                # noqa: BLE001
+            return ""
+        return "".join(f"\n[write check] {written.name}: {f}" for f in ([_lost] if _lost else []) + _cx[:3])
     if not written.name.lower().endswith(".py"):
         return ""
     try:
@@ -1267,22 +1475,37 @@ def _participant_write_check(written: Path, content: str) -> str:
         gap = missing_export_selfcheck(content)
     except Exception:                                    # noqa: BLE001
         gap = ""
+    # ONCE PER FILE. Measured on a coupled round: the note fired 39 times on hand-written files and
+    # drew no response; the information is in its first serving, and the repeat buries the findings
+    # that change with each write.
+    if gap:
+        _key = str(Path(written).resolve())
+        gap = "" if _key in _SELFCHECK_NOTE_SERVED else gap
+        _SELFCHECK_NOTE_SERVED.add(_key)
     gap_txt = (f"\n[write check] {written.name}: {gap}" if gap else "")
     # THE IMPORT THAT NEVER REACHED THE ANSWER IS ITS OWN CATEGORY TOO, and the
     # quietest of the three: the run finishes, the interface residual collapses,
-    # and the submission is complete and wrong. Measured on 63 recorded NGSolve
-    # participants (32 fire) and on the recorded runs (32 fire, no correct one among them).
+    # and the submission is complete and wrong. Measured on the recorded NGSolve
+    # participants (about half fire) and on the recorded runs (it fires on
+    # failing ones, on none that were correct).
     try:
         from tools.participant_lint import imported_values_not_held   # noqa: PLC0415
-        lost = imported_values_not_held(content)
+        lost = imported_values_not_held(content, near=written)
     except Exception:                                    # noqa: BLE001
         lost = ""
     if lost:
         gap_txt += f"\n[write check] {written.name}: {lost}"
+    try:
+        from tools.participant_lint import unset_mask_bits   # noqa: PLC0415
+        _mask = unset_mask_bits(content)
+    except Exception:                                    # noqa: BLE001
+        _mask = ""
+    if _mask:
+        gap_txt += f"\n[write check] {written.name}: {_mask}"
     # A MESH THAT ASSEMBLES A SINGULAR SYSTEM IS THE THIRD CATEGORY: the run
     # starts, the solver reports its own failure, and the mesh is never
     # suspected. 29 of the 48 recorded hand-built tetrahedral scripts skip the
-    # sign check; every evaluated run among them is incomplete.
+    # sign check; every recorded run among them was incomplete.
     try:
         from tools.participant_lint import unoriented_tetrahedra   # noqa: PLC0415
         tets = unoriented_tetrahedra(content)
@@ -1300,7 +1523,7 @@ def _participant_write_check(written: Path, content: str) -> str:
     if deaf:
         gap_txt += f"\n[write check] {written.name}: {deaf}"
     # AND THE CONTRACT THAT WAS NEVER ASKED FOR. The second code is where
-    # coupled runs die and 17 of 22 such cells never fetched its contract.
+    # coupled runs die, and most such runs never fetched its contract.
     try:
         from tools.participant_lint import contract_never_fetched   # noqa: PLC0415
         unasked = contract_never_fetched(content, near=written)
@@ -1308,6 +1531,29 @@ def _participant_write_check(written: Path, content: str) -> str:
         unasked = ""
     if unasked:
         gap_txt += f"\n[write check] {written.name}: {unasked}"
+    # AND THE SECOND SIDE WRITTEN BY HAND BESIDE A SERVED FIRST SIDE: measured,
+    # the shape of every run of one family that delivered nothing.
+    try:
+        from tools.participant_lint import hand_written_beside_a_served_side   # noqa: PLC0415
+        alone = hand_written_beside_a_served_side(content, near=written)
+    except Exception:                                    # noqa: BLE001
+        alone = ""
+    if alone:
+        gap_txt += f"\n[write check] {written.name}: {alone}"
+    # AND A SOLVE THAT IS ONE PRECONDITIONER SWEEP, A SERVED REFUSAL DELETED,
+    # AND A SERVED BLOCK LOST WHILE THE FILE WAS WRITTEN AGAIN: each measured on
+    # a round, each lets a run go on without what the contract served.
+    for _fn_name in ("unsolved_linear_solve", "skfem_form_mixes_elements", "served_guard_removed",
+                     "served_blocks_lost"):
+        try:
+            from tools import participant_lint as _pl                 # noqa: PLC0415
+            _said = getattr(_pl, _fn_name)(content) \
+                if _fn_name in ("unsolved_linear_solve", "skfem_form_mixes_elements") \
+                else getattr(_pl, _fn_name)(content, near=written)
+        except Exception:                                # noqa: BLE001
+            _said = ""
+        if _said:
+            gap_txt += f"\n[write check] {written.name}: {_said}"
     if not findings:
         return gap_txt
     shown = findings[:8]
@@ -1330,16 +1576,33 @@ def _deck_findings_text(tag: str, name: str, findings: list, when: str) -> str:
             + "\n".join(f"  - {f}" for f in shown) + more + ("\n  " + note[0] if note else ""))
 
 
-def _participant_run_check(output: str) -> str:
+_VIEWERS = {"cat", "head", "tail", "sed", "less", "more", "grep", "egrep", "awk", "wc", "nl",
+            "ls", "cd", "echo", "diff", "sort", "uniq", "cut", "find", "stat", "file", "pwd"}
+
+
+def _only_views(command: str) -> bool:
+    """True when every step of a shell command only shows files: a `tail` of a script
+    that quotes an error message in its own text is not a run that failed with it."""
+    import re as _re                                         # noqa: PLC0415
+    steps = [s.strip() for s in _re.split(r"&&|\|\||;|\|", command or "") if s.strip()]
+    return bool(steps) and all(s.split()[0].rsplit("/", 1)[-1] in _VIEWERS for s in steps)
+
+
+def _participant_run_check(output: str, command: str = "") -> str:
     """A run that already failed names its own fix, in the same reply.
 
     Measured in round 49: 12-36 shell calls per cell and 8-31 file writes, at 35-73 seconds each, and
     the loop that consumed them was write-run-error-rewrite on the participant. When the console
     carries one of the errors this project has measured, the call that works goes back with it.
+    It says nothing on a command that only shows files (measured: it fired on the `tail` of a
+    participant whose served text quotes the error it answers).
     """
+    if command and _only_views(command):
+        return ""
     try:
         from tools.participant_lint import findings_from_output   # noqa: PLC0415
-        findings = findings_from_output(output)
+        # the command tells which code crashed when the output cannot (a SIGSEGV prints no traceback)
+        findings = findings_from_output(output, command)
     except Exception:                                    # noqa: BLE001
         return ""
     if not findings:
@@ -1410,6 +1673,14 @@ def _fourc_run_check(command: str, output: str, workdir: Path) -> str:
         out += _deck_findings_text("[run check]", deck.name, findings, "in this deck")
     if err and not finished:
         out += "\n[run check] 4C's own stop: " + err.strip()
+    if not finished:
+        try:
+            from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+            _ans = fourc_stop_answer(console)
+            if _ans:
+                out += "\n[run check] " + _ans
+        except Exception:                                # noqa: BLE001
+            pass
     if finished:
         try:
             from tools.fourc_deck_lint import field_scale_findings   # noqa: PLC0415
@@ -1453,7 +1724,7 @@ def _fourc_after_shell_check(workdir: Path, started_at: float, command: str = ""
                 deck = stem
             else:
                 # THE DECK THIS CONSOLE BELONGS TO, not the newest yaml in the directory. Measured
-                # (round 42, C1 7073): run_U.log's stop was paired with test_deck.yaml, an older probe
+                # (measured on a recorded run): run_U.log's stop was paired with test_deck.yaml, an older probe
                 # deck, while deck_U.4C.yaml sat beside it. Prefer a deck written by this command whose
                 # stem shares the log's suffix (run_U <-> deck_U), then any deck written by this command.
                 cands = [q for q in lg.parent.glob("*.yaml") if "monitor" not in q.name]
@@ -1469,6 +1740,13 @@ def _fourc_after_shell_check(workdir: Path, started_at: float, command: str = ""
             if direct is not None and deck is not None and deck.resolve() == direct.resolve():
                 continue
             line = f"\n[run check] 4C stopped in {lg.relative_to(root)}: {err}"
+            try:
+                from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+                _ans = fourc_stop_answer(txt)
+                if _ans:
+                    line += "\n[run check] " + _ans
+            except Exception:                            # noqa: BLE001
+                pass
             if deck is not None:
                 findings = deck_judgement(deck.read_text(errors="ignore"))
                 real = [f for f in findings if not str(f).startswith("(section names not judged")]
@@ -1477,6 +1755,96 @@ def _fourc_after_shell_check(workdir: Path, started_at: float, command: str = ""
             out.append(line)
             if len(out) >= 2:
                 break
+        # A DECK IS JUDGED WHOEVER WRITES IT. The brief promises a deck is
+        # "read and judged the moment you write it"; that held for write_file
+        # and for a console this command left behind, and for nothing else.
+        # The served contracts have the participant SCRIPT write the decks,
+        # and a script whose 4C run never started (or whose console went to
+        # the shell) leaves no log -- measured on two cells of one round:
+        # seventeen and eight minutes spent hand-grepping decks whose defects
+        # (a condition on an E id no topology defines; a section written
+        # twice; entries without E) the lint names in one call. Every deck
+        # this command wrote or changed is judged here, log or no log.
+        judged = {d.resolve() for d in ([direct] if direct is not None else [])}
+        decks = []
+        for q in root.rglob("*.yaml"):
+            try:
+                if "monitor" in q.name or q.stat().st_mtime < started_at:
+                    continue
+            except OSError:
+                continue
+            if q.resolve() in judged:
+                continue
+            decks.append(q)
+        for deck in sorted(decks, key=lambda q: q.stat().st_mtime, reverse=True)[:2]:
+            try:
+                txt = deck.read_text(errors="ignore")
+            except OSError:
+                continue
+            if "PROBLEM TYPE" not in txt and "PROBLEMTYPE" not in txt:
+                continue                                  # not a 4C deck
+            findings = deck_judgement(txt)
+            real = [f for f in findings if not str(f).startswith("(section names not judged")]
+            if real:
+                out.append(f"\n[deck check] {deck.relative_to(root)} was written by this command"
+                           + _deck_findings_text("[deck check]", deck.name, findings, "in this deck"))
+        return "".join(out)
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _febio_deck_text(tag: str, name: str, findings: list, when: str) -> str:
+    shown = findings[:8]
+    more = f"\n  ... and {len(findings) - 8} more" if len(findings) > 8 else ""
+    return (f"\n{tag} FEBio DECK {name}: {len(findings)} defect(s) named from the deck {when}; FEBio "
+            f"accepts some of these without a word, so a run that ends in NORMAL TERMINATION does not clear them:\n"
+            + "\n".join(f"  - {f}" for f in shown) + more)
+
+
+def _febio_deck_write_check(written: Path, content: str) -> str:
+    """A FEBio deck written by hand is judged the moment it is written (see _febio_after_shell_check)."""
+    if written.suffix.lower() != ".feb":
+        return ""
+    try:
+        from tools.febio_deck_lint import lint_deck, looks_like_deck   # noqa: PLC0415
+        if not looks_like_deck(content):
+            return ""
+        findings = lint_deck(content)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    return _febio_deck_text("[write check]", written.name, findings, "before any run") if findings else ""
+
+
+def _febio_after_shell_check(workdir: Path, started_at: float, command: str = "") -> str:
+    """Every FEBio deck this shell command wrote, judged from its text.
+
+    MEASURED on three coupled rounds with a FEBio elastic side (15 cells): the participant writes its
+    .feb at run time, so no write check ever saw a deck, and the defects that decided the results
+    were ones FEBio accepts without a word -- u_z held on 146 of 1386 nodes of a plane-strain slab, a
+    held set with 1178 interior nodes, interface tables with 33 entries for 66 nodes, NodeSets
+    written with spaces (FEBio kept one node of each). FEBio's own stops ('invalid value for
+    attribute "lid"', 'Invalid load curve ID') came 41 times and name no set and no element. Reads
+    only the agent's own files, at most the two newest decks; writes nothing.
+    """
+    try:
+        from tools.febio_deck_lint import lint_deck, looks_like_deck   # noqa: PLC0415
+        root = Path(workdir)
+        decks = []
+        for q in root.rglob("*.feb"):
+            try:
+                if q.stat().st_mtime >= started_at and q.stat().st_size < 50_000_000:
+                    decks.append(q)
+            except OSError:
+                continue
+        out = []
+        for deck in sorted(decks, key=lambda q: q.stat().st_mtime, reverse=True)[:2]:
+            txt = deck.read_text(errors="ignore")
+            if not looks_like_deck(txt):
+                continue
+            findings = lint_deck(txt)
+            if findings:
+                out.append(_febio_deck_text("[run check]", str(deck.relative_to(root)), findings,
+                                            "this command wrote"))
         return "".join(out)
     except Exception:                                    # noqa: BLE001
         return ""
@@ -1505,7 +1873,7 @@ def deliverable_findings_after_worker(workdir: Path) -> str:
         # ONLY WHERE THE LOG IS DEMONSTRABLY ANOTHER LEVEL'S. The body reports
         # any mismatch between a deliverable log's dof count and that side's
         # captured console, and a near-miss is not a copied log: measured on
-        # the recorded runs it speaks on 3 of the 32 correct cells, two of them
+        # the recorded runs it spoke on a few correct ones, two of them
         # differing by 1% and 6% with no other level to match. It says which
         # case it found -- "it is level N's console" -- so keep that one.
         found += [f for f in (wrong_level_run_log_findings(workdir) or [])

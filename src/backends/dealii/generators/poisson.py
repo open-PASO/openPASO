@@ -68,8 +68,9 @@ int main()
 
   // Assemble
   QGauss<2> quadrature_formula(fe.degree + 1);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<2> fe_values(fe, quadrature_formula,
-                        update_values | update_gradients | update_JxW_values);
+                        update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
   const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
@@ -205,8 +206,9 @@ int main()
 
   // Assemble
   QGauss<3> quadrature_formula(fe.degree + 1);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<3> fe_values(fe, quadrature_formula,
-                        update_values | update_gradients | update_JxW_values);
+                        update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
   const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
@@ -339,8 +341,9 @@ int main()
   Vector<double> system_rhs(dof_handler.n_dofs());
 
   QGauss<2> quadrature(fe.degree + 1);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<2> fe_values(fe, quadrature,
-    update_values | update_gradients | update_JxW_values);
+    update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
   const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
@@ -456,8 +459,9 @@ int main()
   Vector<double> system_rhs(dof_handler.n_dofs());
 
   QGauss<2> quadrature(fe.degree + 1);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<2> fe_values(fe, quadrature,
-    update_values | update_gradients | update_JxW_values);
+    update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
   const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
   FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
@@ -587,8 +591,9 @@ int main() {{
     Vector<double> system_rhs(dof_handler.n_dofs());
 
     QGauss<dim> quadrature(fe.degree + 1);
+    // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
     FEValues<dim> fe_values(fe, quadrature,
-      update_values | update_gradients | update_JxW_values);
+      update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
     const unsigned int dpc = fe.n_dofs_per_cell();
     FullMatrix<double> cell_matrix(dpc, dpc);

@@ -1,105 +1,90 @@
 """deal.II TRANSIENT participant for the openPASO `couple` driver.
 
-Transient conduction  rho_c dT/dt - div(k grad T) = f(x, y, t)  on ONE
-rectangular subdomain of a domain split by a straight interface at x = IFACE_X,
-integrated with the theta-scheme (THETA = 0.5 is Crank-Nicolson, second order).
+Transient conduction  rho_c dT/dt - div(k grad T) + c T = f(x, y, t)  on one
+rectangular subdomain, marched over the whole window T_START -> T_END in
+N_STEPS steps of the theta scheme per run (THETA = 0.5 is Crank-Nicolson,
+second order). CONTRACT (do not change): runs in its work_dir with no
+arguments, reads imports.json (written every iteration; it is `{}` on
+iteration 1), writes exports.json LAST.
 
-CONTRACT (do not change): runs in its work_dir with no arguments, reads
-imports.json (written every iteration; it is `{}` on iteration 1), writes
-exports.json LAST, exits 0.
+THIS WRAPPER HAS NO HOLE. The solve is the C++ program dealii_side_transient.cc
+beside it, whose five marked holes are yours; write_participant_contract(...,
+variant='transient') writes it and its CMakeLists.txt next to this file. The
+wrapper writes the program's input, builds the program (the build block below),
+runs it, and turns its output into exports.json and the per-level dumps.
 
-Pure glue: the PDE solve is done by a compiled deal.II executable THAT YOU
-WRITE AND BUILD YOURSELF. No C++ source ships with this contract and none is on
-this install, so do not search for one: write a program that reads the side,
-the geometry, the material, the mesh size, the source samples and the imported
-interface samples from one plain-text file your solve region writes, and
-writes the interface trace and the CONSISTENT flux (the residual of the
-assembled system with no boundary condition applied, divided by the nodal
-interface weight) to a plain-text file your solve region reads back. That pair
-of files is private to you. This wrapper is the contract around it: the
-imports.json handshake, the sign convention, the exports schema and the
-self-check. deal.II has no Python API, so unlike every other backend there is
-a BUILD STEP before this can run at all:
+TIME COUPLING: WAVEFORM. One run exchanges the whole interface trace,
 
-    cmake -S <dir with YOUR .cc and a 6-line CMakeLists> -B <build> \
-          -DDEAL_II_DIR=<deal.II BUILD or INSTALL tree>
-    make -C <build>
+    values[i][n]        = T at interface point i at t^(n+1)
+    normal_fluxes[i][n] = the THETA-AVERAGED outward flux density over step n
 
-and DEALII_EXE below must point at YOUR binary.
-Check cmake's "Using the deal.II-X found at" line: pointing DEAL_II_DIR at a
-deal.II SOURCE tree silently falls back to whatever old deal.II is installed
-system-wide, and the build then fails or misbehaves for reasons that look like
-your code.
-
-TIME-COUPLING STRATEGY: WAVEFORM — one run marches the WHOLE window
-T_START -> T_END and exchanges the ENTIRE interface trace,
-
-    values[i][n]        = T at interface point i at time level t^(n+1)
-    normal_fluxes[i][n] = THETA-AVERAGED outward normal flux density over step n
-
-both (n_points, N_STEPS). The full argument for that choice, what coupling
-once per time step would cost instead, and why a participant may NOT keep
-hidden time state between driver iterations, are in the module docstring of
-`participant_fenics_transient.py` — this file implements the same protocol and
-interoperates with it directly (measured: FEniCSx Dirichlet + deal.II Neumann
-on a manufactured two-material problem, order 2.0 in space-time at the final
-time).
-
-THE TWO PARTICIPANTS MUST BE GIVEN THE SAME T_START, T_END, N_STEPS AND THETA.
-The payload has no time axis, so a mismatched window is invisible unless the
-trace LENGTH differs — which the solver checks and refuses on.
-
-THE THREE PROBLEM FUNCTIONS ARE muparser EXPRESSION STRINGS in the variables
-x, y, t, not Python callables: a compiled backend cannot be handed a lambda.
-muparser syntax is close to C, NOT to Python — `^` is the power operator,
-`exp/sin/cos/log/sqrt/abs/if` exist, and there is no `**`.
+both (n_points, N_STEPS): the protocol of participant_fenics_transient.py, whose
+docstring gives the reasons, and the two interoperate. Both participants must be
+given the same T_START, T_END, N_STEPS and THETA: the exchange carries no time
+axis, and a partner trace with another number of time levels stops this script.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 # ── EDIT THIS BLOCK ─ every number below is an ARBITRARY PLACEHOLDER.
 #    Replace ALL of them with your problem's geometry, material, BCs and time
-#    window. As shipped this is the LEFT / Dirichlet side; the payload that
-#    served this script gives the exact block for the RIGHT / Neumann side.
-SIDE      = "dirichlet"   # "dirichlet" (import T, export flux) | "neumann"
-PARTNER   = "right"       # the partner's `name` in your couple(...) call
-X0, X1    = 0.0, 0.6      # this subdomain's x-extent
-Y0, Y1    = 0.0, 0.4      # this subdomain's y-extent
-IFACE_X   = 0.6           # the shared interface; must equal X0 or X1
-K         = 0.8           # conductivity
-RHO_C     = 1.0           # VOLUMETRIC heat capacity rho*c  (NOT c alone)
-NX, NY    = 24, 16        # this subdomain's OWN mesh; need not match the partner
-T_START   = 0.0           # coupling window start  ─┐ BOTH participants must be
-T_END     = 1.0           # coupling window end     ├─ given the SAME three
-N_STEPS   = 20            # steps in the window     ─┘ numbers AND the same THETA
-THETA     = 0.5           # 0.5 = Crank-Nicolson (2nd order) | 1.0 = backward
-                          # Euler (L-stable, 1st order — caps the space-time
-                          # order at 1 when you refine dt with h)
-OUTER_FACES = "x"         # "x"  : only the non-interface x-face is Dirichlet,
-                          #        the two y-faces are natural (zero flux)
-                          # "all": the WHOLE non-interface boundary is Dirichlet
-# muparser expressions in x, y, t (see the docstring: C syntax, `^` for powers).
-T_INITIAL = "300.0"       # T(x, y, T_START); must agree with T_OUTER at T_START
-                          # on the Dirichlet faces or the first step carries an
-                          # initial layer that Crank-Nicolson answers with
-                          # oscillations rather than with second order
-T_OUTER   = "320.0"       # Dirichlet datum on the faces selected above
-F_SRC     = "0.0"         # volumetric source
-T_GUESS   = 300.0         # iteration-1 fallback interface temperature, and
-Q_GUESS   = 0.0           # iteration-1 fallback interface flux. Unlike the
-                          # FEniCSx participant, which uses its initial
-                          # condition as the temperature fallback, this wrapper
-                          # never evaluates T_INITIAL (it is a string for the
-                          # C++ side), so set T_GUESS to T_INITIAL's interface
-                          # value yourself.
-DEALII_EXE = "./dealii_side"   # YOUR compiled solver; you write and build it (docstring)
+#    window. As shipped this is the LEFT / Dirichlet side.
+#    config.json (or OPENPASO_CONFIG_JSON) overrides them where it states them.
+SIDE      = "dirichlet"   # "dirichlet" | "neumann"
+PARTNER   = "right"       # name of the partner participant in couple(...)
+X0, X1    = 0.0, 0.6
+Y0, Y1    = 0.0, 0.4
+IFACE_AXIS = "x"          # the interface is the line x = IFACE_X ("x") or y = IFACE_X ("y")
+IFACE_X   = 0.6
+K         = 0.8           # conductivity: a number, or [[kxx, kxy], [kyx, kyy]] when it is anisotropic
+RHO_C     = 1.0           # VOLUMETRIC heat capacity rho*c (not c alone)
+REACTION  = 0.0           # c in rho_c dT/dt - div(K grad T) + c T = f (0 when there is none)
+T_START, T_END = 0.0, 1.0 # the coupling window  ─┐ BOTH participants must be
+N_STEPS   = 20            # steps in the window   ├─ given the SAME four numbers
+THETA     = 0.5           # 0.5 Crank-Nicolson    ─┘ (1.0 backward Euler, first order)
+
+
+def F_SRC(x, y, t):
+    """Volumetric source f(x, y, t). Zero as shipped, a PLACEHOLDER like every
+    number above. x and y are NumPy arrays, t a number; return ONE array of
+    their shape (`0.0 * x + c` for a constant). Put your f here, or
+    "source_expr" in config.json. The program checks its `source` against
+    these samples at every time level and prints SOURCE on when they reach it."""
+    return np.zeros_like(x)
+
+
+def T_INITIAL(x, y):
+    """T at T_START. Keep it equal to T_OUTER(x, y, T_START) on the held edges,
+    or the first step starts from a jump that Crank-Nicolson answers with
+    oscillations."""
+    return 0.0 * x + 300.0
+
+
+def T_OUTER(x, y, t):
+    """The value held on the held NON-interface edges at time t."""
+    return 0.0 * x + 320.0
+
+
+# WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY: the edge
+# opposite the interface is held; True if the two edges the interface ends on
+# are held too, False if they are natural (zero flux). The script refuses to
+# run until you set it, and the program checks your hole 4 against it.
+FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
+NX, NY    = 46, 26
+Q_INIT    = 0.0           # iteration-1 flux on the Neumann role (the Dirichlet role starts from T_INITIAL)
+DEAL_II_DIR = ""          # the deal.II build or install tree discover(query='list') names;
+                          # "" leaves it to the DEAL_II_DIR environment variable
 # ─────────────────────────────────────────────────────────────────────────
 
-DEGREE = 1                # FE_Q degree used by the deal.II solver
-
+DEGREE = 1                                    # FE_Q degree of the program
+DEALII_SRC = "dealii_side_transient.cc"       # the served program, holes filled, beside this file
+DEALII_EXE = "./build/dealii_side_transient"  # what the build below makes of it
 
 
 def _partner_block(imp):
@@ -110,10 +95,9 @@ def _partner_block(imp):
         return imp[PARTNER] or None
     others = [k for k in imp if isinstance(imp.get(k), dict)]
     if len(others) == 1:     # named differently in couple(...) than here: read it, say so
-        import sys as _sys
         print(f"NOTE: PARTNER is {PARTNER!r} but imports.json is keyed {others[0]!r} "
               f"-- reading that block; align PARTNER with the name in your "
-              f"couple(...) call.", file=_sys.stderr)
+              f"couple(...) call.", file=sys.stderr)
         return imp[others[0]] or None
     if others:
         raise SystemExit(f"imports.json holds blocks named {others} and none is "
@@ -133,197 +117,256 @@ def read_imports():
     return _partner_block(d)
 
 
-def sample_trace(imp, key, fallback):
-    """Partner samples as (y, [v_1 ... v_N]) rows sorted by y; a constant trace
-    if there is nothing to read (iteration 1).
+def _expr(value, names):
+    """A number, or an expression string in `names` (`^` allowed), as a NumPy callable."""
+    if not isinstance(value, str):
+        return lambda *a: 0.0 * a[0] + float(value)
+    code = compile(value.replace("^", "**"), "<config expression>", "eval")
+    env = {n: getattr(np, n) for n in ("sin", "cos", "exp", "sqrt", "abs", "log", "tanh", "cosh", "sinh", "pi")}
+    return lambda *a: eval(code, {"__builtins__": {}}, dict(env, **dict(zip(names, a)))) + 0.0 * a[0]
 
-    The deal.II solver interpolates each COLUMN piecewise-linearly (clamped
-    outside the range) onto its own interface nodes — same semantics as
-    numpy.interp, applied per time level. Interpolating a flattened trace
-    instead interleaves the time levels: the length is still right, the
-    coupling still converges, and every number is wrong.
 
-    A trace of the WRONG NUMBER OF TIME LEVELS EXITS LOUDLY and does not fall
-    back. That distinction is the whole guard: the fallback is what iteration 1
-    looks like, so quietly using it for a partner whose window disagrees turns
-    a mismatched window into a run that converges to the initial guess at the
-    interface. Measured before this was split out: a 7-step partner against a
-    10-step participant produced rc=0, an exports.json, and a final interface
-    temperature of exactly the fallback constant, with nothing in the run
-    saying the partner's data had been dropped. The solver's own check never
-    fired, because the wrapper had already sanitised the input away.
-    """
+# ── THE PER-LEVEL RULE AND THE PROBLEM'S DATA (served). ./config.json (and the
+#    OPENPASO_CONFIG_JSON a multi-level call hands over) may carry "level", "nx",
+#    "ny", "n_steps" -- a space-time study refines dt with h, so each level
+#    carries its own n_steps, and the partner must be given the same -- and this
+#    subdomain's data as the task writes them: side, partner; x0, x1, y0, y1;
+#    iface ("left"|"right"|"bottom"|"top", or the interface coordinate) and
+#    iface_axis; k; rho_c; reaction; t_start, t_end, theta;
+#    full_outer_dirichlet; outer (a number, or a string in x, y and t);
+#    initial (a number, or a string in x and y); source_expr (a string in x, y
+#    and t, `^` allowed). They override the constants above.
+LEVEL = 1
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
+    try:
+        _cfg.update(**json.loads(_txt or "{}"))
+        LEVEL, NX, NY = int(_cfg.get("level", LEVEL)), int(_cfg.get("nx", NX)), int(_cfg.get("ny", NY))
+        N_STEPS = int(_cfg.get("n_steps", N_STEPS))
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
+if all(_k in _cfg for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_cfg[_k]) for _k in ("x0", "x1", "y0", "y1"))
+if str(_cfg.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
+    IFACE_AXIS = str(_cfg["iface_axis"]).strip().lower()[:1]
+_ifc = str(_cfg.get("iface", "")).strip().lower()
+if _ifc in ("left", "right", "bottom", "top"):
+    IFACE_AXIS = "x" if _ifc in ("left", "right") else "y"
+    IFACE_X = {"left": X0, "right": X1, "bottom": Y0, "top": Y1}[_ifc]
+elif _ifc:
+    try:
+        IFACE_X = float(_ifc)
+    except ValueError:
+        pass
+if str(_cfg.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
+    SIDE = str(_cfg["side"]).strip().lower()
+PARTNER = str(_cfg.get("partner") or PARTNER).strip()
+for _nm, _key in (("K", "k"), ("RHO_C", "rho_c"), ("REACTION", "reaction"), ("T_START", "t_start"),
+                  ("T_END", "t_end"), ("THETA", "theta")):
+    if _cfg.get(_key) is not None:
+        globals()[_nm] = _cfg[_key] if _key == "k" and np.ndim(_cfg[_key]) else float(_cfg[_key])
+if isinstance(_cfg.get("full_outer_dirichlet"), bool):
+    FULL_OUTER_DIRICHLET = _cfg["full_outer_dirichlet"]
+if _cfg.get("outer") is not None:
+    T_OUTER = _expr(_cfg["outer"], ("x", "y", "t"))
+if _cfg.get("initial") is not None:
+    T_INITIAL = _expr(_cfg["initial"], ("x", "y"))
+if _cfg.get("source_expr") is not None:
+    F_SRC = _expr(str(_cfg["source_expr"]), ("x", "y", "t"))
+_K4 = [float(K)] if np.ndim(K) == 0 else [float(v) for v in np.asarray(K, float).ravel()]
+if len(_K4) not in (1, 4):
+    sys.exit(f"K must be a number or a 2x2 matrix, not {K!r}")
+print(f"SOURCES IN USE: from {'config.json' if _cfg.get('source_expr') is not None else 'code (F_SRC)'}"
+      f"; k = {' '.join(f'{v:g}' for v in _K4)}; rho_c = {RHO_C:g}; reaction = {REACTION:g}; "
+      f"window {T_START:g} to {T_END:g} in {N_STEPS} steps, theta = {THETA:g}")
+if FULL_OUTER_DIRICHLET is None:
+    raise SystemExit("FULL_OUTER_DIRICHLET is unset: say whether the two non-interface edges the "
+                     "interface ends on are held (True) or natural (False), from your problem "
+                     "statement -- in this file or as \"full_outer_dirichlet\" in config.json.")
+AX = 0 if IFACE_AXIS == "x" else 1     # the coordinate the interface FIXES; AL runs ALONG it
+AL = 1 - AX
+
+
+def sample(imp, key):
+    """The partner's data as (s, [v_1 .. v_N]) rows sorted by s, s the
+    coordinate along the interface: one column per step. On iteration 1
+    (nothing imported yet) the Dirichlet role holds T_INITIAL along the
+    interface at every step, the Neumann role applies Q_INIT. The program
+    interpolates each column at its own interface points."""
     if not imp or not imp.get("coordinates"):
-        return [(float(Y0), [float(fallback)] * N_STEPS),      # iteration 1
-                (float(Y1), [float(fallback)] * N_STEPS)]
-    ys = [float(c[1]) for c in imp["coordinates"]]
-    vs = imp.get(key) or []
-    if len(vs) != len(ys) or not ys:
-        return [(float(Y0), [float(fallback)] * N_STEPS),
-                (float(Y1), [float(fallback)] * N_STEPS)]
-    rows = [(y, [float(v)] if not isinstance(v, (list, tuple))
-             else [float(z) for z in v]) for y, v in zip(ys, vs)]
-    widths = {len(r[1]) for r in rows}
-    if widths != {N_STEPS}:
-        sys.exit(f"partner '{PARTNER}' exported a trace with {sorted(widths)} "
-                 f"time levels, this participant's window has "
-                 f"N_STEPS={N_STEPS}. The exchange carries no time axis, so a "
-                 f"trace of the WRONG LENGTH is the only symptom a mismatched "
-                 f"window shows. Give both participants the same "
-                 f"T_START/T_END/N_STEPS/THETA.")
-    return sorted(rows)
+        n_along = (NY if AX == 0 else NX) * DEGREE + 1
+        ss = np.linspace(Y0, Y1, n_along) if AX == 0 else np.linspace(X0, X1, n_along)
+        xy = (0.0 * ss + IFACE_X, ss) if AX == 0 else (ss, 0.0 * ss + IFACE_X)
+        first = (np.broadcast_to(np.asarray(T_INITIAL(*xy), float), ss.shape) if SIDE == "dirichlet"
+                 else np.full(ss.shape, float(Q_INIT)))
+        return [(float(s), [float(v)] * N_STEPS) for s, v in zip(ss, first)]
+    ss = [float(c[AL]) for c in imp["coordinates"]]
+    vs = np.asarray(imp.get(key) if imp.get(key) is not None else [], float)
+    if vs.ndim == 2 and vs.shape == (len(ss), N_STEPS):
+        return sorted(zip(ss, vs.tolist()))
+    # A TRACE OF ANOTHER SHAPE STOPS THIS SCRIPT: falling back would turn a
+    # mismatched window, or a steady partner, into a run that converges to the
+    # iteration-1 guess at the interface with nothing saying the data was dropped.
+    got = f"shape {vs.shape}" if vs.size else "nothing"
+    sys.exit(f"THE PARTNER'S {key!r} CANNOT BE READ AS ONE ROW OF {N_STEPS} STEPS PER INTERFACE POINT: "
+             f"it has {got} for {len(ss)} points, and this side's window has N_STEPS = {N_STEPS}. "
+             + ("A partner that exports one value per point is a steady contract; a time-dependent "
+                "coupling uses variant='transient' on both sides. " if vs.ndim == 1 and vs.size == len(ss) else
+                "The exchange carries no time axis, so a trace of another length is the only sign of a "
+                "mismatched window: give both participants the same T_START, T_END, N_STEPS and THETA "
+                "(and the same n_steps in config.json when a level sets it). " if vs.ndim == 2 else
+                f"On the {SIDE} role this side reads the partner's {key!r}, which a "
+                f"{'neumann' if SIDE == 'dirichlet' else 'dirichlet'} partner exports: check the two SIDEs. "))
 
 
 imp = read_imports()
-if SIDE == "dirichlet":
-    side_flag, pairs = 0, sample_trace(imp, "values", T_GUESS)
-else:
-    side_flag, pairs = 1, sample_trace(imp, "normal_fluxes", Q_GUESS)
+rows = sample(imp, "values" if SIDE == "dirichlet" else "normal_fluxes")
 
-# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
-#    next to this script overrides the mesh knobs and names the level. The dumps
-#    at the foot of this file carry that level in their NAME, so a mesh study
-#    leaves one file per level instead of the fine mesh overwriting the coarse.
-LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
-    try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-        LEVEL = int(_cfg.get("level", LEVEL))
-        NX = int(_cfg.get("nx", NX))
-        NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+# ── THE PROGRAM, BUILT WHEN IT IS MISSING OR OLDER THAN ITS SOURCE (served) ──
+#    cmake -S . -B build -DDEAL_II_DIR=<tree> -DCMAKE_BUILD_TYPE=Release, then
+#    make -C build, with these six lines as CMakeLists.txt:
+#        cmake_minimum_required(VERSION 3.13)
+#        find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR} $ENV{DEAL_II_DIR})
+#        deal_ii_initialize_cached_variables()
+#        project(dealii_side_transient CXX)
+#        add_executable(dealii_side_transient dealii_side_transient.cc)
+#        deal_ii_setup_target(dealii_side_transient)
+#    <tree> is the deal.II build or install tree discover(query='list') and
+#    write_participant_contract name: set DEAL_II_DIR above to it. A compile
+#    that reads /usr/include/deal.II builds against a system package (or ran
+#    without deal_ii_setup_target), whatever cmake's "Using the deal.II-..."
+#    line said; the program's version check stops an older one.
+_exe, _src, _cml = Path(DEALII_EXE), Path(DEALII_SRC), Path("CMakeLists.txt")
+if _src.is_file() and (not _exe.is_file() or _exe.stat().st_mtime < max(
+        _src.stat().st_mtime, _cml.stat().st_mtime if _cml.is_file() else 0.0)):
+    _dir = DEAL_II_DIR or os.environ.get("DEAL_II_DIR", "")
+    for _cmd in (["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"]
+                 + ([f"-DDEAL_II_DIR={_dir}"] if _dir else []), ["make", "-C", "build", "-j4"]):
+        _b = subprocess.run(_cmd, capture_output=True, text=True)
+        _log = (_b.stdout + "\n" + _b.stderr).replace(str(Path.cwd()) + "/", "").splitlines()
+        for _ln in (ln for ln in _log if "Using the deal.II" in ln):
+            print(_ln)                                    # which deal.II the build found
+        if _b.returncode != 0:
+            _err = [ln for ln in _log if " error: " in ln or "CMake Error" in ln or "undefined reference" in ln]
+            _usr = any("/usr/include/deal.II" in ln for ln in _err)
+            sys.exit(f"BUILD FAILED at `{' '.join(_cmd[:2])}`. The first errors:\n"
+                     + "\n".join((_err or _log[-15:])[:12]) + "\n"
+                     + ("The compile read /usr/include/deal.II: that is a system deal.II, not the tree "
+                        "to build against. Set DEAL_II_DIR above to the tree discover(query='list') "
+                        "names, and keep deal_ii_setup_target in CMakeLists.txt." if _usr else
+                        "The LINK failed: the first 'undefined reference' names a call that compiled "
+                        "and that deal.II defines for other arguments." if "undefined reference" in "".join(_err) else
+                        f"Fix the FIRST one; it names the line of {DEALII_SRC}. A hole left empty "
+                        "fails exactly so." if " error: " in "".join(_err) else
+                        "If cmake did not find deal.II, set DEAL_II_DIR above to the build or "
+                        "install tree discover(query='list') names."))
+if not _exe.is_file():
+    sys.exit(f"no program at {DEALII_EXE}, and no {DEALII_SRC} and CMakeLists.txt beside this "
+             f"script to build it from: write_participant_contract(solver='dealii', ..., "
+             f"variant='transient') writes them.")
 
-FIELD_OUT = "field_out.txt"   # your .cc writes "x y u" per support point here,
-                              # at the END of the time window
-
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
-header = (f"{side_flag} {K!r} {RHO_C!r} {X0!r} {X1!r} {Y0!r} {Y1!r} {IFACE_X!r} "
-          f"{NX} {NY} {DEGREE} {THETA!r} {T_START!r} {T_END!r} {N_STEPS} "
-          f"{1 if OUTER_FACES == 'all' else 0}")
-lines = [header, T_INITIAL.strip(), T_OUTER.strip(), F_SRC.strip(),
-         f"{len(pairs)} {N_STEPS}"]
-lines += [f"{y:.16g} " + " ".join(f"{v:.16g}" for v in row) for y, row in pairs]
+# ── THE PROGRAM'S INPUT (served; dealii_side_transient.cc documents the same lines) ──
+nfx, nfy = NX * DEGREE + 1, NY * DEGREE + 1      # the grids run through the mesh nodes
+gx, gy = np.meshgrid(np.linspace(X0, X1, nfx), np.linspace(Y0, Y1, nfy))
+TIMES = T_START + (T_END - T_START) / N_STEPS * np.arange(N_STEPS + 1)    # t^0 .. t^N
+_grid = lambda fn, *t: np.broadcast_to(np.asarray(fn(gx, gy, *t), float), gx.shape)   # noqa: E731
+fsrc = [_grid(F_SRC, t) for t in TIMES]
+_g = lambda v: f"{float(v):.17g}"                # noqa: E731 -- full precision, plain float
+_block = lambda a: "\n".join(" ".join(map(repr, row)) for row in np.asarray(a, float).tolist())   # noqa: E731
+lines = [f"side {SIDE}", "k " + " ".join(_g(v) for v in _K4), f"rho_c {_g(RHO_C)}", f"reaction {_g(REACTION)}",
+         f"box {_g(X0)} {_g(X1)} {_g(Y0)} {_g(Y1)}", f"interface {IFACE_AXIS} {_g(IFACE_X)}",
+         f"full_outer {int(bool(FULL_OUTER_DIRICHLET))}", f"mesh {int(NX)} {int(NY)}", f"degree {DEGREE}",
+         f"level {LEVEL}", f"time {_g(T_START)} {_g(T_END)} {int(N_STEPS)} {_g(THETA)}",
+         f"samples {len(rows)} {N_STEPS}"]
+lines += [f"{_g(s)} " + " ".join(map(repr, map(float, vals))) for s, vals in rows]
+lines += [f"initial {nfx} {nfy}", _block(_grid(T_INITIAL))]
+lines += [f"source {nfx} {nfy} {N_STEPS + 1}"] + [_block(f) for f in fsrc]
+lines += [f"outer {nfx} {nfy} {N_STEPS + 1}"] + [_block(_grid(T_OUTER, t)) for t in TIMES]
 Path("dealii_input.txt").write_text("\n".join(lines) + "\n")
 
-out_txt = Path("dealii_output.txt")
-if out_txt.exists():
-    out_txt.unlink()
-r = subprocess.run([DEALII_EXE, "dealii_input.txt", "dealii_output.txt"],
+for _old in ("dealii_interface.txt", "dealii_field.txt"):
+    Path(_old).unlink(missing_ok=True)
+_if_out = Path("dealii_interface.txt").resolve()        # absolute paths: no cwd dependence
+import resource as _resource                     # what a killed run held, and how long it ran
+import time as _time
+_rss_before, _t_run = _resource.getrusage(_resource.RUSAGE_CHILDREN).ru_maxrss, _time.monotonic()
+r = subprocess.run([str(_exe.resolve()), str(Path("dealii_input.txt").resolve()), str(_if_out)],
                    capture_output=True, text=True)
-if r.returncode != 0 or not out_txt.is_file():
-    sys.stderr.write("deal.II solver failed (rc=%s)\n%s\n%s\n"
-                     % (r.returncode, r.stdout[-2000:], r.stderr[-2000:]))
-    sys.exit(1)
+_t_run = _time.monotonic() - _t_run
+# THE PROGRAM'S OWN CONSOLE, passed through on every run: the per-level run log
+# is that console, and its `NDOF = <n>` line comes from the program.
+print(r.stdout, end="")
+sys.stderr.write(r.stderr)
+if r.returncode < 0:          # killed by a signal: a crash inside the program, or a stop from outside
+    import signal as _signal
+    if -r.returncode in (_signal.SIGKILL, _signal.SIGTERM):
+        # A SIGNAL FROM OUTSIDE IS NOT A CRASH (measured: a program whose hole 1 refined its mesh nx + ny
+        # times took all of the host's memory, and the kernel killed it after eight minutes; this text
+        # called that a crash inside the program and sent the run to a DEBUG build). What the run measured
+        # is said instead: how long it ran, the most memory it held, and whether it got past hole 1.
+        _rss = _resource.getrusage(_resource.RUSAGE_CHILDREN).ru_maxrss      # kB: the largest child's peak
+        sys.exit(f"the deal.II program was KILLED BY {_signal.Signals(-r.returncode).name} (return code "
+                 f"{r.returncode}) after {_t_run:.0f} s"
+                 + (f", holding {_rss / 2 ** 20:.1f} GB of memory at its peak" if _rss > _rss_before else "")
+                 + ": that signal comes from outside the program. The kernel sends SIGKILL to a program that "
+                   "takes the host's memory, and a time limit sends it too; a crash inside the program ends "
+                   "with SIGSEGV or SIGABRT instead, and a DEBUG build does not name this. "
+                 + ("It printed no 'NDOF = ' line: it was stopped before it numbered its dofs, in hole 1 or "
+                    "the served lines just after it." if "\nNDOF = " not in "\n" + r.stdout else
+                    "It printed its 'NDOF = ' line, so it got past hole 1; its last lines are above."))
+    _debug = _cml.is_file() and re.search(r"^\s*target_compile_definitions\s*\([^)#]*\bDEBUG\b",
+                                          _cml.read_text(), re.M)
+    # DEBUG REACHES DEAL.II'S HEADERS, NOT ITS LIBRARY (measured on this install: a SparseMatrix
+    # copy-constructed from a filled one is left empty, and the call that uses it crashes with no
+    # message with DEBUG on as with it off).
+    _said = "An error occurred in line" in r.stderr
+    sys.exit(f"the deal.II program was KILLED BY {_signal.Signals(-r.returncode).name} (return code "
+             f"{r.returncode}): a crash inside the program, not an install fault. "
+             + ("This build has DEBUG on (the target_compile_definitions line of CMakeLists.txt), which turns "
+                "on the checks in deal.II's headers: the one that failed is on the stderr above ('An error "
+                "occurred in line' and the violated condition)." if _debug and _said else
+                "This build has DEBUG on (the target_compile_definitions line of CMakeLists.txt) and no deal.II "
+                "check printed: DEBUG turns on the checks in deal.II's headers, not the ones compiled into its "
+                "library. Measured to crash so with DEBUG on: a SparseMatrix copy-constructed from a filled one, "
+                "which is left empty (build the copy on sparsity, then copy_from), copy_from into a SparseMatrix "
+                "never built on a pattern, and an unsized index vector handed to get_dof_indices." if _debug else
+                "This build is a Release build, which asserts nothing: an FEValues accessor whose update "
+                "flag was not requested, an unsized index vector, or a SparseMatrix copy-constructed from a "
+                "filled one (it is left empty) crashes with no message. Uncomment the "
+                "target_compile_definitions(... PRIVATE DEBUG) line in CMakeLists.txt and run again: "
+                "deal.II's header checks then name a missing flag; the empty matrix and the unsized "
+                "vector crash with no message even then."))
+if r.returncode != 0 or not _if_out.is_file():
+    sys.exit(f"the deal.II program failed (return code {r.returncode}); its own message is above")
+# A PROGRAM THAT NEVER SAW THE SOURCE RETURNS THE BOUNDARY-DATA-ONLY ANSWER WITH NO
+# ERROR; the served one checks its `source` against the samples and says so.
+if max(float(np.abs(f).max()) for f in fsrc) > 0.0 and "\nSOURCE on" not in "\n" + r.stdout:
+    sys.exit(f"F_SRC is non-zero and the program at {DEALII_EXE} did not print 'SOURCE on': "
+             f"it is not the served program, or older than this input. Rebuild it from {DEALII_SRC}.")
 
-# PASS THE SOLVER'S OWN CONSOLE THROUGH. capture_output keeps it out of this
-# script's stdout, and the per-level run log your task asks for is exactly that
-# console -- a log carrying only this wrapper's prose cannot establish which
-# code ran on this side. Re-emitting it costs nothing and is the difference
-# between a log that counts and one that does not. The `NDOF = <integer>` line
-# the log contract needs comes from YOUR program: print it there, on a line of
-# its own, and it arrives here.
-if r.stdout:
-    print(r.stdout, end="")
-if r.stderr:
-    sys.stderr.write(r.stderr)
+_rows = np.loadtxt("dealii_interface.txt", ndmin=2)
+if _rows.size == 0 or _rows.shape[1] != 2 + 2 * N_STEPS:
+    sys.exit(f"the deal.II program wrote {_rows.shape[1] if _rows.size else 0} numbers per interface line; "
+             f"x, y, the trace at each of the {N_STEPS} steps and the flux over each were expected "
+             f"({2 + 2 * N_STEPS})")
+coords = _rows[:, :2].tolist()
+temps, fluxes = _rows[:, 2:2 + N_STEPS], _rows[:, 2 + N_STEPS:]
+print(f"[dealii-transient {SIDE}] iface n={len(coords)} steps={N_STEPS} dt={(T_END - T_START) / N_STEPS:.6g} "
+      f"theta={THETA:g} T(t_end)=[{temps[:, -1].min():.6g},{temps[:, -1].max():.6g}] "
+      f"q(last step)=[{fluxes[:, -1].min():.6g},{fluxes[:, -1].max():.6g}]")
 
-raw = out_txt.read_text().split()
-if len(raw) < 2:
-    sys.stderr.write("deal.II solver produced no interface points\n")
-    sys.exit(1)
-n_nodes, n_steps_out = int(raw[0]), int(raw[1])
-vals = [float(v) for v in raw[2:]]
-stride = 1 + 2 * n_steps_out
-if n_steps_out != N_STEPS or len(vals) != n_nodes * stride:
-    sys.stderr.write(f"deal.II output is malformed: {n_nodes} nodes x "
-                     f"{n_steps_out} steps needs {n_nodes * stride} numbers, "
-                     f"got {len(vals)}\n")
-    sys.exit(1)
-
-coords, temps, fluxes = [], [], []
-for i in range(n_nodes):
-    row = vals[i * stride:(i + 1) * stride]
-    coords.append([float(IFACE_X), row[0]])
-    temps.append(row[1:1 + n_steps_out])
-    fluxes.append(row[1 + n_steps_out:])
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
-
-print(f"[dealii-transient {SIDE}] iface n={n_nodes} steps={N_STEPS} "
-      f"dt={(T_END - T_START) / N_STEPS:.6g} theta={THETA} "
-      f"T(t_end)=[{min(r[-1] for r in temps):.6g},"
-      f"{max(r[-1] for r in temps):.6g}] "
-      f"q(last step)=[{min(r[-1] for r in fluxes):.6g},"
-      f"{max(r[-1] for r in fluxes):.6g}]")
-
-# PER-LEVEL PERSISTENCE: the interface trace and flux at the LAST step, and --
-# when the program wrote one -- the end-of-window field, named by LEVEL.
-# exports.json is overwritten by the next level; these files are not.
-# Interpolate THESE onto the probe points your task names. A file the next
-# level overwrites cannot carry a mesh study.
-# A DUMP DEFECT MUST NOT COST YOU THE SOLVE. exports.json is the driver's
-# proof that this participant succeeded, and it is written after these files,
-# so an exception here would throw away a coupling iteration that worked.
-try:
-    with open(f"interface_level{LEVEL}.csv", "w") as _f:
-        _f.write("x,y,u,qn\n")
-        for (_px, _py), _t, _q in zip(coords, temps, fluxes):
-            _f.write(f"{float(_px):.11e},{float(_py):.11e},"
-                     f"{float(_t[-1]):.11e},{float(_q[-1]):.11e}\n")
-    # THE FIELD COMES FROM YOUR OWN PROGRAM. deal.II is C++: this wrapper only runs
-    # your binary and reads what it printed, so the whole-domain field exists only
-    # if your .cc writes it. Have the program write FIELD_OUT -- one "x y u" line
-    # per support point at the end of the window -- and this block turns it into the
-    # per-level file. Without it there is no field to hand in at any level.
-    if Path(FIELD_OUT).is_file():
-        _rows = []
-        for _ln in Path(FIELD_OUT).read_text().splitlines():
-            _tok = _ln.split()
-            if len(_tok) != 3:
-                continue
-            try:
-                _rows.append([float(_t) for _t in _tok])
-            except ValueError:
-                continue
-        if _rows:
-            with open(f"field_level{LEVEL}.csv", "w") as _f:
-                _f.write("x,y,u\n")
-                for _px, _py, _u in _rows:
-                    _f.write(f"{_px:.11e},{_py:.11e},{_u:.11e}\n")
-            print(f"[dealii-transient {SIDE}] field_level{LEVEL}.csv: {len(_rows)} points")
-    else:
-        print(f"[dealii-transient {SIDE}] NO {FIELD_OUT}: your program printed the "
-              f"interface only, so this level has no field to hand in. Write one "
-              f"'x y u' line per support point to {FIELD_OUT} and run it again.")
-except Exception as _dump_exc:
-    # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-    # before it fails, so a dump that died mid-way leaves a header-only
-    # CSV -- a file that looks like a submission and carries no rows.
-    for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
-        try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
-        except OSError:
-            pass
-    print(f"[dealii_transient per-level dump] level {LEVEL} dump failed: "
-          f"{_dump_exc!r}. exports.json is still written, so the coupling\n"
-          f"continues, but this level has no field file to hand in. Fix the\n"
-          f"names the dump reads and run this level again.")
-
-# exports.json LAST: the driver takes its existence as proof of success.
 # ── EXPORT SELF-CHECK ─ keep this block. It stops the three exports that look
 #    fine and are worthless: a non-finite field; a Neumann side whose imported
 #    load never entered the assembled system (it returns the no-load answer and
-#    a flux of ~0 against a nonzero partner); and a flux that is the
-#    partner's array negated instead of a recovery from THIS side's own system.
+#    a flux of ~0 against a nonzero partner); and a flux that is the partner's
+#    array negated instead of a recovery from THIS side's own system.
 _chk_vals = np.asarray(temps, float).ravel()
 _chk_flux = np.asarray(fluxes, float).ravel()
 if not (np.isfinite(_chk_vals).all() and np.isfinite(_chk_flux).all()):
-    raise SystemExit("EXPORT SELF-CHECK: non-finite interface values or "
-                     "fluxs; the solve did not produce a usable field, so "
-                     "nothing was exported")
+    raise SystemExit("EXPORT SELF-CHECK: non-finite interface values or fluxes; "
+                     "the solve did not produce a usable field, so nothing was "
+                     "exported")
 _chk_imp = (json.loads(Path("imports.json").read_text() or "{}")
             if Path("imports.json").is_file() else {})
 _chk_qin = (np.concatenate([np.asarray(_d.get("normal_fluxes") or [], float).ravel()
@@ -332,22 +375,45 @@ _chk_qin = (np.concatenate([np.asarray(_d.get("normal_fluxes") or [], float).rav
 if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
         and np.abs(_chk_flux).max() < 1e-9 * np.abs(_chk_qin).max():
     raise SystemExit("EXPORT SELF-CHECK: the recovered interface flux is ~0 "
-                     "against a nonzero imported flux: the imported load "
-                     "never entered the assembled system (the facet term / "
-                     "boundary condition that integrates it is missing). Fix "
-                     "the application; do not couple on")
+                     "against a nonzero imported flux: the imported load never "
+                     "entered the assembled system (the facet term / boundary "
+                     "condition that integrates it is missing). Fix the "
+                     "application; do not couple on")
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
-#  applied load can legitimately reproduce it to the last bit.)
+#  applied flux can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \
         and np.array_equal(_chk_flux, -_chk_qin):
     raise SystemExit("EXPORT SELF-CHECK: the exported flux is the partner's "
                      "array negated, bit for bit: a copy, not a recovery from "
                      "this side's own assembled system")
 
+# PER-LEVEL PERSISTENCE: this level's interface trace and flux at the LAST step
+# and its whole field at T_END, named by LEVEL (exports.json is overwritten by
+# the next level; these are not). Interpolate THESE onto the probe points your
+# task names. A dump defect must not cost the solve: exports.json is written after them.
+try:
+    _fld = np.loadtxt("dealii_field.txt", ndmin=2)
+    _last = np.column_stack([_rows[:, :2], temps[:, -1], fluxes[:, -1]])
+    for _name, _head, _data in ((f"interface_level{LEVEL}.csv", "x,y,u,qn", _last),
+                                (f"field_level{LEVEL}.csv", "x,y,u", _fld[:, :3])):
+        with open(_name, "w") as _f:
+            _f.write(_head + "\n" + "".join(",".join(f"{v:.11e}" for v in _row) + "\n" for _row in _data))
+    print(f"[dealii-transient {SIDE}] field_level{LEVEL}.csv: {len(_fld)} points at t = {T_END:g}")
+except Exception as _dump_exc:
+    # both files or neither: half a pair, a truncated file or an earlier run's file could
+    # be read as this level's result
+    for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
+        try:
+            Path(_partial).unlink(missing_ok=True)
+        except OSError:
+            pass
+    print(f"[dealii-transient per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "
+          f"still written, but this level has no field file to hand in; run it again.")
+
 Path("exports.json").write_text(json.dumps({
     "field_name": "temperature",
-    "n_points": n_nodes,
+    "n_points": len(coords),
     "coordinates": coords,
-    "values": temps,
-    "normal_fluxes": fluxes,
+    "values": temps.tolist(),
+    "normal_fluxes": fluxes.tolist(),
 }, indent=2))

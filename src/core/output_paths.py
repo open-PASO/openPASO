@@ -15,7 +15,7 @@ failures follow, both silent:
   2. The namespace is shared, so two callers using the same job name
      overwrite each other, and either can read the other's results.
 
-Both were observed: 8 of 14 coupled runs in one batch of development runs
+Both were observed: 8 of 14 coupled runs in one batch of recorded runs
 wrote through this path and were read as having produced nothing, and 168
 simulation directories plus 58 coupling directories had accumulated inside
 the repository.

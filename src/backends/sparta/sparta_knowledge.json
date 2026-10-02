@@ -2198,7 +2198,8 @@
       "unknown surf_collide ID in surf_modify": "ERROR: Could not find surf_modify sc-ID (../surf.cpp:230)",
       "surface outside the box after trans/scale/rotate": "ERROR: <N> surface points are not inside simulation box (../surf.cpp:1689)",
       "surf_collide transparent on a closed body": "the enclosed cells still count as zero flow volume -> 'ERROR on proc 0: Collision cell volume is zero (../collide.cpp:441)' at the first collision step. transparent is for open sampling planes, not for bodies."
-    }
+    },
+    "orientation": "A surface line has a flow side: the side its normal points to. For a line from p1 to p2 the normal is N = (0,0,1) x (p2 - p1) (doc/read_surf: 'Molecules only collide with the \"outer\" edge of a line segment'): walking from p1 to p2, the gas is on your left, so a closed body in the gas is listed clockwise. read_surf prints '<a> <b> <c> = cells outside/inside/overlapping surfs'; a = 0 means every grid cell is inside a body. That is NOT an error: create_particles then prints 'Created 0 particles', the run ends 'with 0 particles' with rc = 0, and every surface tally is zero. Measured on this install with a placeholder line on a box face: listed one way, cells outside and particles; listed the other way, 0 cells outside and 0 particles. A second read_surf after a reversed first one stops with 'Cell type mis-match when marking on self (../grid.cpp:1586)'."
   },
   "reading_output": {
     "stats": "stats <N> prints every N steps plus the first and last step of a run; stats_style selects the columns; stats_modify formats them. log.sparta in the cwd holds the same table as stdout.",

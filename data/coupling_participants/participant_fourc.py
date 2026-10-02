@@ -63,9 +63,28 @@ def F_SRC(x, y):
     approximation of it.
     """
     return np.zeros_like(x)
-T_OUTER   = 320.0         # Dirichlet value on the NON-interface x-boundary
-FULL_OUTER_DIRICHLET = False  # True: T_OUTER also on y=Y0,Y1; corners stay outer
-NX, NY    = 24, 16        # this subdomain's OWN QUAD4 mesh
+T_OUTER   = 335.0         # Dirichlet value on the NON-interface x-boundary
+# WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY, NOT THIS FILE'S.
+#
+# This line used to read `FULL_OUTER_DIRICHLET = False` with a comment calling
+# the y-edges "insulated (natural, nothing to do)". A default here silently
+# chooses a boundary condition for a problem it has never seen, and a wrong
+# choice does not announce itself: the field converges cleanly to a function
+# that satisfies the condition this file picked, is as large on the unheld
+# edges as anywhere inside, and no self-consistency check can see it, because
+# the field IS consistent with the wrong condition. A template holds
+# PLACEHOLDERS, never a problem's values, and a boundary condition is a value.
+#
+# Set it from your problem statement: True if the y = Y0 and y = Y1 edges are
+# held at T_OUTER, False if your problem prescribes them natural (zero flux).
+# The script refuses to run until you have.
+FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
+if FULL_OUTER_DIRICHLET is None:
+    sys.exit("FULL_OUTER_DIRICHLET is unset: say whether the non-interface y-edges "
+             "are held at T_OUTER (True) or natural (False), from your problem "
+             "statement. A default here would be choosing your boundary "
+             "condition for you.")
+NX, NY    = 46, 26        # this subdomain's OWN QUAD4 mesh
 T_INIT    = 310.0         # iteration-1 fallback interface temperature
 Q_INIT    = 0.0           # iteration-1 fallback interface flux
 FOURC_BIN = "4C"          # the 4C binary path `discover(query='list')` prints
@@ -390,7 +409,8 @@ weights[[0, -1]] = 0.5 * hy
 q_consistent = -residual[:, i_if] / weights
 if FULL_OUTER_DIRICHLET:
     # Corner reactions also contain the perpendicular outer-boundary flux and
-    # cannot be separated into one interface contribution. Zero it: a corner reaction mixes the perpendicular outer flux and is not a clean interface datum.
+    # cannot be separated into one interface contribution, so zero this mixed
+    # reaction at an interface/outer corner rather than report it as flux.
     q_consistent[[0, -1]] = 0.0
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 

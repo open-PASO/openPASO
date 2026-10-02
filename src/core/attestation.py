@@ -101,13 +101,29 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+# A MESH FILE IS NOT THE RESULT, AND A TAG ARRAY IS NOT A FIELD. Measured 2026-09-29 in the
+# web interface: three FEniCSx runs each had their headline numbers "computed by openPASO
+# from the run's own data" out of the input mesh -- channel_cyl.msh sorts before
+# pressure.vtu, and its first point array is gmsh's own `gmsh:dim_tags` -- so every reply
+# carried max_abs 9.055 (a tag number) and told the model to report it. Mesh files go last,
+# and bookkeeping arrays (gmsh's tags, VTK's ids and ghost flags) are never a field.
+_MESH_SUFFIXES = (".msh",)
+_BOOKKEEPING = ("gmsh:", "vtk")
+
+
+def is_solution_field(name: str) -> bool:
+    """False for arrays a mesh writer adds for its own bookkeeping."""
+    return not str(name).lower().startswith(_BOOKKEEPING)
+
+
 def find_data_artefacts(work_dir) -> list[Path]:
-    """Solver-written field files only. Never narration."""
+    """Solver-written field files only. Never narration. Mesh files last."""
     w = Path(work_dir)
     if not w.is_dir():
         return []
-    return sorted(p for p in w.rglob("*")
-                  if p.is_file() and p.suffix.lower() in DATA_SUFFIXES)
+    found = [p for p in w.rglob("*")
+             if p.is_file() and p.suffix.lower() in DATA_SUFFIXES]
+    return sorted(found, key=lambda p: (p.suffix.lower() in _MESH_SUFFIXES, str(p)))
 
 
 def _within_run_window(path: Path, started: float | None,
@@ -168,8 +184,9 @@ def attest_quantity(work_dir, job_id: str, quantity: str, *,
         except Exception as e:                       # unreadable artefact
             last_err = f"{path.name}: {e}"
             continue
+        fields = {k: v for k, v in (fields or {}).items() if is_solution_field(k)}
         if not fields:
-            last_err = f"{path.name}: no nodal field present"
+            last_err = f"{path.name}: no nodal solution field present"
             continue
 
         name = field if field in fields else next(iter(fields))

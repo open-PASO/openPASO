@@ -7,7 +7,7 @@ driver's: it cannot be guessed, and no solve happens without it. openPASO elides
 
 MEASURED. The coupling payload for solver='fourc' contained no PROBLEM TYPE, no
 MATERIALS, no SCALAR TRANSPORT DYNAMIC, no DESIGN LINE DIRICH, no NODE COORDS and
-no NUMDOF; three development runs of one coupled problem all died on the 4C
+no NUMDOF; three recorded runs of one coupled problem all died on the 4C
 side, and one of them named the cause itself ("4C scalar transport module
 requires specific topology definitions"). Single-code 4C runs were worse off
 still: they never call knowledge(topic='coupling'), so they received none of it.
@@ -120,7 +120,7 @@ THE NEUMANN SIDE NEEDS TWO DECK LINES THE DIRICHLET SIDE DOES NOT, and one of
 them fails silently. It APPLIES the partner's flux profile, and it has to ASK
 for the consistent boundary flux or 4C writes none.
 
-APPLYING A SAMPLED FLUX PROFILE needs no fitted function either: pre-integrate
+Applying a sampled flux profile needs no fitted function either: pre-integrate
 it into nodal loads, one POINT condition per interface node. For an interior
 interface node i with spacing h, the consistent load is Simpson's
 
@@ -141,7 +141,8 @@ entries that must BOTH be present:
   SCALAR TRANSPORT DYNAMIC:
     CALCFLUX_BOUNDARY: "diffusive"
   SCATRA FLUX CALC LINE CONDITIONS:
-    - E: 2               # the DLINE id of the interface line (SURF in 3-D)
+    - E: <id>            # the DLINE whose nodes lie ON the interface (SURF in 3-D);
+                         # any other line exports a flux of the wrong boundary
 
 Measured on this install, one 2x2 scatra deck run three times, differing only in
 these lines:
@@ -462,7 +463,8 @@ in one call.
     - "NODE 7 DVOL 1"
     - "NODE 8 DVOL 1"
 
-  Run it as `stdbuf -oL -eL <4C> deck.4C.yaml out`; it leaves out-vtk-files/
+  Run it as `stdbuf -oL -eL <4C> deck.4C.yaml out` from INSIDE your participant
+  script (couple() and the critic review take that script, never the binary); it leaves out-vtk-files/
   (structure-*.vtu with the displacement, thermo-*.vtu with the temperature)
   and one out-<id>_monitor_dbc.yaml per monitored point condition with the
   reaction force. The thermal DIRICH entries write no reaction, so a

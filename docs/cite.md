@@ -27,7 +27,8 @@ If openPASO helps your research, please cite the archived release:
 
 openPASO was first published under the name **OASiS**. The archived Zenodo records and the
 accompanying paper use that name, and they remain valid: they describe the same software, before it
-was renamed. The old repository address `github.com/Hereon-InstituteMS/OASiS` forwards to the new one.
+was renamed. The old repository addresses `github.com/Hereon-InstituteMS/OASiS` and
+`github.com/Hereon-InstituteMS/openPASO` both forward to `github.com/open-PASO/openPASO`.
 
 ## Who makes it
 

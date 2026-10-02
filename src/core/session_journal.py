@@ -92,7 +92,7 @@ def live_session_dir() -> Path:
     that cost a round:
 
       * anything that hashes an installation is invalidated by the act of
-        using it. A five-cell coupled round was stamped invalid because a
+        using it. A five-run coupled round was voided as an infrastructure failure because a
         reply-size measurement, run from inside the frozen source snapshot
         those cells ran against, journalled four knowledge lookups into it. Not
         one byte of code differed; the tree hash moved anyway, and the guard
@@ -105,8 +105,8 @@ def live_session_dir() -> Path:
         control is for not doing.
 
     Order: the explicit override, then XDG's state directory, then its default
-    location. A campaign sets the override to each cell's own directory, so a
-    run's journal stays with the run. The server's shutdown save uses the same
+    location. An evaluation harness sets the override to each run's own directory, so
+    a run's journal stays with the run. The server's shutdown save uses the same
     function, so there is exactly one answer to "where does the journal go".
     """
     import os as _os
@@ -180,7 +180,7 @@ class SessionJournal:
     # the write-time check `contract_never_fetched` fired in 19 recorded runs and
     # was wrong in all 19, including one that graded correct. One line per event,
     # appended as it is recorded, into the same session directory the shutdown
-    # save uses (the campaign mounts it at the run's work/.openpaso_sessions).
+    # save uses (an evaluation harness mounts it at the run's work/.openpaso_sessions).
     # Best-effort and silent on failure: it must never break the tool it records.
     def _persist_live(self, evt: JournalEvent) -> None:
         try:

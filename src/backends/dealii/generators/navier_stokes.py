@@ -132,8 +132,9 @@ int main()
   nonzero_constraints.distribute(present_solution);
 
   QGauss<dim> quadrature(degree + 2);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<dim> fe_values(fe, quadrature,
-    update_values | update_gradients | update_JxW_values);
+    update_values | update_gradients | update_JxW_values | update_quadrature_points);
   const unsigned int dofs_per_cell = fe.dofs_per_cell;
   const unsigned int n_q = quadrature.size();
   FullMatrix<double> local_matrix(dofs_per_cell, dofs_per_cell);

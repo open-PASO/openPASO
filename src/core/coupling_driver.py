@@ -78,6 +78,7 @@ bit-identical, the floor is 0, and `max(tol, 0) == tol`.
 from __future__ import annotations
 import hashlib
 import json
+import re
 import os
 import tempfile
 import shutil
@@ -85,6 +86,67 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# The exports.json each participant held when a coupling this process ran CONVERGED, by
+# path, with its digest. A later coupling warm-starts only from these: a file written by a
+# standalone run of the participant (its fallback imports, another level's constants) is
+# not an interface state of this coupling.
+_COUPLED_EXPORTS: dict = {}
+# ... and the n_steps that coupling's level stated for that participant (None: not stated),
+# so a later level can tell a time axis in the export's width from vector components.
+_COUPLED_STEPS: dict = {}
+
+
+def _stated_n_steps(p) -> Optional[int]:
+    """The n_steps a participant's level states: its ./config.json with the level's
+    OPENPASO_CONFIG_JSON merged over it, as the served transient contracts read them."""
+    cfg: dict = {}
+    try:
+        c = Path(p.work_dir) / "config.json"
+        if c.is_file():
+            d = json.loads(c.read_text() or "{}")
+            if isinstance(d, dict):
+                cfg.update(d)
+    except (OSError, ValueError):
+        pass
+    try:
+        d = json.loads((getattr(p, "env", None) or {}).get("OPENPASO_CONFIG_JSON") or "{}")
+        if isinstance(d, dict):
+            cfg.update(d)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(cfg["n_steps"]) if cfg.get("n_steps") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _seed_misfit(seed, stated, old_steps) -> str:
+    """'' when a stored export fits this level; else what does not fit, in a few words.
+
+    A time-history export holds one column per step of the window it was run with. When
+    this level states another n_steps, the partner's trace-length guard stops the run at
+    iteration 1 (measured: three level runs of one ladder whose n_steps doubled with the
+    mesh). A width that did not track the old n_steps (vector components) is left alone."""
+    widths = set()
+    for arr in (seed.values, seed.normal_fluxes):
+        if arr is None:
+            continue
+        a = np.asarray(arr, float)
+        if a.size:
+            widths.add(int(a.shape[1]) if a.ndim >= 2 else 1)
+    for m in sorted(widths):
+        for n in sorted(stated):
+            if m != n and (old_steps is None or m == old_steps):
+                return f"{m} column(s) per point; this level's n_steps is {n}"
+    return ""
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 import numpy as np
 
@@ -94,6 +156,11 @@ from core.field_transfer import InterfaceData
 # into a count. An unbounded list turned a single NaN into ~80 near-identical
 # lines, which buries every other finding in the validation block.
 _MAX_NONFINITE_WARNINGS = 4
+# Non-finite exports of one participant, in a row, that end the coupling. One is enough:
+# the residual and the relaxation carry a NaN into every later iteration (measured: a
+# single non-finite first pass, with finite exports ever after, still ends 150 iterations
+# later in "did not converge ... last residual nan").
+_NONFINITE_STOP = 1
 _MAX_PARTICIPANT_STREAM_BYTES = 3_500_000
 
 
@@ -133,9 +200,21 @@ class CouplingResult:
     # of that block alone on the final iteration. A global norm hides a small
     # block behind a large one; these do not.
     block_residuals: dict[str, float] = field(default_factory=dict)
+    # the same blocks' fixed-point residuals: raw output against the relaxed input
+    block_fixed_point: dict[str, float] = field(default_factory=dict)
+    # and each block's estimated distance to its fixed point, from its last two steps
+    block_distance: dict[str, float] = field(default_factory=dict)
+    # each block's last change against its own largest value, and its tiny entries' against
+    # theirs (see _scaled_change)
+    block_scale_change: dict[str, float] = field(default_factory=dict)
+    block_tiny_change: dict[str, float] = field(default_factory=dict)
     # participant -> "responsive" | "unresponsive" | "imports never changed"
     #              | "no imports declared"
     responsiveness: dict[str, str] = field(default_factory=dict)
+    # for an "unresponsive" participant: {"changed": [...], "unchanged": [...]}, the
+    # imported columns ("<partner>.<key>") that moved, and those that never moved, on
+    # the iterations where its imports changed and its export did not
+    responsiveness_detail: dict = field(default_factory=dict)
     # the coupling graph as the driver resolved it (declared vs. actually wired)
     graph: dict = field(default_factory=dict)
     # relaxation actually applied: {"mode": "aitken"|"constant", "theta0": float,
@@ -246,6 +325,33 @@ def _bounded_stream(text: str) -> str:
             + raw[-half:].decode("utf-8", errors="replace"))
 
 
+# A STOP KEEPS ITS NAME. The tail was the last 300 characters of a participant's stderr, and a
+# served check's message runs longer: measured, couple()'s lead quoted a solve self-check from
+# mid-word ("ale ...") without the check's name, and the run read it as a check of ours that was
+# "too strict". The tail now starts at the last line that names a stop (a capitalised label and a
+# colon, or a Python exception line) when that line starts within the last `most` characters.
+_STOP_LINE = re.compile(r"^(?!NOTE\b|WARNING\b)(?:[A-Z][A-Z0-9_ ()/'-]{2,60}:|\w*(?:Error|Exception):|"
+                        r"SPARTA failed)", re.M)
+
+
+def _stderr_tail(text: str, n: int = 300, most: int = 1500) -> str:
+    """The end of a participant's stderr: from the last line that names a stop, when that line
+    starts within the last `most` characters, else the last `n` characters."""
+    text = text or ""
+    hits = [m for m in _STOP_LINE.finditer(text) if m.start() >= len(text) - most]
+    return text[hits[-1].start():] if hits else text[-n:]
+
+
+def _output_tail(r) -> str:
+    """The stderr tail, and the stdout tail when stderr carried nothing. Measured on a coupled
+    elastic round: a participant that printed the solver's console (FEBio's error box) to stdout
+    and exited 1 was reported twice as "stderr tail: ''", the stop it printed nowhere in sight."""
+    err = _stderr_tail(r.stderr)
+    if (r.stderr or "").strip() or not (r.stdout or "").strip():
+        return err
+    return f"{err} -- stderr was empty; stdout tail: {_stderr_tail(r.stdout)}"
+
+
 def _persist_participant_output(p: Participant, result, iteration: int) -> None:
     """Atomically retain the latest native process output for attribution."""
     log = p.work_dir / "participant_output.log"
@@ -290,6 +396,33 @@ def _rel_change(new: np.ndarray, prev: np.ndarray) -> float:
     if not np.any(live):
         return 0.0
     return float(np.max(np.abs(new[live] - prev[live]) / mag[live]))
+
+
+def _scaled_change(new: np.ndarray, prev: np.ndarray, own_below: float = 1e-6) -> tuple:
+    """(the largest change of a block's entries against the block's largest value, the largest
+    change of its TINY entries against their own values); NaN where it cannot be formed.
+
+    THE WORST ENTRY AGAINST ITSELF IS NOT THE BLOCK'S PRECISION. An entry of one field that
+    holds a small share of its block's largest value -- an interface end, a flux passing through
+    zero -- reads a large relative change for an absolute one at the iteration's tolerance, and a
+    finer mesh puts an entry nearer zero. Measured on a right steady ladder: 1.1e-6, 3.7e-6 and
+    1.74e-4 at levels 1-3 from an entry holding 0.9 % of its block's largest value, and the ladder
+    read NOT VERIFIED three rounds running. So each entry is measured against the block's largest
+    value -- except an entry more than six orders below it, which is taken as another quantity in
+    the same array (a flat list of mixed quantities, the case _rel_change's entry-by-entry measure
+    exists for) and measured against itself. Entries zero to within the block's own range (below
+    1e-13 of the largest) are skipped, as there."""
+    if new.shape != prev.shape or new.size == 0:
+        return float("nan"), float("nan")
+    scale = max(float(np.max(np.abs(new))), float(np.max(np.abs(prev))))
+    if scale <= 0:
+        return 0.0, 0.0
+    mag = np.maximum(np.abs(new), np.abs(prev))
+    d = np.abs(new - prev)
+    tiny = (mag < own_below * scale) & (mag > 1e-13 * scale)
+    on_scale = float(np.max(d[~tiny])) / scale if np.any(~tiny) else 0.0
+    own = float(np.max(d[tiny] / mag[tiny])) if np.any(tiny) else 0.0
+    return on_scale, own
 
 
 def _blocks(ifd: InterfaceData) -> dict[str, np.ndarray]:
@@ -337,12 +470,12 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         ep.unlink()
     try:
         r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p), capture_output=True,
-                           text=True, timeout=p.timeout)
+                           text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, f"participant {p.name} timed out"
     if not ep.exists():
         return None, (f"participant {p.name} wrote no exports.json "
-                      f"(rc={r.returncode}). stderr tail: {r.stderr[-300:]}")
+                      f"(rc={r.returncode}). stderr tail: {_output_tail(r)}")
     # Same rule as the loop: a solver that writes its last iterate and then
     # aborts has not answered the question, and a floor measured across crashed
     # runs is a floor on the crash, not on the sampling.
@@ -350,7 +483,7 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, (f"participant {p.name} exited with code {r.returncode} "
                       f"during a replicate run; its exports.json is the output "
                       f"of a FAILED run and cannot define a noise floor. "
-                      f"stderr tail: {r.stderr[-300:]}")
+                      f"stderr tail: {_output_tail(r)}")
     try:
         return InterfaceData.from_json(ep), None
     except Exception as e:
@@ -370,6 +503,48 @@ def _residual_of(new: dict[str, np.ndarray],
         num += float(np.sum((v - prev[n]) ** 2))
         ref += float(np.sum(v ** 2)) + 1e-30
     return float(np.sqrt(num / ref))
+
+
+def _repeat_probe(participants: list[Participant], last_imports: dict[str, str],
+                  raw_last: dict[str, np.ndarray]) -> list[str]:
+    """One more run of each participant on the imports its last iteration read,
+    compared with the export that iteration produced. Returns a finding per
+    participant whose answer changed; [] when every one repeats (or cannot be
+    re-run -- a failed probe says nothing)."""
+    out: list[str] = []
+    for p in participants:
+        ref = raw_last.get(p.name)
+        text = last_imports.get(p.name)
+        if ref is None or text is None:
+            continue
+        try:
+            imp = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        ifd, err = _invoke(p, imp)
+        if err or ifd is None:
+            continue
+        got = _stack(ifd)
+        if got.size != ref.size:
+            out.append(f"PARTICIPANT {p.name} IS NOT A FUNCTION OF ITS IMPORTS: run again on "
+                       f"the imports its last iteration read, it exported {got.size} numbers "
+                       f"where that iteration exported {ref.size}.")
+            continue
+        scale = max(float(np.max(np.abs(ref))) if ref.size else 0.0, 1e-300)
+        dev = float(np.max(np.abs(got - ref))) / scale if ref.size else 0.0
+        if dev > 1e-9:
+            out.append(
+                f"PARTICIPANT {p.name} IS NOT A FUNCTION OF ITS IMPORTS: run again on the "
+                f"imports its last iteration read, it returned an export {dev:.2%} off that "
+                f"iteration's (largest difference over its largest value), and no coupling "
+                f"converges below that scatter, whatever the relaxation. If it samples by "
+                f"design (a Monte-Carlo or particle method), re-run with noise_replicates>=2 "
+                f"so the driver measures that floor and judges against it. A finite-element "
+                f"solve repeats bit for bit, so there the scatter is a defect: look for state "
+                f"its inputs do not set -- memory allocated but never initialised (a mask or "
+                f"vector built at a size and only partly written), a list where a full-length "
+                f"array belongs, an unseeded random draw, a file left by an earlier run.")
+    return out
 
 
 def _measure_noise_floor(participants: list[Participant], replicates: int,
@@ -589,10 +764,16 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     warnings: list[str] = []
     returncodes: dict[str, int] = {}
     block_residuals: dict[str, float] = {}
+    block_fixed_point: dict[str, float] = {}
+    block_distance: dict[str, float] = {}          # estimated distance to the fixed point
+    block_scale_change: dict[str, float] = {}      # the last change on the block's own scale
+    block_tiny_change: dict[str, float] = {}       # ... and of its tiny entries on their own
+    step_hist: dict[str, list] = {}               # each block's last four steps
     # participant -> list of (imports digest, exports digest) per iteration
     trace: dict[str, list[tuple[str, str]]] = {p.name: [] for p in participants}
     last_imports: dict[str, str] = {}
     nonfinite_hits = 0
+    nonfinite_run: dict[str, int] = {}          # participant -> consecutive non-finite exports
     # ── the stochastic branch's state, bound BEFORE _finish so every exit
     # carries it. `floor` and `tol_eff` are rebound below once the floor is
     # measured; _finish reads them at call time, so a late measurement is
@@ -604,11 +785,28 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     block: int = 1
     at_floor: bool = False
 
+    warm_seeded: list = []                  # filled at the warm start below; _finish reads it
+
     def _finish(**kw) -> CouplingResult:
+        if kw.get("converged"):
+            for _p in participants:
+                _ep = _p.work_dir / "exports.json"
+                if _ep.is_file():
+                    _COUPLED_EXPORTS[str(_ep.resolve())] = _file_digest(_ep)
+                    _COUPLED_STEPS[str(_ep.resolve())] = _stated_n_steps(_p)
+        if warm_seeded and kw.get("iterations") == 1 and kw.get("error"):
+            kw["error"] = (str(kw["error"]) + f" (iteration 1's imports were a WARM START seeded from the "
+                           f"exports.json a previous coupling left in the work directories of "
+                           f"{', '.join(warm_seeded)}, not this run's partner output)")
         kw.setdefault("warnings", warnings)
         kw.setdefault("returncodes", returncodes)
         kw.setdefault("block_residuals", block_residuals)
+        kw.setdefault("block_fixed_point", block_fixed_point)
+        kw.setdefault("block_distance", block_distance)
+        kw.setdefault("block_scale_change", block_scale_change)
+        kw.setdefault("block_tiny_change", block_tiny_change)
         kw.setdefault("responsiveness", _responsiveness(trace, participants))
+        kw.setdefault("responsiveness_detail", _responsiveness_detail(trace, participants))
         kw.setdefault("graph", graph)
         rp = res_prev.get("*")
         kw.setdefault("theta", {"mode": accelerator, "theta0": theta0,
@@ -672,25 +870,56 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     # relaxation state still starts at iteration 1 from the new exports, so a
     # changed point count between levels is never relaxed against. Measured on a
     # manufactured 4C+FEniCSx thermo-elastic pair: 55 iterations cold at every
-    # level; development cells reached level 2 or 3 and ran out of wall clock.
+    # level; recorded runs reached level 2 or 3 and ran out of wall clock.
     warm_seeded = []
+    stale_skipped = []
+    shape_skipped = []
     for p in participants:
         ep = p.work_dir / "exports.json"
         if not ep.is_file():
+            continue
+        # A STANDALONE RUN'S EXPORT IS NOT A PREVIOUS LEVEL'S STATE. Measured: a ladder was
+        # seeded from a side's standalone exports.json (another time-window length), failed at
+        # iteration 1 on the partner's length guard, and the reply named the partner.
+        if _COUPLED_EXPORTS.get(str(ep.resolve())) != _file_digest(ep):
+            try:                          # named only where the old rule would have seeded from it
+                _sv = _stack(InterfaceData.from_json(ep))
+                if _sv.size and np.all(np.isfinite(_sv)):
+                    stale_skipped.append(p.name)
+            except Exception:             # noqa: BLE001 -- an unreadable file seeds nothing either way
+                pass
             continue
         try:
             seed = InterfaceData.from_json(ep)
             sv = _stack(seed)
             if sv.size and np.all(np.isfinite(sv)):
+                # THE SEED MUST FIT THIS LEVEL: the stated n_steps of the side that wrote it
+                # and of every side that reads it.
+                _stated = {n for n in [_stated_n_steps(p)] + [_stated_n_steps(q) for q in participants
+                                                               if p.name in (q.imports_from or [])]
+                           if n is not None}
+                _why = _seed_misfit(seed, _stated, _COUPLED_STEPS.get(str(ep.resolve())))
+                if _why:
+                    shape_skipped.append(f"{p.name} ({_why})")
+                    continue
                 exports[p.name] = seed
                 warm_seeded.append(p.name)
         except Exception:                             # noqa: BLE001 -- a stale file is not an error
             continue
     if warm_seeded:
         notes.append(f"warm start: iteration 1 imports were seeded from the exports.json already in the "
-                     f"work directories of {', '.join(warm_seeded)} (a previous run's interface state, "
-                     f"typically the previous mesh level's); the relaxation starts fresh at iteration 1")
+                     f"work directories of {', '.join(warm_seeded)} (the interface state a converged "
+                     f"coupling left there, typically the previous mesh level's); the relaxation starts "
+                     f"fresh at iteration 1")
+    if stale_skipped:
+        notes.append(f"no warm start from {', '.join(stale_skipped)}: the exports.json there was not left by "
+                     f"a converged coupling (a standalone run writes one too), so iteration 1 starts cold")
+    if shape_skipped:
+        notes.append(f"no warm start from {'; '.join(shape_skipped)}: the previous level's export does not fit "
+                     f"this level's window, so the sides that read it start cold at iteration 1")
 
+    stalled_at = None
+    raw_last: dict[str, np.ndarray] = {}
     for it in range(1, max_iter + 1):
         new_exports: dict[str, InterfaceData] = {}
         for p in participants:
@@ -704,7 +933,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 ep.unlink()
             try:
                 r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p), capture_output=True,
-                                   text=True, timeout=p.timeout)
+                                   text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
@@ -721,7 +950,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
                                error=f"participant {p.name} wrote no exports.json "
-                                     f"(rc={r.returncode}). stderr tail: {r.stderr[-300:]}")
+                                     f"(rc={r.returncode}). stderr tail: {_output_tail(r)}")
             # A NON-ZERO exit code is a failed solve even when exports.json is
             # present: a solver that diverges often writes its last iterate and
             # then aborts. Continuing on that output produced a converged-looking
@@ -734,14 +963,15 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                                       f"{r.returncode} at iteration {it}; its "
                                       "exports.json is the output of a FAILED run "
                                       "and must not be coupled on. stderr tail: "
-                                      f"{r.stderr[-300:]}"))
+                                      f"{_output_tail(r)}"))
             try:
                 new_exports[p.name] = InterfaceData.from_json(ep)
             except Exception as e:
                 return _finish(converged=False, iterations=it, residual=float("nan"),
                                exports={}, history=history,
                                error=f"participant {p.name} bad exports.json: {e}")
-            trace[p.name].append((_digest(imp_text), _digest(ep.read_text(errors="replace"))))
+            trace[p.name].append((_digest(imp_text), _digest(ep.read_text(errors="replace")),
+                                  _import_columns(imp_text)))
             ifd = new_exports[p.name]
             v = _stack(ifd)
             # An EMPTY export is not a converged one. With nothing in the stacked
@@ -765,6 +995,27 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     where = "values/fluxes" if not np.all(np.isfinite(v)) else "coordinates"
                     warnings.append(
                         f"{p.name}: non-finite export {where} at iter {it}")
+                # A NON-FINITE EXPORT ENDS THE COUPLING, BY NAME. Measured: a run whose side
+                # exported NaN flux iterated 150 times (two minutes) to "did not converge ...
+                # last residual nan", and a NaN first pass never recovers (see _NONFINITE_STOP).
+                nonfinite_run[p.name] = nonfinite_run.get(p.name, 0) + 1
+                if nonfinite_run[p.name] >= _NONFINITE_STOP:
+                    cols = [name for name, arr in (("values", getattr(ifd, "values", None)),
+                                                   ("normal_fluxes", getattr(ifd, "normal_fluxes", None)),
+                                                   ("coordinates", ifd.coordinates))
+                            if arr is not None and np.asarray(arr, float).size
+                            and not np.all(np.isfinite(np.asarray(arr, float)))]
+                    return _finish(converged=False, iterations=it, residual=float("nan"),
+                                   exports={}, history=history,
+                                   error=(f"participant {p.name} exported non-finite "
+                                          f"{', '.join(cols) or 'data'} at iteration {it}: the "
+                                          "residual and the relaxation carry a non-finite number "
+                                          "into every later iteration, so the coupling stops here. "
+                                          "Find where that side's own computation produces it -- "
+                                          "a division by a zero weight or norm, a solve that "
+                                          "failed -- and run that side standalone first."))
+            else:
+                nonfinite_run[p.name] = 0
             # An export whose length changes between iterations breaks relaxation:
             # numpy either broadcasts a length-1 block up to the new length or
             # raises out of the driver. Neither is a result.
@@ -805,6 +1056,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     warnings=warnings, notes=notes,
                     criterion_notes=criterion_notes)
 
+        raw_last = {n: _stack(e).copy() for n, e in new_exports.items()}   # before relaxation
         total_res = 0.0
         total_ref = 0.0
         # ONE theta for the whole interface state (see _aitken): Aitken is applied
@@ -842,12 +1094,62 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
             total_res += float(np.sum((raw_new - prev) ** 2))
             total_ref += float(np.sum(raw_new ** 2)) + 1e-30
             # per-block relative change, so a large settled block cannot mask a
-            # small moving one in the single global norm below
+            # small moving one in the single global norm below; and beside it the
+            # block's OWN FIXED-POINT RESIDUAL (its raw output against the relaxed input
+            # that produced it). The change alone is, under an accelerator, the size of
+            # the last step, not the distance left: measured, a block that moved 5.0e-4
+            # of itself on its last Aitken step had landed within 4.8e-7 of an
+            # independently converged run, and a right ladder read NOT VERIFIED on it.
             nb = _blocks(new_exports[n])
+            prelax = None
+            if prev is not None and np.asarray(prev).size == raw_new.size:
+                _vshape = np.asarray(new_exports[n].values).shape
+                _nv = int(np.prod(_vshape)) if _vshape else 1
+                _fl = new_exports[n].normal_fluxes
+                _carrier = InterfaceData(
+                    coordinates=new_exports[n].coordinates,
+                    field_name=new_exports[n].field_name,
+                    values=np.asarray(prev[:_nv], float).reshape(_vshape),
+                    normal_fluxes=(np.asarray(prev[_nv:], float).reshape(np.asarray(_fl).shape)
+                                   if _fl is not None else None))
+                prelax = _blocks(_carrier)
             for bname, arr in nb.items():
                 pb = prev_blocks.get(n, {}).get(bname)
                 block_residuals[f"{n}.{bname}"] = (
                     _rel_change(arr, pb) if pb is not None else float("nan"))
+                (block_scale_change[f"{n}.{bname}"],
+                 block_tiny_change[f"{n}.{bname}"]) = (
+                    _scaled_change(arr, pb) if pb is not None else (float("nan"), float("nan")))
+                fp = (prelax or {}).get(bname)
+                block_fixed_point[f"{n}.{bname}"] = (
+                    _rel_change(arr, fp) if fp is not None else float("nan"))
+                # THE DISTANCE LEFT, FROM HOW FAST THE STEPS SHRINK. Without relaxation
+                # the fixed-point residual IS the last step, so it could not clear a
+                # block that had landed (measured: named 6e-8 .. 1.4e-7 from its own
+                # fixed point, a 1e-5 limit, seven false caveats and a right ladder
+                # denied). The ratio is taken over TWO steps, because every side reads
+                # the partner's previous output: a two-sided exchange alternates, and
+                # the step can hold still for one iteration and fall 4x on the next
+                # (measured on a linear pair: one-step ratios 1, 0.25, 1, 0.25, ...,
+                # where the last-step estimate is 5x short). With steps s1..s4 and
+                # q = s4/s2 < 1, the fixed point lies within q (s3 + s4) / (1 - q) --
+                # exact for a steady two-step contraction, and s4 r / (1 - r) again
+                # when every step shrinks by the same r.
+                _key = f"{n}.{bname}"
+                _hs = step_hist.setdefault(_key, [])
+                if block_residuals[_key] == block_residuals[_key]:
+                    _hs.append(block_residuals[_key])
+                    del _hs[:-4]
+                else:
+                    _hs.clear()
+                # THE LATEST TWO-STEP RATIO ALONE: max(s4/s2, s3/s1) let an earlier slow
+                # pair override the final accelerated jump and named a block 5.4e-7 from its
+                # fixed point (measured). s4/s2 alone is still exact for a steady two-step
+                # contraction, in both phases of it.
+                if len(_hs) == 4 and _hs[1] > 0:
+                    _q = _hs[3] / _hs[1]
+                    block_distance[_key] = (_q * (_hs[2] + _hs[3]) / (1.0 - _q)
+                                            if _q < 0.95 else float("inf"))
             prev_blocks[n] = nb
             # write relaxed values back into the InterfaceData carrier
             ifd = new_exports[n]
@@ -875,6 +1177,21 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
             return _finish(converged=True, iterations=it, residual=res,
                            exports={n: e.to_dict() for n, e in exports.items()},
                            history=history, sensitivity=sens)
+        # A RESIDUAL THAT HAS STOPPED FALLING STOPS THE LOOP. Measured: a
+        # coupling whose outer boundary condition was never applied iterated 150
+        # times at a residual of 3e-2 -- about twelve minutes of a forty-five
+        # minute run -- and ended where it stood after twenty. A deterministic
+        # fixed-point iteration whose residual no longer falls does not converge
+        # by iterating on. Not with a noise floor in play: a sampled participant
+        # plateaus by design, and that route re-measures its floor instead.
+        # A RESIDUAL THAT STILL FALLS IS NOT A STALL: it goes on while its rate reaches
+        # tol within max_iter, and stops, said as what it is, when it cannot.
+        if (floor is None and not noise_replicates and it >= _STALL_MIN_ITERS
+                and it < max_iter):
+            verdict = _stop_verdict(history, tol_eff, max_iter - it)
+            if verdict is not None:
+                stalled_at = (it, verdict)
+                break
 
     if nonfinite_hits > _MAX_NONFINITE_WARNINGS:
         warnings.append(f"... {nonfinite_hits - _MAX_NONFINITE_WARNINGS} further "
@@ -921,9 +1238,51 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     exports={n: e.to_dict() for n, e in exports.items()},
                     history=history, sensitivity=sens)
 
-    err_msg = (f"did not converge to tol={tol_eff:g} in {max_iter} iters "
-               f"(last residual {last:.2e}) — result is NOT trustworthy")
-    if floor is None and _stalled(history):
+    # ONE MORE RUN OF EACH SIDE ON THE IMPORTS ITS LAST ITERATION READ. A finite-
+    # element solve is a function of its inputs and returns the same export bit for
+    # bit; one that does not puts a floor under the residual that no iteration can
+    # beat. Measured on one coupled round: every coupling that stalled had a side
+    # whose free-dof mask was uninitialised memory -- six runs on one imports.json,
+    # six exports 11-92 % apart -- while the pair itself converges in 5-8 iterations
+    # when that side is repeatable, and nothing served named it.
+    repeat_notes: list[str] = []
+    probe_ran = False
+    if not noise_replicates and floor is None and raw_last:
+        repeat_notes = _repeat_probe(participants, last_imports, raw_last)
+        probe_ran = True
+    stall = stalled_at is not None and stalled_at[1]["kind"] == "stall"
+    if stalled_at is not None and not stall:
+        _it, _v = stalled_at
+        err_msg = (f"did not converge to tol={tol_eff:g}: STOPPED at iteration {_it} of "
+                   f"{max_iter}, because at the rate its residual still falls it cannot reach "
+                   f"tol within max_iter. It falls steadily, about {_v['rate']:.4f} per iteration "
+                   f"over the last {3 * _STALL_WINDOW} iterations (last residual {last:.2e}); at "
+                   f"that rate tol is about {_v['needed']:,} iterations away, and max_iter left "
+                   f"{max_iter - _it}. This is a slow contraction, not a stall: at this rate it "
+                   f"needs a max_iter of about {_it + _v['needed']:,} — result is NOT trustworthy")
+    elif stall:
+        _it, _v = stalled_at
+        _early, _late = _v["early"], _v["late"]
+        err_msg = (f"did not converge to tol={tol_eff:g}: STOPPED at iteration {_it} of "
+                   f"{max_iter}, because the residual stopped falling (median "
+                   f"{_late:.2e} over the last {_STALL_WINDOW} iterations against "
+                   f"{_early:.2e} over the {_STALL_WINDOW} before; last residual "
+                   f"{last:.2e}). A fixed-point iteration whose residual no longer "
+                   f"falls does not converge by iterating on — result is NOT trustworthy")
+    else:
+        err_msg = (f"did not converge to tol={tol_eff:g} in {max_iter} iters "
+                   f"(last residual {last:.2e}) — result is NOT trustworthy")
+    if repeat_notes:
+        err_msg += "; " + " ".join(repeat_notes)
+    elif probe_ran and stall:
+        # MEASURED, NOT GUESSED: every side was run again on its last imports and
+        # returned the same export, so no side is noisy and the sampled-estimator
+        # route below would only relax the criterion onto a real defect.
+        err_msg += ("; every participant returned the same export when run again on "
+                    "the imports of its last iteration, so the stall is not scatter in "
+                    "one side: look at the exchange itself -- which side imposes what, "
+                    "the sign of each exported flux, the order of the interface points")
+    if floor is None and _stalled(history) and not repeat_notes and not probe_ran:
         # The residual stopped falling rather than never having fallen. That is
         # what a sampling floor looks like from outside, and it is also what a
         # theta above the stability limit looks like; the driver cannot tell
@@ -933,7 +1292,9 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     "estimator, re-run with noise_replicates>=2 so the driver "
                     "can measure its residual floor and judge against it "
                     "instead of against an unreachable tol")
-    return _finish(converged=False, iterations=max_iter, residual=last,
+    return _finish(converged=False,
+                   iterations=(stalled_at[0] if stalled_at is not None else max_iter),
+                   residual=last,
                    exports={n: e.to_dict() for n, e in exports.items()},
                    history=history, error=err_msg)
 
@@ -1006,7 +1367,7 @@ def probe_interface_sensitivity(participants: list[Participant],
                 if ep.exists():
                     ep.unlink()
                 r = subprocess.run(p.command, cwd=str(p.work_dir), env=_participant_env(p),
-                                   capture_output=True, text=True, timeout=p.timeout)
+                                   capture_output=True, text=True, timeout=p.timeout, stdin=subprocess.DEVNULL)
                 if r.returncode != 0 or not ep.exists():
                     return None
                 return InterfaceData.from_json(ep)
@@ -1024,6 +1385,11 @@ def probe_interface_sensitivity(participants: list[Participant],
             for d in imp.values():
                 if not isinstance(d, dict):
                     continue
+                try:
+                    _tv = np.asarray(d.get("values") or [], float)
+                    _tscale = float(np.max(np.abs(_tv[np.isfinite(_tv)]))) if _tv.size else 0.0
+                except (TypeError, ValueError):
+                    _tscale = 0.0
                 for key in ("values", "normal_fluxes"):
                     if d.get(key) is None:
                         continue
@@ -1031,6 +1397,13 @@ def probe_interface_sensitivity(participants: list[Participant],
                     if a.size == 0 or not np.all(np.isfinite(a)):
                         continue
                     scale = float(np.max(np.abs(a))) or 1.0
+                    # A FLUX AT ROUND-OFF IS NUDGED ON THE TRACE'S SCALE. Nudged relative to
+                    # itself it never really moved, and a side that ignores it read as
+                    # responsive or unresponsive by chance (measured: 1e-17 fluxes).
+                    if key == "normal_fluxes" and _tscale > 0 and scale <= 1e-12 * _tscale:
+                        d[key] = (a + delta * _tscale).tolist()
+                        touched = True
+                        continue
                     # relative nudge, with an absolute floor so exactly-zero
                     # entries still move (a zero import is still an import)
                     d[key] = (a + delta * np.where(np.abs(a) > 0,
@@ -1131,6 +1504,60 @@ def _f(x) -> Optional[float]:
     return None if x is None or x != x else float(x)
 
 
+def _import_columns(imp_text: str) -> dict:
+    """{"<partner>.<key>": array} for every numeric array in an imports.json text."""
+    try:
+        data = json.loads(imp_text or "{}")
+    except Exception:                                        # noqa: BLE001
+        return {}
+    out: dict = {}
+    if isinstance(data, dict):
+        for partner, block in data.items():
+            if isinstance(block, dict):
+                for key, val in block.items():
+                    if isinstance(val, list):
+                        try:
+                            out[f"{partner}.{key}"] = np.asarray(val, dtype=float).ravel()
+                        except (TypeError, ValueError):
+                            continue
+    return out
+
+
+def _column_moved(a, b) -> bool:
+    """A column moved when it changed by more than round-off of its own scale:
+    relaxing a constant column shifts it by a bit, which is no change at all."""
+    if a is None or b is None or a.shape != b.shape:
+        return True
+    scale = max(float(np.abs(a).max(initial=0.0)), float(np.abs(b).max(initial=0.0)), 1e-300)
+    return bool(np.abs(a - b).max(initial=0.0) > 1e-9 * scale)
+
+
+def _responsiveness_detail(trace: dict, participants: list[Participant]) -> dict:
+    """WHICH IMPORTED COLUMNS MOVED. A side's export can stay byte-identical while its
+    imports change in a column it does not apply: measured, a Neumann side whose partner
+    exported the same placeholder flux (1e-10 at every point) every iteration saw only the
+    partner's values move under relaxation, and was told its answer did not depend on its
+    imports and that it never read imports.json -- it did, and applied the flux."""
+    out: dict = {}
+    for name, status in _responsiveness(trace, participants).items():
+        if status != "unresponsive":
+            continue
+        hist = trace.get(name) or []
+        changed: set = set()
+        seen: set = set()
+        for a, b in zip(hist, hist[1:]):
+            if len(a) < 3 or len(b) < 3 or a[0] == b[0] or a[1] != b[1]:
+                continue
+            both = set(a[2]) & set(b[2])                     # a column that appears is no change
+            seen |= both
+            changed |= {k for k in both if _column_moved(a[2][k], b[2][k])}
+        # the points themselves never move; naming them as "unchanged" says nothing
+        static = {k for k in seen if k.endswith(".coordinates")}
+        if seen:
+            out[name] = {"changed": sorted(changed), "unchanged": sorted(seen - changed - static)}
+    return out
+
+
 def _responsiveness(trace: dict[str, list[tuple[str, str]]],
                     participants: list[Participant]) -> dict[str, str]:
     """Did each participant's export ever MOVE when its imports moved?
@@ -1152,7 +1579,8 @@ def _responsiveness(trace: dict[str, list[tuple[str, str]]],
             out[name] = "no imports declared"
             continue
         moved_in = moved_out = 0
-        for (i0, e0), (i1, e1) in zip(hist, hist[1:]):
+        for h0, h1 in zip(hist, hist[1:]):
+            i0, e0, i1, e1 = h0[0], h0[1], h1[0], h1[1]
             if i0 != i1:
                 moved_in += 1
                 if e0 != e1:
@@ -1182,6 +1610,111 @@ def _stat(history: list[float], block: int) -> float:
         # Not enough post-NaN history yet to fill the block; refuse to stop.
         return float("inf")
     return float(sum(vals) / len(vals))
+
+
+# A RESIDUAL THAT HAS STOPPED FALLING STOPS THE LOOP (see run_coupling). Not before
+# this many iterations, over two windows of this many, and "stopped" means the
+# later window's median is at least this fraction of the earlier one's. A coupling
+# that still contracts at 0.98 per iteration falls to 0.82 over a window and is
+# never looked at. One that contracts at 0.99 reads 0.904 and is looked at, and it
+# is not a stall: it reaches 1e-6 from 1 in about 1,400 iterations. _stop_verdict
+# tells the two apart.
+_STALL_MIN_ITERS = 30
+_STALL_WINDOW = 10
+_STALL_RATIO = 0.9
+
+
+def _plateaued(history: list[float], window: int = _STALL_WINDOW,
+               ratio: float = _STALL_RATIO):
+    """(early, late) medians when the last `window` residuals sit at `ratio` or
+    more of the `window` before them, else None. Finite residuals only."""
+    vals = [v for v in history if np.isfinite(v)]
+    if len(vals) < 2 * window:
+        return None
+    early = float(np.median(vals[-2 * window:-window]))
+    late = float(np.median(vals[-window:]))
+    return (early, late) if early > 0 and late >= ratio * early else None
+
+
+def _reaches_tol(history: list[float], tol: float, remaining: int,
+                 window: int = _STALL_WINDOW) -> bool:
+    """Does the rate measured over the last 2*window residuals reach `tol` within
+    `remaining` iterations? A slow contraction is not a plateau: at 0.99 per
+    iteration the median ratio over ten is 0.904, above the plateau bar, and the
+    run was stopped at iteration 30 whatever max_iter said. A residual that is
+    flat or rising never gets there, and still stops."""
+    vals = [v for v in history if np.isfinite(v) and v > 0]
+    if len(vals) < 2 * window or remaining <= 0:
+        return False
+    early = float(np.median(vals[-2 * window:-window]))
+    late = float(np.median(vals[-window:]))
+    if not (0.0 < late < early):
+        return False
+    rate = (late / early) ** (1.0 / window)
+    last = vals[-1]
+    if last <= tol:
+        return True
+    return float(np.log(tol / last) / np.log(rate)) <= remaining
+
+
+def _steady_fall(history: list[float], window: int = _STALL_WINDOW):
+    """The rate per iteration at which the residual still falls, or None.
+
+    It falls when, over the last three windows of `window` residuals, the LARGEST and
+    the SMALLEST residual of each window both lie below those of the window before,
+    and each one's later fall is at least half its earlier fall (in log): a residual
+    settling onto a floor slows down and is no fall. The extremes and not the
+    medians: a map that contracts 1 % per iteration while its residual swings by a
+    factor of three inside every four iterations (measured on a coupled pair) has
+    window medians that alternate up and down, while both extremes fall every
+    window. A residual driven by a forcing that never dies out, or cycling at a
+    unit rate, has extremes that stand still or jump about. The rate is read off
+    both extremes over the last two windows."""
+    import math
+    vals = [v for v in history if np.isfinite(v) and v > 0]
+    if len(vals) < 3 * window:
+        return None
+    wins = [vals[-3 * window:-2 * window], vals[-2 * window:-window], vals[-window:]]
+    logs = []
+    for pick in (max, min):
+        s = [float(pick(w)) for w in wins]
+        if not s[2] < s[1] < s[0]:
+            return None
+        d1, d2 = math.log(s[1] / s[0]), math.log(s[2] / s[1])
+        if d2 > 0.5 * d1:                   # d1, d2 < 0: the later fall is less than half
+            return None
+        logs.append(math.log(s[2] / s[0]))
+    return math.exp(sum(logs) / (2 * 2 * window))
+
+
+def _stop_verdict(history: list[float], tol: float, remaining: int,
+                  window: int = _STALL_WINDOW):
+    """None to go on; otherwise why to stop now, as a dict.
+
+    {"kind": "stall", "early", "late"} -- the residual has stopped falling: the
+    window medians read `ratio` or more (_plateaued), their rate does not reach tol
+    in the iterations left (_reaches_tol), and it does not fall steadily either
+    (_steady_fall).
+    {"kind": "slow", "early", "late", "rate", "needed"} -- it still falls steadily at
+    `rate` per iteration, and at that rate tol is `needed` iterations away, more than
+    `remaining`. Measured on two coupled pairs that contract 1 % per iteration: both
+    were stopped as stalls at iteration 30, and one of them at iteration 40 however
+    large max_iter was."""
+    import math
+    if sum(1 for v in history if np.isfinite(v) and v > 0) < 3 * window:
+        return None                        # a stall cannot be told from a slow fall yet
+    plateau = _plateaued(history, window)
+    if plateau is None or _reaches_tol(history, tol, remaining, window):
+        return None
+    early, late = plateau
+    rate = _steady_fall(history, window)
+    if rate is None:
+        return {"kind": "stall", "early": early, "late": late}
+    top = max(v for v in history[-window:] if np.isfinite(v) and v > 0)
+    needed = 0 if top <= tol else int(math.ceil(math.log(tol / top) / math.log(rate)))
+    if needed <= remaining:
+        return None
+    return {"kind": "slow", "early": early, "late": late, "rate": rate, "needed": needed}
 
 
 def _stalled(history: list[float], window: int = 12, floor_window: int = 6) -> bool:

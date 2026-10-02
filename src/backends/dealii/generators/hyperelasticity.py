@@ -123,9 +123,10 @@ int main()
           FEValues<dim> fe_values(fe, quadrature,
                                   update_values | update_gradients |
                                   update_JxW_values | update_quadrature_points);
+          // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
           FEFaceValues<dim> fe_face_values(fe, face_quadrature,
                                             update_values | update_JxW_values |
-                                            update_normal_vectors);
+                                            update_normal_vectors | update_quadrature_points);
 
           for (const auto &cell : dof_handler.active_cell_iterators())
             {{

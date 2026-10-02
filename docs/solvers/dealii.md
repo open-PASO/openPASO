@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for deal.II
 
-27 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+28 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -28,6 +28,7 @@ python check_install.py
 | `dg_advection_reaction` | DG advection-reaction (step-12, step-39) | 2-D | `2d` |
 | `dg_transport` | Discontinuous Galerkin for advection problems (step-12 pattern) | 2-D | `2d` |
 | `eigenvalue` | Eigenvalue problems via SLEPc (step-36 inspired) | 2-D | `2d` |
+| `element_survey` | Finite-element survey: builds every FE_* class this deal.II install declares and checks each one (quadrature integrates the cell, mass matrix is SPD, space reproduces a constant). Answers 'which elements does this build actually have, and how does each behave' without guessing from docs. | 2-D, 3-D | `default` |
 | `error_estimation` | Adaptive error estimation, Kelly + AMR (step-6, step-14) | 2-D | `2d` |
 | `heat` | Heat equation (transient step-26 and steady-state, with rectangle) | 2-D | `2d_transient`, `2d_steady`, `rectangle` |
 | `helmholtz` | Helmholtz equation (complex-valued, step-29 inspired) | 2-D | `2d` |

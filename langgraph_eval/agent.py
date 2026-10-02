@@ -36,6 +36,7 @@ import contextvars
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -72,6 +73,23 @@ PORTS = {"7b": 8000, "14b": 8001, "32b": 8002}
 # `{who}` is the role that was silent -- critic, verifier or researcher -- or
 # "sub-agent". This branch keeps the old product name until the freeze; the
 # rename script maps it.
+
+# A SUB-AGENT'S REPLY IS BOUNDED BEFORE THE PARENT CARRIES IT. Measured: a critic
+# sub-agent's free-text verdict ran to 121,752 characters (it was cut only by the
+# model's output cap) and went into the parent's context whole, where every later
+# call re-read it. Both arms; the start and the end are kept, and the cut says so.
+SUBAGENT_REPORT_CAP = 24_000
+
+
+def _bounded_report(text: str, cap: int = SUBAGENT_REPORT_CAP) -> str:
+    if len(text) <= cap:
+        return text
+    head, tail = text[: cap * 2 // 3], text[-(cap // 3):]
+    return (head + f"\n\n[... {len(text) - len(head) - len(tail):,} characters of this "
+            f"sub-agent's reply left out here: it ran to {len(text):,} characters; its start "
+            f"and its end are kept ...]\n\n" + tail)
+
+
 SILENT_SUBAGENT_REPORT = (
     "[the {who} returned no text. This is NOT approval and NOT a review: it "
     "produced nothing. Treat the step as not done. Do not write its answer for "
@@ -98,6 +116,9 @@ CAMPAIGN_MCP_TOOL_ALLOWLIST = frozenset({
     "verify_mesh_independence",
     "verify_pde_consistency",
     "visualize",
+    # writes the served participant contract (solve elided) to a path through
+    # the same door the knowledge reply uses; recommended by the worker brief
+    "write_participant_contract",
 })
 
 _CRITIC_BLOCK = (
@@ -207,6 +228,31 @@ def _clean_subprocess_env() -> dict[str, str]:
     }
     clean.pop("OPENPASO_BLIND_KEYS", None)
     clean.pop("SSH_AUTH_SOCK", None)
+    # THE OPERATOR'S LANGUAGE IS NOT THE AGENT'S, AND IT IS NOT THE
+    # CATALOGUE'S.
+    #
+    # This function copies the operator's environment, LANG included. On this
+    # machine that is de_DE.UTF-8, so the kernel and the shell answered the
+    # agent in German: `Zugriff auf 'exports.json' nicht moeglich: Datei oder
+    # Verzeichnis nicht gefunden`, fifteen times across three of the nine most
+    # recent coupled trajectories. Three costs, in order of how much they hurt:
+    #
+    #  * the signal catalogue is keyed on ENGLISH error text --
+    #    ModuleNotFoundError, DIVERGED_PC_FAILED, FACTOR_NUMERIC_ZEROPIVOT. A
+    #    German message matches nothing, so the failure-mode lookup is
+    #    unreachable for exactly the failures it exists to explain (found by
+    #    the interface session, 2026-09-19).
+    #  * LC_NUMERIC comes with it, and under de_DE bash's own
+    #    `printf '%.1f' 1.5` REFUSES its argument and prints `1,0`. Every
+    #    float() in this repository raises on a decimal comma.
+    #  * a model prompted in English has to guess at the message.
+    #
+    # Set HERE rather than on the jail's --setenv list, because the product
+    # path builds its shell from this same function with no jail at all: a
+    # person running one simulation was getting the German errors too.
+    clean["LC_ALL"] = "C.UTF-8"
+    clean["LANG"] = "C.UTF-8"
+    clean["LANGUAGE"] = ""
     return clean
 
 
@@ -374,6 +420,104 @@ def cleanup_sandbox_scratch(workdir: Path) -> None:
     _OWNED_SCRATCH.discard(scratch)
 
 
+
+# HOW MANY STEPS A SUB-AGENT GETS BEFORE THE HARNESS ENDS IT MID-TASK.
+#
+# This was a bare literal, 40, which is about twenty tool calls. Measured on
+# C2 iteration 2 (2026-09-23): the cap ended a sub-agent with "Sorry, need more
+# steps to process this request." in 3 of 5 cells, against 1 of 5 in the
+# previous round. In one of the three it cut the side-A worker one call after
+# it had run `rm -f config.json imports.json ... && rm -rf out-vtk-files`,
+# leaving only the script; the orchestrator then wrote both participants
+# itself, and that cell is the one whose Kratos side built a clockwise
+# triangle and graded unphysical.
+#
+# A worker that writes and debugs a participant needs more than twenty calls.
+# Doubled, named, and recorded in every ledger next to the provider pin, so a
+# later reader can tell which rounds ran under which cap without consulting a
+# commit. Both arms share spawn_subagent, so this is a harness setting and not
+# a capability of either side. The wall (45 min) and the parent's call budget
+# are untouched.
+WORKER_RECURSION_LIMIT = 80
+
+def _runtime_mount_roots() -> tuple[Path, ...]:
+    """The solver runtimes rebound into the cell after the home tmpfs.
+
+    Lifted out of the jail builder so the shell's path rule can say what
+    is legitimate using the same list the mount uses, rather than a second
+    copy that drifts from it.
+    """
+    workspace = REPO.parent.resolve()
+    home = Path.home().resolve()
+    return (
+        REPO / ".venv",
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        workspace / "open-fem-agent/.venv",
+        workspace / "febio-src/cbuild",
+        workspace / "sparta/src",
+        workspace / "sparta/data",
+        workspace / "sparta/examples",
+        home / "miniconda3",
+        home / "4C",
+        home / "FEBio",
+        home / "dealii",
+        home / ".local/share/python",
+        home / ".local/include",
+        home / ".local/lib",
+    )
+
+
+def _paths_outside_the_cell(command: str, workdir: Path) -> list[str]:
+    """Absolute paths in `command` that sit under the host home but outside the cell.
+
+    Narrow on purpose. The mounted solver runtimes are absolute paths under the
+    same home -- every coupled run names one to invoke its interpreter -- and a
+    rule that fired on those would fire on the one command the run cannot avoid.
+    So the list is: under the host's home, not inside the cell, not inside a
+    mounted runtime root, and not the campaign tree itself, which the agent
+    never sees and whose paths only appear here as the cell's own prefix.
+    """
+    home = Path.home().resolve()
+    work = workdir.resolve()
+    allowed = [work, *(r.resolve() for r in _runtime_mount_roots() if r.is_dir())]
+    found: list[str] = []
+    for raw in re.findall(r"(?<![\w/])" + re.escape(str(home)) + r"[\w./+-]*", command):
+        candidate = Path(raw.rstrip("/.,;:'\""))
+        if candidate == home or any(candidate.is_relative_to(a) for a in allowed):
+            continue
+        if raw not in found:
+            found.append(raw)
+    return found
+
+
+def _private_dirs_in(root: Path) -> list[Path]:
+    """Directories directly inside a mounted runtime root that a cell must not read.
+
+    A `.claude` folder (Claude Code settings; its allowlisted commands can carry
+    credentials) and any checkout of this project or its predecessors (a folder
+    with src/tools/ beside a pyproject.toml or a CLAUDE.md). Top level only: a
+    runtime root's own tree is the solver's, and that is what a cell may read.
+    """
+    out: list[Path] = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return out
+    for child in children:
+        try:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            if child.name == ".claude":
+                out.append(child)
+            elif (child / "src" / "tools").is_dir() and (
+                    (child / "pyproject.toml").is_file() or (child / "CLAUDE.md").is_file()):
+                out.append(child)
+        except OSError:
+            continue
+    return out
+
+
 def _sandboxed_process_argv(workdir: Path, process: list[str], *,
                             source_repo: Path | None = None,
                             isolate: bool = True) -> list[str]:
@@ -428,23 +572,7 @@ def _sandboxed_process_argv(workdir: Path, process: list[str], *,
     # system Python, where the executable is a symlink out of the venv; REPO's
     # own `.venv` covers the symlink path itself, which must exist to be
     # followed.
-    runtime_paths = (
-        REPO / ".venv",
-        Path(sys.prefix),
-        Path(sys.base_prefix),
-        workspace / "open-fem-agent/.venv",
-        workspace / "febio-src/cbuild",
-        workspace / "sparta/src",
-        workspace / "sparta/data",
-        workspace / "sparta/examples",
-        home / "miniconda3",
-        home / "4C",
-        home / "FEBio",
-        home / "dealii",
-        home / ".local/share/python",
-        home / ".local/include",
-        home / ".local/lib",
-    )
+    runtime_paths = _runtime_mount_roots()
 
     argv = [
         bwrap,
@@ -464,9 +592,37 @@ def _sandboxed_process_argv(workdir: Path, process: list[str], *,
         if runtime.is_dir():
             _add_mount_dirs(argv, home, runtime, made)
             argv.extend(("--ro-bind", str(runtime), str(runtime)))
+    # A SOLVER'S ROOT CAN HOLD WHAT NO CELL MAY READ, so what it holds of ours
+    # is hidden again after the root is mounted. Measured 2026-09-24: the 4C
+    # root is mounted because the binary lives in it, and it also held an
+    # untracked copy of this project's predecessor (its knowledge, templates and
+    # run records; 19 comparison-arm cells of older rounds opened files in it)
+    # and a Claude Code settings file whose allowlisted commands carry an
+    # administrator password. Found by shape, in every mounted root, so the
+    # next copy dropped into a solver tree is hidden without a new line here.
+    for runtime in runtime_paths:
+        for hidden in _private_dirs_in(runtime):
+            argv.extend(("--tmpfs", str(hidden)))
     dune_host_cache = home / "miniconda3/envs/dune-py313/.cache"
     if dune_host_cache.is_dir():
         argv.extend(("--tmpfs", str(dune_host_cache)))
+
+    # THE CELL SPOKE GERMAN TO AN ENGLISH-PROMPTED MODEL, AND GOT ITS DECIMALS
+    # WRONG.
+    #
+    # The operator's environment is passed through, this machine runs
+    # LANG=de_DE.UTF-8, and the kernel and shell messages the agent reads came
+    # back as `Zugriff auf 'exports.json' nicht möglich: Datei oder Verzeichnis
+    # nicht gefunden`. Fifteen of them were served into three of the nine most
+    # recent C3 trajectories. The same locale sets LC_NUMERIC, under which
+    # bash's own `printf '%.1f' 1.5` REFUSES the argument and prints `1,0` --
+    # a wrong number, silently, in any shell arithmetic the agent does, and a
+    # decimal comma that every float() in this repository raises on.
+    #
+    # C.UTF-8 is POSIX numbers and English messages with UTF-8 text intact.
+    argv.extend(("--setenv", "LC_ALL", "C.UTF-8",
+                 "--setenv", "LANG", "C.UTF-8",
+                 "--setenv", "LANGUAGE", ""))
 
     # `/tmp` persists between this cell's shell calls, but maps back inside the
     # cell rather than to the host's shared scratch tree.
@@ -492,6 +648,25 @@ def _sandboxed_process_argv(workdir: Path, process: list[str], *,
                          str(source_mount / "data" / "sessions")))
         cwd = source_mount / "src"
 
+    # THE TMPFS OVER $HOME WAS WRITABLE, AND EVERY CALL GOT A FRESH ONE.
+    #
+    # So a shell command that wrote outside the cell -- into a sibling of the
+    # host home it had inferred from its own working-directory path --
+    # SUCCEEDED, printed nothing unusual, and lost the file the moment the call
+    # returned. Measured on 2026-09-19: `mkdir -p ~alex/openpaso_scratch && echo hi
+    # > .../note.txt && cat .../note.txt` returns rc=0 and prints `hi`; the next
+    # call cannot find the file. 155 coupled runs referred to a path outside
+    # their cell and three of the five C3 runs of 2026-09-18 spent six to ten
+    # minutes of a forty-five minute wall on it.
+    #
+    # Read-only turns that into an error in the same call, where the agent is
+    # still looking. It is applied AFTER the runtime binds, because those must
+    # be mounted into the tmpfs first; `--remount-ro` changes this one mount
+    # point and not what is mounted beneath it, so the DUNE JIT cache tmpfs
+    # above stays writable. The cell's own home is not this path: HOME is set
+    # to the cell below.
+    argv.extend(("--remount-ro", str(home)))
+
     argv.extend((
         "--setenv", "HOME", str(work),
         "--setenv", "TMPDIR", "/tmp",
@@ -501,7 +676,18 @@ def _sandboxed_process_argv(workdir: Path, process: list[str], *,
         "--chdir", str(cwd),
     ))
     argv.extend(process)
+    # ONE CELL CANNOT TAKE THE MACHINE'S MEMORY. Measured on 2026-10-01: a cell's own program
+    # (a mesh refined nx + ny times) grew to 125 GB three times in one round, and each time the
+    # kernel's global OOM killer ran with the other four cells, other sessions and the web server
+    # all under the same pressure. Every process of the cell inherits this address-space limit;
+    # the largest virtual size of a legitimate solver process seen on this host is about 15 GB.
+    prlimit = shutil.which("prlimit")
+    if prlimit:
+        argv[:0] = [prlimit, f"--as={_CELL_ADDRESS_SPACE_LIMIT}", "--"]
     return argv
+
+
+_CELL_ADDRESS_SPACE_LIMIT = 48 * 1024 ** 3
 
 
 def _sandboxed_bash_argv(workdir: Path, command: str, *,
@@ -660,7 +846,8 @@ def _bash_tool_for(workdir: Path, *, audit_on_submit: bool = False,
                            + _registry_attribute_check(f, _txt)
                            + _extra_script_checks(f, _txt)
                            + _fourc_deck_write_check(f, _txt)
-                           + _participant_write_check(f, _txt))
+                           + _participant_write_check(f, _txt)
+                           + _config_write_check(f, _txt))
                 except OSError:
                     continue
                 if got:
@@ -717,6 +904,45 @@ def _bash_tool_for(workdir: Path, *, audit_on_submit: bool = False,
         except Exception:                              # noqa: BLE001
             return ""
 
+    def _outside_path_note(command: str) -> str:
+        """The rule `write_file` states, stated for the shell as well.
+
+        NOT behind `audit_on_submit`: the openPASO arm's auto-audit is a capability
+        of the product and belongs there, but where a tool may write is the
+        contract of the tool, and the bare arm runs in the same jail. Giving
+        one arm the sentence and the other the bare errno would be a harness
+        difference dressed as a product difference.
+
+        The jail now refuses the write, so this says where to go instead; the
+        record shows agents reading the kernel's message as "make the parent
+        directory first" and trying again in the same place.
+        """
+        try:
+            outside = _paths_outside_the_cell(command, workdir)
+        except Exception:                              # noqa: BLE001
+            return ""
+        if not outside:
+            # /tmp IS THIS SHELL'S PRIVATE SCRATCH, AND THE FILE TOOLS CANNOT REACH IT.
+            # Measured: a shell made a folder under /tmp, write_file then refused
+            # every path in it, and the run lost three to four minutes before
+            # writing inside its working directory. Said at the command that
+            # creates or writes there, in both arms.
+            try:
+                made = re.findall(r"(?:\bmkdir|\btouch|\bcp|\bmv|\btee|>>?)\s+(?:-\S+\s+)*(/tmp/[\w./+-]*)",
+                                  command)
+            except Exception:                          # noqa: BLE001
+                made = []
+            if not made:
+                return ""
+            return ("\n[" + made[0] + " is this shell's private scratch: it lasts between your shell "
+                    "commands, but read_file, write_file and edit_file cannot reach it and nothing "
+                    f"there is part of your result. Write scripts and every deliverable inside "
+                    f"your working directory {workdir}; use a relative path.]")
+        return ("\n[" + ", ".join(outside[:3]) + " is outside your working "
+                f"directory {workdir}, which is read-only from here. All files "
+                "\u2014 scripts, logs, and every required deliverable \u2014 must "
+                "be written inside it; use a relative path.]")
+
     def _result_mtime() -> float | None:
         try:
             rt = next(iter(sorted(workdir.rglob("RESULT.txt"))), None)
@@ -764,13 +990,15 @@ def _bash_tool_for(workdir: Path, *, audit_on_submit: bool = False,
                     + (_registry_error_check(out) + _eaten_error_check(out)
                        + _env_after_wrapper_check(command)
                        + _fourc_run_check(command, out, workdir)
-                       + _participant_run_check(out)
+                       + _participant_run_check(out, command)
                        + _participant_command_check(command, workdir, out)
                        + _fourc_after_shell_check(workdir, _started_at, command)
+                       + _febio_after_shell_check(workdir, _started_at, command)
                        if audit_on_submit else "")
                     + _script_check_after_shell(_before_scr)
                     + _artefact_check_after_shell(_before_art)
-                    + _audit_after_shell(_before) + _note())
+                    + _audit_after_shell(_before)
+                    + _outside_path_note(command) + _note())
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             return ("[timeout after 900s; the command and everything it "
@@ -797,8 +1025,36 @@ def _kill_group(proc) -> None:
             continue
 
 
+def _keep_version(keep: Path | None, workdir: Path, p: Path, content: str) -> None:
+    """Keep a full copy of what was written, outside the agent's folder.
+
+    THE TRANSCRIPT CUTS A WRITTEN FILE AT 600 CHARS, so a check that fired on a
+    write cannot be judged after the run: across five runs four firings of one
+    check were recorded and three of them could not be read back, because each
+    fix overwrote the version the check had seen. Both arms, every write
+    (edit_file writes through write_file); never raises."""
+    if keep is None:
+        return
+    try:
+        keep.mkdir(parents=True, exist_ok=True)
+        n = sum(1 for _ in keep.iterdir())
+        rel = str(p.resolve().relative_to(workdir.resolve())).replace("/", "__")
+        (keep / f"{n:04d}__{rel}").write_text(content)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
-                          advice: bool = False):
+                          advice: bool = False, budget_note: bool = True,
+                          keep_versions: Path | None = None):
+    # THE CLOCK RIDES ON EVERY TOOL REPLY, NOT ONLY ON THE SHELL'S. The wall
+    # clock stamp and the action count were appended to run_bash replies alone,
+    # so a run that spent its minutes in write_file calls -- measured: seven
+    # full re-writes of a 47k-character participant, 25 of 45 minutes -- read
+    # "actions spent: 9" with 29 minutes gone, and died at the wall with a
+    # converged level-1 result set on disk and nothing handed in. Same stamp,
+    # same text, both arms; the product path passes budget_note=False as it
+    # does for the shell tool.
     @tool
     def read_file(path: str, max_bytes: int = 200_000) -> str:
         """Read a file inside the cell sandbox."""
@@ -821,6 +1077,8 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
     @tool
     def write_file(path: str, content: str) -> str:
         """Write `content` to `path` (relative paths resolve inside the cell sandbox)."""
+        if budget_note:
+            note_action()
         try:
             p = Path(path)
             if not p.is_absolute():
@@ -833,6 +1091,7 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
                         f"inside it; use a relative path.]")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
+            _keep_version(keep_versions, workdir, p, content)
             reply = f"wrote {len(content)} chars to {p}"
             # ROUND-8 MECHANISM, openPASO ARM ONLY: the submission is audited the
             # moment it is written, and the findings are placed in the reply
@@ -863,7 +1122,9 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
                 reply += _registry_attribute_check(p, content)
                 reply += _extra_script_checks(p, content)
                 reply += _fourc_deck_write_check(p, content)
+                reply += _febio_deck_write_check(p, content)
                 reply += _participant_write_check(p, content)
+                reply += _config_write_check(p, content)
                 reply += _early_artefact_check(workdir, p)
             if audit_on_submit and p.name == "RESULT.txt":
                 # A GIVE-UP FILED OVER FINISHED WORK, caught structurally.
@@ -897,12 +1158,52 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
                 # NEVER an all-clear on nothing, and never two copies of the
                 # wording: _format_audit_reply is shared with the shell route.
                 reply += _format_audit_reply(findings)
+            if budget_note:
+                reply += _time_left_note()
             return reply
         except (OSError, UnicodeError, ValueError) as e:
             return (f"[write failed: {type(e).__name__}: {e} — "
                     "use a relative path inside the sandbox]")
 
-    return [read_file, write_file]
+    @tool
+    def edit_file(path: str, old: str, new: str) -> str:
+        """Replace ONE exact occurrence of `old` in `path` with `new` (relative paths resolve inside the cell sandbox). Use it to fill a hole or fix a line in a large file instead of re-typing the whole file."""
+        # AN EDIT IS NOT A RE-TYPE. Measured over fifteen coupled cells of one
+        # problem: 2,029,176 characters re-emitted into the participant
+        # scripts, a mean of 135k per cell -- three full copies of a 36k
+        # served contract before any physics -- because every correction had
+        # to re-send the whole file. The one correct cell wrote its file once.
+        # This tool changes one exact passage and hands the result to
+        # write_file, so the same checks, the same refusals and the same
+        # clock stamp apply; it counts as one action, not two.
+        try:
+            p = Path(path)
+            if not p.is_absolute():
+                p = workdir / p
+            wd = workdir.resolve()
+            if not p.resolve().is_relative_to(wd):
+                return (f"[edit refused: {p} is outside your working directory {wd}]")
+            if not p.is_file():
+                return f"[edit refused: {p} does not exist; write_file creates a file]"
+            text = p.read_text()
+        except (OSError, UnicodeError, ValueError) as e:
+            return f"[edit failed: {type(e).__name__}: {e}]"
+        if not old:
+            return "[edit refused: `old` is empty; give the exact text to replace]"
+        n = text.count(old)
+        if n == 0:
+            return (f"[edit refused: the text to replace was not found in {p.name} "
+                    f"({len(text)} chars). read_file it and copy the exact passage, "
+                    f"whitespace included.]")
+        if n > 1:
+            return (f"[edit refused: the text occurs {n} times in {p.name}; include "
+                    f"more surrounding lines so it occurs once.]")
+        content = text.replace(old, new, 1)
+        reply = write_file.invoke({"path": str(p), "content": content})
+        return (f"edited {p.name}: replaced {len(old)} chars with {len(new)} "
+                f"({len(content)} chars now). " + reply)
+
+    return [read_file, write_file, edit_file]
 
 
 # What has already been asked in this process. Bounded: the web interface keeps
@@ -910,7 +1211,7 @@ def _read_write_tools_for(workdir: Path, *, audit_on_submit: bool = False,
 # for is a slow leak. Oldest out first; 256 is far more than one run asks.
 _BLOCKED_MESSAGE = (
     "[the search returned nothing after three attempts on all backends. "
-    "DuckDuckGo answers an empty list when it is throttling a machine, which is "
+    "A search engine answers an empty list when it is throttling a machine, which is "
     "the usual reason for this, so treat it as 'could not search', NOT as 'the "
     "web has nothing on this'. Do not conclude anything from it: wait and try "
     "once more, ask a shorter query, or use openPASO's own knowledge and "
@@ -932,7 +1233,7 @@ SEARCH_SCOPE: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 @tool
 def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web (DuckDuckGo). Returns up to max_results result snippets.
+    """Search the web. Returns up to max_results result snippets.
 
     DuckDuckGo throttles repeated searches from one machine, and when it does it
     answers with an EMPTY LIST rather than an error. The old code read that as
@@ -946,16 +1247,23 @@ def web_search(query: str, max_results: int = 5) -> str:
     again, and an empty answer is reported as what it almost always is — a
     block, not an empty web — so nobody mistakes it for evidence of absence.
     """
+    # THE MAINTAINED CLIENT FIRST. duckduckgo_search was renamed ddgs and the old
+    # name asks DuckDuckGo alone; ddgs asks several engines. Measured 2026-09-28 on
+    # this machine: duckduckgo_search 8.1.1 answered 0 hits for "Schafer Turek
+    # benchmark cylinder" on all three of its backends, and furniture-shop and
+    # language-course pages for two other queries of one web-interface run, while
+    # ddgs 9.16 answered all four queries with the benchmark paper, the FEniCSx
+    # tutorial and the dolfinx forum.
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
+        backends = ("auto",)               # ddgs picks among its engines itself
     except ImportError:
         try:
-            from ddgs import DDGS          # the same package, renamed
+            from duckduckgo_search import DDGS   # the old name: DuckDuckGo only
+            backends = ("auto", "html", "lite")
         except ImportError:
             return ("[web_search unavailable: install the search client to enable it — "
-                    "`pip install ddgs`, or `pip install duckduckgo-search` for the older "
-                    "name this repository still pins in "
-                    "langgraph_eval/requirements-langgraph.txt]")
+                    "`pip install ddgs` (see langgraph_eval/requirements-langgraph.txt)]")
 
     # the query that is remembered is the query that is sent: keying on a
     # lowercased form while searching the original would let one spelling
@@ -977,7 +1285,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     for pause in (0.0, 1.5, 4.0):
         if pause:
             time.sleep(pause)
-        for backend in ("auto", "html", "lite"):
+        for backend in backends:
             try:
                 with DDGS() as ddgs:
                     hits = list(ddgs.text(query, max_results=max_results,
@@ -1105,12 +1413,30 @@ def _make_spawn_subagent_tool(
         except Exception:                              # noqa: BLE001
             _rt = None
         _rt_before = _rt.stat().st_mtime if _rt is not None and _rt.exists() else None
+        _t0 = time.time()
         try:
             out = await sub_agent.ainvoke(
                 {"messages": [("user", msg)]},
-                config={"recursion_limit": 40},
+                config={"recursion_limit": WORKER_RECURSION_LIMIT},
             )
             report = out["messages"][-1].content
+            # THE STEP CAP HAS TWO EXITS AND ONLY ONE WAS COVERED. LangGraph's
+            # prebuilt agent returns "Sorry, need more steps to process this
+            # request." as an ordinary final message when the recursion limit
+            # is hit gracefully; only the raising exit reached the report
+            # below. Measured: a worker died at the cap with a 45 kB filled
+            # participant on disk, the parent read the bare sentence,
+            # overwrote that file with the pristine contract and gave up with
+            # 24 minutes left. Both exits now hand the parent the same report.
+            report = _report_if_worker_out_of_steps(report, workdir, _t0, WORKER_RECURSION_LIMIT)
+            # A SILENT WORKER THAT WROTE FILES DID NOT "PRODUCE NOTHING": its files are
+            # named, newest first, as for a worker out of steps (measured: that sentence
+            # was handed back for a worker whose files were on disk).
+            if not str(report).strip() and role not in ("critic", "verifier", "researcher"):
+                _l = _worker_failure_report(RuntimeError(""), workdir, _t0, WORKER_RECURSION_LIMIT)
+                if " Everything it wrote" in _l:
+                    report = ("[the sub-agent returned no text; this is NOT approval and NOT a "
+                              "verdict on its work." + _l[_l.find(" Everything it wrote"):])
             # SILENCE IS NOT ASSENT, AND IT USED TO BE HANDED BACK AS "".
             #
             # MEASURED on a live run: the model spawned a critic, the critic ran
@@ -1148,15 +1474,63 @@ def _make_spawn_subagent_tool(
                                   + str(_f))
             except Exception:                          # noqa: BLE001
                 pass
-            return report
+            return _bounded_report(str(report))
         except Exception as e:
             # Still returned as text so one bad sub-agent cannot kill the run,
             # but marked loudly enough that a transcript sweep finds it: a
-            # broken mechanism must not read like a verdict.
-            return (f"[SUBAGENT FAILED — this is NOT a review verdict — "
-                    f"{type(e).__name__}: {e}]")
+            # broken mechanism must not read like a verdict -- and the files
+            # the worker left are named, because a worker that ran out of
+            # steps handed the parent LangGraph's bare "need more steps" and
+            # the parent rebuilt by hand, at a quarter of the served
+            # contract's fidelity, what was sitting finished on disk.
+            return _worker_failure_report(e, workdir, _t0, WORKER_RECURSION_LIMIT)
 
     return spawn_subagent
+
+
+def _report_if_worker_out_of_steps(report, workdir: Path, started_at: float, limit: int):
+    """LangGraph's graceful step-cap message, turned into the same out-of-steps
+    report the raising exit produces; any other report passes through."""
+    text = str(report or "")
+    if "need more steps" in text.lower() and len(text) < 400:
+        return _worker_failure_report(RuntimeError(text), workdir, started_at, limit)
+    return report
+
+
+def _worker_failure_report(exc: BaseException, workdir: Path, started_at: float,
+                           limit: int) -> str:
+    """What the parent reads when a worker dies: not a verdict, and the files
+    the worker left on disk, newest first, so the work continues from them."""
+    files = []
+    try:
+        for q in Path(workdir).rglob("*"):
+            try:
+                if (q.is_file() and q.stat().st_mtime >= started_at
+                        and "trajectory" not in q.name):
+                    files.append(q)
+            except OSError:
+                continue
+    except OSError:
+        files = []
+    files.sort(key=lambda q: q.stat().st_mtime, reverse=True)
+    shown = ", ".join(f"{q.relative_to(workdir)} ({q.stat().st_size} B)" for q in files[:12])
+    out_of_steps = ("recursion" in type(exc).__name__.lower()
+                    or "need more steps" in str(exc).lower())
+    if out_of_steps:
+        head = (f"[WORKER OUT OF STEPS: the harness allows a worker {limit} graph "
+                f"steps (about {limit // 2} tool calls) and this one used them all. "
+                f"This is NOT a verdict on its work.")
+    else:
+        head = (f"[SUBAGENT FAILED — this is NOT a review verdict — "
+                f"{type(exc).__name__}: {str(exc)[:300]}")
+    if files:
+        tail = (f" Everything it wrote is on disk, newest first: {shown}. Continue "
+                f"FROM those files -- read them and change them in place -- rather "
+                f"than rebuilding them; a new worker can be handed the file names "
+                f"and the one thing left to do.]")
+    else:
+        tail = " It left no new file on disk.]"
+    return head + tail
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1167,6 +1541,17 @@ def _openpaso_mcp_client(workdir: Path | None = None, *,
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     env = _clean_subprocess_env()
+    # SAY WHERE THE JOURNAL GOES; DO NOT INFER IT FROM A MOUNT. The server used
+    # to write into <source>/data/sessions and the jail bound the cell's own
+    # directory over that path. That works only while the default happens to be
+    # the install tree -- which is the defect openPASO just fixed -- so the
+    # campaign now names the destination, and the bind below is belt to its
+    # braces. `participant_lint` reads this same directory.
+    # `workdir` is optional here -- the product path calls this with none, and
+    # there the product's own default (a state directory outside the install)
+    # is the right answer.
+    if workdir is not None:
+        env["OPENPASO_JOURNAL_LIVE_DIR"] = str(Path(workdir) / ".openpaso_sessions")
     env.pop("OFA_DISABLE_CRITIC", None)
     env.pop("OFA_DISABLE_PITFALLS", None)
     env["FOURC_ROOT"] = env.get("FOURC_ROOT", str(Path.home() / "4C"))
@@ -1218,6 +1603,14 @@ def _openpaso_mcp_client(workdir: Path | None = None, *,
         env["OPENPASO_COUPLING_DIR"] = str(cell_work / "coupling")
         env["OPENPASO_MESH_DIR"] = str(cell_work / "meshes")
         env["OPENPASO_BENCHMARK_DIR"] = str(cell_work / "benchmark_results")
+        # ONE JIT CACHE PER CELL, ON BOTH ROUTES. The shell sandbox already
+        # binds this cell's private scratch at /tmp and points XDG_CACHE_HOME
+        # into it; the participants the server launches (couple, couple_levels)
+        # inherited the SERVER's environment and compiled into the host's
+        # shared ~/.cache, so five concurrent cells contended for one FEniCSx
+        # form cache. Measured: "JIT compilation timed out" cost one cell its
+        # first give-up. The same host directory serves both routes now.
+        env["XDG_CACHE_HOME"] = str(sandbox_scratch_for(cell_work) / ".cache")
 
     # THE SERVER INTERPRETER, RESOLVED — NOT ASSUMED.
     #
@@ -1344,7 +1737,9 @@ from tools.workspace_advisor import (          # noqa: E402
     _work_on_disk_contradicting_a_give_up,
     deliverable_findings_after_worker as _deliverable_findings_after_worker,
     _wrong_level_run_log_check, _fourc_deck_write_check, _fourc_run_check,
-    _fourc_after_shell_check, _participant_write_check, _participant_run_check,
+    _fourc_after_shell_check, _febio_after_shell_check, _febio_deck_write_check,
+    _participant_write_check,
+    _config_write_check, _participant_run_check,
     _participant_command_check)
 
 
@@ -1381,6 +1776,13 @@ def _audit_submission(result_path: Path, content: str):
     if r.get("sequences_found", 0) == 0 and r.get("clean"):
         return "NOEVIDENCE"
     if r.get("clean"):
+        # WHAT DID NOT RUN is printed as the audit states it: a clean audit
+        # whose checks were skipped must not read like a fully checked one.
+        gaps = r.get("not_run") or []
+        if gaps:
+            return ("no finding among the checks that ran; these did NOT run, so "
+                    "what they check is unverified:\n"
+                    + "\n".join(f"  * {g}" for g in gaps))
         return ""
     # LEAD WITH THE SINGLE NEXT FIX, then the full findings. The prioritisation
     # body lives in openPASO (tools/result_audit.what_to_fix_next); the harness
@@ -1392,10 +1794,12 @@ def _audit_submission(result_path: Path, content: str):
 
 def _host_tools(workdir: Path, *, size: str, seed: int,
                 parent_tools: list[BaseTool], depth: int,
-                audit_on_submit: bool = False) -> list[BaseTool]:
+                audit_on_submit: bool = False,
+                keep_versions: Path | None = None) -> list[BaseTool]:
     tools: list[BaseTool] = []
     tools.append(_bash_tool_for(workdir, audit_on_submit=audit_on_submit))
-    tools.extend(_read_write_tools_for(workdir, audit_on_submit=audit_on_submit))
+    tools.extend(_read_write_tools_for(workdir, audit_on_submit=audit_on_submit,
+                                       keep_versions=keep_versions))
     tools.append(web_search)
     spawn = _make_spawn_subagent_tool(
         size=size, seed=seed, workdir=workdir,
@@ -1405,9 +1809,10 @@ def _host_tools(workdir: Path, *, size: str, seed: int,
     return tools
 
 
-def build_bare_agent(*, size: str, seed: int, workdir: Path, depth: int = 0):
+def build_bare_agent(*, size: str, seed: int, workdir: Path, depth: int = 0,
+                     keep_versions: Path | None = None):
     tools = _host_tools(workdir, size=size, seed=seed,
-                        parent_tools=[], depth=depth)
+                        parent_tools=[], depth=depth, keep_versions=keep_versions)
     llm = _llm(size, temperature=0.2, seed=seed)
     return create_react_agent(llm, tools=tools, prompt=BARE_SYSTEM)
 
@@ -1489,14 +1894,14 @@ def _wrap_mcp_tool_with_artefact_hook(tool: BaseTool, workdir: Path):
 
 @asynccontextmanager
 async def build_mcp_agent(*, size: str, seed: int, workdir: Path,
-                          depth: int = 0):
+                          depth: int = 0, keep_versions: Path | None = None):
     """Yield an MCP agent whose tools share one live openPASO server."""
     async with openpaso_mcp_tools_session(workdir) as mcp_tools:
         mcp_tools = [_wrap_mcp_tool_with_artefact_hook(t, workdir)
                      for t in mcp_tools]
         host = _host_tools(workdir, size=size, seed=seed,
                            parent_tools=mcp_tools, depth=depth,
-                           audit_on_submit=True)
+                           audit_on_submit=True, keep_versions=keep_versions)
         llm = _llm(size, temperature=0.2, seed=seed)
         yield create_react_agent(llm, tools=mcp_tools + host,
                                  prompt=_mcp_system_prompt())

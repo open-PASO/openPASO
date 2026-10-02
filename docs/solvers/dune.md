@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for DUNE-fem
 
-17 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+18 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -37,5 +37,6 @@ python check_install.py
 | `poisson` | Poisson equation -Δu = f (UFL forms, DUNE backend) | 2-D, 3-D | `2d` |
 | `poisson_mms` | 3D variable-coefficient Poisson manufactured-solution (MMS) convergence family — -div(kappa grad u) = f on [0,L]^3, affine kappa, exact Dirichlet data, uniform refinement with per-level L2/H1 error lines; theoretical L2 order k+1 / H1 order k | 3-D | `3d_varcoeff` |
 | `reaction_diffusion` | Reaction-diffusion (transient) | 2-D | `2d` |
+| `registry_survey` | Registry survey: builds every entry this dune-fem install declares across all 8 axes (spaces, schemes, solvers, storages, models, operators, functions, views) and checks each against something independent of the run. Also records the first-use JIT cost, which is 85-200s per new space and 0.1s once cached. | 2-D | `default` |
 | `stokes` | Stokes flow with Uzawa iteration (UFL) | 2-D | `2d` |
 | `time_dependent_heat` | Transient heat du/dt - alpha*Δu = f via implicit Euler time-stepping | 2-D | `2d` |

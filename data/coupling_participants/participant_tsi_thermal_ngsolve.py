@@ -55,11 +55,9 @@ import numpy as np
 # while everything beside the level rule survived in all of them.
 ngsolve.ngsglobals.msg_level = 3
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 from netgen.geom2d import SplineGeometry
 from ngsolve import (VERTEX, BilinearForm, CoefficientFunction, GridFunction,
                      H1, LinearForm, Mesh, NodeId, TaskManager, dx, grad)
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 
@@ -68,7 +66,7 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 PARTNER   = "mech"        # the structural participant's `name` in couple(...)
 X0, X1    = 0.0, 2.0      # the body (BOTH participants use the same body)
 Y0, Y1    = 0.0, 0.5
-NX, NY    = 40, 10        # sets netgen's maxh; the mesh is UNSTRUCTURED
+NX, NY    = 38, 14        # sets netgen's maxh; the mesh is UNSTRUCTURED
 K_COND    = 52.0          # thermal conductivity k, W/(m K)
 RHO_C     = 3.297e6       # volumetric heat capacity rho*c, J/(m^3 K)
 DT        = 1.0e4         # the time step of the single implicit step, s

@@ -51,12 +51,10 @@ import numpy as np
 # while everything beside the level rule survived in all of them.
 ngsolve.ngsglobals.msg_level = 3
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 from netgen.geom2d import SplineGeometry
 from ngsolve import (VERTEX, BilinearForm, CoefficientFunction, GridFunction,
                      H1, InnerProduct, LinearForm, Mesh, NodeId, Sym,
                      TaskManager, VectorH1, div, dx, grad)
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 
@@ -65,9 +63,9 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 PARTNER    = "thermal"    # the thermal participant's `name` in couple(...)
 X0, X1     = 0.0, 2.0     # the body (BOTH participants use the same body)
 Y0, Y1     = 0.0, 0.5
-NX, NY     = 32, 8        # sets netgen's maxh; the mesh is UNSTRUCTURED
+NX, NY     = 34, 8        # sets netgen's maxh; the mesh is UNSTRUCTURED
 E_MOD      = 2.1e11       # Young's modulus, Pa
-NU         = 0.3          # Poisson ratio
+NU         = 0.29         # Poisson ratio
 BETA       = 6.3e7        # thermal stress modulus (3*lam+2*mu)*alpha, Pa/K
 THETA_INIT = 10.0         # iteration-1 fallback for the imported theta = T-T_ref, K
 # ─────────────────────────────────────────────────────────────────────────
@@ -160,22 +158,27 @@ p_, w_ = fesq.TnT()
 m += p_ * w_ * dx
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
-with TaskManager():
+# THE SOLVE AND THE PROJECTION RUN AT MODULE LEVEL, NOT INSIDE A `with` BLOCK:
+# the solve hole sat inside `with TaskManager():`, and a fill written at column 0
+# ends that block, so the served lines after it no longer parse (IndentationError).
+# Wrap your own solve in `with TaskManager():` if you want its threads.
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
+with TaskManager():
     a.Assemble()
     f.Assemble()
     r = f.vec.CreateVector()
     r.data = f.vec - a.mat * gfu.vec
     gfu.vec.data += a.mat.Inverse(fes.FreeDofs(), inverse="sparsecholesky") * r
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
-    # volumetric strain, L2-projected onto the order-1 space
-    m.Assemble()
-    fq = LinearForm(fesq)
-    fq += div(gfu) * w_ * dx
-    fq.Assemble()
-    gev = GridFunction(fesq)
-    gev.vec.data = m.mat.Inverse(fesq.FreeDofs(),
-                                 inverse="sparsecholesky") * fq.vec
+
+# volumetric strain, L2-projected onto the order-1 space
+m.Assemble()
+fq = LinearForm(fesq)
+fq += div(gfu) * w_ * dx
+fq.Assemble()
+gev = GridFunction(fesq)
+gev.vec.data = m.mat.Inverse(fesq.FreeDofs(),
+                             inverse="sparsecholesky") * fq.vec
 
 evol = np.array([gev.vec[int(d)] for d in vdof], float)
 print(f"[ngsolve mech] n={len(evol)} "

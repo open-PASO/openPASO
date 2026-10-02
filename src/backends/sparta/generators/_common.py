@@ -164,9 +164,20 @@ UNIVERSAL_PITFALLS = [
     "'create_particles'. Placed after it, or left out entirely, the defaults "
     "nrho = 1.0 / fnum = 1.0 apply, create_particles makes (almost) no "
     "particles, and the run completes normally with an empty domain — rc = 0, "
-    "no warning, a full stats table of zeros. "
+    "no warning, a full stats table of zeros. So does a nrho that is not the "
+    "gas's number density in molecules per m^3: 'create_particles <mix> n 0' "
+    "makes nrho x V / fnum particles (V the flow volume, in 2-D the area), and "
+    "a nrho written as a mass density or as a count per cell puts that below "
+    "one. The same empty run follows when "
+    "no grid cell lies on the flow side of a surface: SPARTA puts the gas on "
+    "the side a line's normal N = (0,0,1) x (p2 - p1) points to (walking from "
+    "p1 to p2, the gas is on your left), and with every line listed the other "
+    "way round every cell is inside a body and create_particles makes 0 "
+    "particles. Swap p1 and p2 of those lines. "
     "Signal: the setup line 'Created 0 particles' (printf 'Created %ld "
-    "particles') followed by an Np column that is 0 on every stats line.",
+    "particles') followed by an Np column that is 0 on every stats line; for "
+    "the surface cause, the read_surf line before it reads '0 <b> <c> = cells "
+    "outside/inside/overlapping surfs'.",
 
     "[Numerical] 'create_particles <mix> n <N>' with a NONZERO N creates "
     "exactly N simulation particles and silently overrides 'global nrho' — the "

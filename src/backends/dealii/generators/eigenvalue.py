@@ -86,8 +86,9 @@ int main()
   // Assemble stiffness and mass matrices with constraints distributed
   // to BOTH (otherwise Dirichlet DoFs produce spurious modes).
   QGauss<dim> quadrature(fe.degree + 1);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
   FEValues<dim> fe_values(fe, quadrature,
-    update_values | update_gradients | update_JxW_values);
+    update_values | update_gradients | update_JxW_values | update_quadrature_points);
 
   const unsigned int dpc = fe.n_dofs_per_cell();
   FullMatrix<double> cell_stiffness(dpc, dpc);

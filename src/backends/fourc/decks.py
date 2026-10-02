@@ -271,6 +271,7 @@ DECKS: tuple[Deck, ...] = (
             "strategies do not carry the film coupling.",
             "A viscosity unit slip is not a silent scaling error here — the "
             "monolithic Newton diverges.",
+            "[Output] Do NOT add IO/RUNTIME VTK OUTPUT sections to this deck: this coupling runs on the old structure time integration and 4C aborts the run with 'Runtime output is not available in the old structure time integration! ... set INT_STRATEGY: Standard' (which this coupling does not offer). The run writes 4C-native output (<prefix>.control, .result.*, .mesh.*); openPASO converts it to VTU after a normal finish with 4C's post_processor, and the fields appear under output-files/*.vtu (post_processor.log beside them records the conversion). Signal: a run that requests runtime output dies before its first step with the message above. (Measured 2026-09-24 by running the served deck both ways.)",
         ),
     ),
     Deck(
@@ -308,6 +309,7 @@ DECKS: tuple[Deck, ...] = (
             "POROCOUPLING CONDITION (skeleton to pore fluid).",
             "The upstream deck declares a DSURFACE built from nodes that do "
             "not exist; 4C accepts it because no condition references it.",
+            "[Output] Do NOT add IO/RUNTIME VTK OUTPUT sections to this deck: this coupling runs on the old structure time integration and 4C aborts the run with 'Runtime output is not available in the old structure time integration! ... set INT_STRATEGY: Standard' (which this coupling does not offer). The run writes 4C-native output (<prefix>.control, .result.*, .mesh.*); openPASO converts it to VTU after a normal finish with 4C's post_processor, and the fields appear under output-files/*.vtu (post_processor.log beside them records the conversion). Signal: a run that requests runtime output dies before its first step with the message above. (Measured 2026-09-24 by running the served deck both ways.)",
         ),
     ),
     Deck(
@@ -325,6 +327,7 @@ DECKS: tuple[Deck, ...] = (
             "algorithms do not apply to a cut mesh.",
             "STRUCTURE DOMAIN and FLUID DOMAIN generate both meshes inline; "
             "the structure must lie inside the fluid box or it cuts nothing.",
+            "[Output] Do NOT add IO/RUNTIME VTK OUTPUT sections to this deck: this coupling runs on the old structure time integration and 4C aborts the run with 'Runtime output is not available in the old structure time integration! ... set INT_STRATEGY: Standard' (which this coupling does not offer). The run writes 4C-native output (<prefix>.control, .result.*, .mesh.*); openPASO converts it to VTU after a normal finish with 4C's post_processor, and the fields appear under output-files/*.vtu (post_processor.log beside them records the conversion). Signal: a run that requests runtime output dies before its first step with the message above. (Measured 2026-09-24 by running the served deck both ways.)",
         ),
     ),
     Deck(
@@ -546,6 +549,7 @@ DECKS: tuple[Deck, ...] = (
             "two must cover the same region. A missing ALE domain is not a "
             "parse error -- the mesh simply does not move."
             "Signal: the setup must bring up an ALE discretisation of its own -- look for its fill_complete() line beside the fluid one. A run that lists only the fluid has no mesh motion, whatever the mesh-motion section says.",
+            "[Output] The HDG fluid ignores IO/RUNTIME VTK OUTPUT (the run finishes normally and writes no VTK), and post_processor --filter=vtu fails on its mixed variables (4C_post_vtk_vtu_writer.cpp); only --filter=ensight writes a readable .case/.geo pair, which openPASO's result gate does not read. Signal: no output-vtk-files/ or *.vtu after a normal finish; post_processor.log ends in an MPI abort naming the VTU writer. Judge the run from the log. (Measured 2026-09-24 by running the served deck.)",
         ),
     ),
     Deck(

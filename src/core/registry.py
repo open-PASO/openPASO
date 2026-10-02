@@ -124,7 +124,13 @@ def load_all_backends():
                 if backend == "fourc" and loc and os.path.isfile(loc):
                     os.environ.setdefault("FOURC_BINARY", loc)
                 src_root = info.get("source_root", "")
-                if src_root:
+                # An UNBUILT checkout is not a root anyone should run from. Measured 2026-09-24:
+                # discovered_config.json recorded /home/<user>/Kratos with needs_build: true, this
+                # promoted it to KRATOS_ROOT, get_env_with_source_root prepended its install/ (a core
+                # without ConvectionDiffusionApplication) to the PINNED interpreter's PYTHONPATH, and
+                # the pin imported the wrong Kratos -- only inside the test suite, where the record
+                # was read first. A source root is promoted only when the record says it is built.
+                if src_root and not info.get("needs_build"):
                     env_var = f"{backend.upper()}_ROOT"
                     os.environ.setdefault(env_var, src_root)
             logger.info(f"Loaded discovered config: {len(config['backends'])} backends")

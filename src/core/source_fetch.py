@@ -65,10 +65,10 @@ def _git_clone(url: str, dest: Path, shallow: bool = True,
     if background:
         f = open(log_path, "w")
         return subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+                                start_new_session=True, stdin=subprocess.DEVNULL)
     else:
         with open(log_path, "w") as f:
-            r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
+            r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
             if r.returncode != 0:
                 raise RuntimeError(
                     f"git clone {url} → {dest} failed (rc={r.returncode}); "

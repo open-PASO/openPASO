@@ -356,7 +356,7 @@ KNOWLEDGE = {
             "do not assume them. Compare the slope against theoretical_l2_order to "
             "decide whether the deck is correct."),
         # NO MEASURED RESULT HERE. This field held our own error table and the
-        # observed orders from a development run. That is the answer to a
+        # observed orders from a recorded run. That is the answer to a
         # convergence study, sitting inside the tool the study is meant to
         # evaluate — an agent could read the result instead of computing it,
         # and convergence order is exactly what such a study measures. Removed

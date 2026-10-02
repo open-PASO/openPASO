@@ -638,8 +638,12 @@ def test_encoded_data_survives_every_substitution_not_only_the_newest():
     import base64
     from webui.privacy import scrub_text
     planted = "/home/" + "someone/private"      # built, so this file holds no path
-    frames = (base64.b64encode(os.urandom(3000)).decode() + "="
-              + planted + base64.b64encode(os.urandom(3000)).decode())
+    # two encoded blocks joined, the first ending in its padding and the second beginning, by chance,
+    # with a home path: a value an encoder can write. An "=" put at the start of a group, as this test
+    # once did, is not base64, and the scrubber now reads base64's grammar.
+    head = base64.b64encode(os.urandom(3001)).decode()          # ends in "=="
+    tail = base64.b64encode(os.urandom(3000)).decode()
+    frames = head + planted + tail[len(planted):]
     doc = json.dumps({"kind": "field_series", "frames": frames,
                       "note": f"wrote {Path.home()}/run/out.vtu"})
     out = scrub_text(doc)
@@ -668,7 +672,9 @@ def test_a_name_inside_encoded_data_is_left_alone():
     if len(user) < 3:
         return
     frames = base64.b64encode(os.urandom(4000)).decode()
-    planted = frames[:200] + "+" + user + "/" + frames[200:]
+    # in place, as chance puts it: inserted, the name moved the padding off its group and the value
+    # stopped being base64
+    planted = frames[:200] + "+" + user + "/" + frames[200 + len(user) + 2:]
     doc = json.dumps({"kind": "field_series", "frames": planted,
                       "provenance": {"source": f"/home/{user}/run/out.vtu"}})
     out = scrub_text(doc)
@@ -749,7 +755,8 @@ def test_a_seeded_conversation_does_not_open_with_an_empty_message():
             cut = current[:i]
             break
     h = _history(cut)
-    assert ("user", "") not in h and all(text.strip() for role, text in h if role == "user")
+    users = [m[1] for m in h if isinstance(m, tuple) and m[0] == "user"]
+    assert users and all(text.strip() for text in users)
     assert h[0] == ("user", "solve the plate")
 
 
@@ -853,6 +860,98 @@ def test_a_correction_sent_late_becomes_a_message_the_record_keeps():
     ]
     h = _history(events)
     assert ("user", "Use a finer mesh.") in h
+
+
+def test_a_coupling_is_judged_before_its_record_is_shortened():
+    """A coupling reply carries no "status" and routinely runs past the length
+    at which a result is shortened for the record. Judged from that shortened
+    copy it read as a call that computed nothing, and a failed one whose first
+    participant looked good read as verified — the interface asserting the two
+    things it exists to prevent."""
+    from webui.outcome import classify_solver_result as c, shorten
+
+    verified = _wrap({"converged": True, "iterations": 7, "trustworthy_result": True,
+                      "verification": "VERIFIED - evidence and a critic review on record",
+                      "history": [[i, 1.0 / (i + 1)] for i in range(300)],
+                      "participant_output_logs": {"fluid": "x" * 4000, "solid": "y" * 4000}})
+    failed = _wrap({"participants": [{"name": "fluid", "status": "completed", "trustworthy_result": True},
+                                     {"name": "solid", "status": "failed", "trustworthy_result": False}],
+                    "pad": "z" * 9000, "converged": False, "trustworthy_result": False})
+    assert len(verified) > 8000 and len(failed) > 8000, "these are the everyday sizes"
+    # the invariant: shortening a record for storage never changes the verdict
+    assert c(verified) == "verified" and c(shorten(verified)) == "verified"
+    assert c(failed) == c(shorten(failed)), "the same evidence, the same answer"
+    assert c(shorten(failed)) != "verified", "a mixture is never a verified result"
+
+
+def test_the_three_ladder_shapes_as_the_tool_really_answers_them():
+    """The field names and shapes couple_levels actually lands with: a verdict
+    for the ladder at the top, and one per level inside.
+
+    The third is the one that catches a reader who rebuilds the verdict from
+    the parts: every level says it is trustworthy, all_levels_converged is
+    true, and the ladder is still not verified — the mesh never refined
+    between levels, which no single level can see."""
+    from webui.outcome import classify_solver_result as c, shorten
+
+    verified = _wrap({"all_levels_converged": True, "trustworthy_result": True,
+                      "verification": "VERIFIED - every level converged, exchanged a real "
+                                      "flux, refined, and the review is on record",
+                      "levels": [{"level": 1, "trustworthy_result": True},
+                                 {"level": 2, "trustworthy_result": True}]})
+    null_level = _wrap({"all_levels_converged": False, "trustworthy_result": False,
+                        "verification": "level 2 is not a coupled result",
+                        "levels": [{"level": 1, "trustworthy_result": True},
+                                   {"level": 2, "trustworthy_result": False,
+                                    "coupled_evidence": "residual 0.0 at the first step"}]})
+    never_refined = _wrap({"all_levels_converged": True, "trustworthy_result": False,
+                           "verification": "the mesh did not refine between levels",
+                           "levels": [{"level": 1, "trustworthy_result": True},
+                                      {"level": 2, "trustworthy_result": True}]})
+
+    for name, reply, want in (("verified ladder", verified, "verified"),
+                              ("null level", null_level, "unverified"),
+                              ("never refined", never_refined, "unverified")):
+        assert c(reply) == want, (name, c(reply))
+        padded = reply.replace('"levels"', '"logs": "' + "x" * 9000 + '", "levels"')
+        assert c(shorten(padded)) == want, (name, "shortened", c(shorten(padded)))
+
+
+def test_every_reader_of_a_run_gives_the_same_verdict():
+    """The transcript read the verdict recorded on the event; the run list and
+    the downloaded record re-read the shortened text beside it. A coupling's
+    trustworthy_result sits in the middle of a long reply, which is the part
+    that is cut, so one run was Finished on its own page and "computed nothing"
+    in the list — one fact, two readers, two answers."""
+    from webui.outcome import classify_solver_result as c, fold, shorten
+
+    reply = _wrap({"head": "a" * 6000, "converged": True, "trustworthy_result": True,
+                   "verification": "VERIFIED", "tail": "b" * 6000})
+    recorded = shorten(reply)
+    assert c(reply) == "verified"
+    assert c(recorded) != "verified", "the flag really is in the part that gets cut"
+
+    events = [{"type": "turn_start"}, {"type": "user_msg", "text": "couple them"},
+              {"type": "tool_result", "tool": "couple", "result": recorded,
+               "verdict": c(reply)},
+              {"type": "done"}]
+    assert fold(events) == "completed", "the recorded verdict is what counts"
+
+
+def test_a_report_with_no_verdict_of_its_own_is_not_verified_by_a_part_of_it():
+    """The docstring's ladder: levels 1 and 2 verified, level 3 a null
+    exchange. Taking the best evidence anywhere reported it as finished."""
+    from webui.outcome import classify_solver_result as c
+    mixed = _wrap({"levels": [{"level": 1, "trustworthy_result": True},
+                              {"level": 2, "trustworthy_result": False,
+                               "coupled_evidence": "null exchange"}]})
+    allgood = _wrap({"levels": [{"trustworthy_result": True}, {"trustworthy_result": True}]})
+    assert c(mixed) == "unverified"
+    assert c(allgood) == "verified"
+
+
+def _wrap(obj):
+    return "[{'type': 'text', 'text': '" + json.dumps(obj) + "'}]"
 
 
 def test_a_coupling_reports_its_verdict_in_its_own_shape():
@@ -1078,10 +1177,12 @@ def test_after_a_stop_the_model_is_given_the_steps_it_really_took():
     ]
     h = _history(events)
     assert h[0] == ("user", "Solve the cantilever.")
-    text = h[1][1]
-    assert h[1][0] == "assistant"
-    assert "python cantilever.py 40" in text and "-1.8e-3" in text
-    assert "skipped this step" in text and "stopped the run" in text
+    # each step comes back as a call and its result (see test_a_rebuilt_history_hands_back_steps_as_steps)
+    handed = json.dumps([m if isinstance(m, tuple) else
+                         {"content": m.content, "calls": getattr(m, "tool_calls", None)} for m in h],
+                        default=str)
+    assert "python cantilever.py 40" in handed and "-1.8e-3" in handed
+    assert "skipped this step" in handed and "stopped the run" in handed
 
 
 def test_one_hung_step_can_be_ended_and_the_run_carries_on():

@@ -52,9 +52,9 @@ import logging
 PARTNER   = "thermal"     # the thermal participant's `name` in couple(...)
 X0, X1    = 0.0, 2.0      # the body (BOTH participants use the same body)
 Y0, Y1    = 0.0, 0.5
-NX, NY    = 32, 8         # this participant's OWN mesh; need not match the partner
+NX, NY    = 34, 8         # this participant's OWN mesh; need not match the partner
 E_MOD     = 2.1e11        # Young's modulus, Pa
-NU        = 0.3           # Poisson ratio
+NU        = 0.29          # Poisson ratio
 BETA      = 6.3e7         # thermal stress modulus (3*lam+2*mu)*alpha, Pa/K
 THETA_INIT = 10.0         # iteration-1 fallback for the imported theta = T-T_ref, K
 # ─────────────────────────────────────────────────────────────────────────
@@ -146,16 +146,6 @@ def thermal_load(v, w):
     return BETA * w["th"] * trace(sym_grad(v))
 
 
-@BilinearForm
-def mass(p, q, w):
-    return p * q
-
-
-@LinearForm
-def evol_rhs(q, w):
-    return trace(sym_grad(w["uh"])) * q
-
-
 K = asm(elasticity, ub)
 f = asm(thermal_load, ub, th=tb.interpolate(theta))
 
@@ -169,6 +159,16 @@ u = solve(*condense(K, f, D=D))
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 # volumetric strain, L2-projected onto P1 so it lives on the exchange nodes
+@BilinearForm
+def mass(p, q, w):
+    return p * q
+
+
+@LinearForm
+def evol_rhs(q, w):
+    return trace(sym_grad(w["uh"])) * q
+
+
 evol = solve(asm(mass, tb), asm(evol_rhs, tb, uh=ub.interpolate(u)))
 
 ix, iy = ub.split_indices()

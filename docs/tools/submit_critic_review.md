@@ -30,7 +30,7 @@ The text below is the tool's own description, exactly as the AI model receives i
     JSON object for `couple` / `couple_precice` / `coupled_solve`. Passing
     neither — or both — is refused, and the refusal comes AFTER you have
     written the review, so the review is wasted. Measured over the
-    development runs, half of all reviews handed in were rejected this way.
+    recorded runs, half of all reviews handed in were rejected this way.
     
     openPASO's critic requirement is enforced, not requested. The run and
     coupling tools do not take your word for it: they look up whether THIS
@@ -38,10 +38,14 @@ The text below is the tool's own description, exactly as the AI model receives i
     critic_approved=True without a matching review here leaves the result
     NOT VERIFIED, whatever else the run does.
     
-    The workflow is: spawn a sub-agent as an independent critic; have it
-    challenge the parameters, units, discretisation, problem statement and
-    boundary conditions, and cross-check against literature and benchmarks;
-    then submit what it actually found here; then run.
+    The workflow is: the agent doing the work spawns a sub-agent as an
+    independent critic and gives it the file to review; the critic
+    challenges the parameters, units, discretisation, problem statement and
+    boundary conditions, cross-checks against literature and benchmarks,
+    and CALLS THIS TOOL ITSELF with its verdict; the working agent then runs
+    exactly the reviewed file. A review filed by the agent whose work it
+    reviews is not a review, and an interface that can see who filed it
+    refuses one.
     
     The review is bound to the setup by digest, so a setup edited after
     review no longer matches and must be reviewed again. That is deliberate:
@@ -61,13 +65,19 @@ The text below is the tool's own description, exactly as the AI model receives i
             is required; an empty approval is indistinguishable from no
             review and is refused.
         setup: for run_simulation / run_with_generator /
-            verify_mesh_independence — the EXACT deck text you will run
-            (input_content, generator_script, or input_template).
+            verify_mesh_independence — the EXACT deck text that will run
+            (input_content, generator_script, or input_template), or the
+            NAME of the file in the run folder that holds it: the review is
+            then bound to that file's text as it is now, and a run of that
+            file (input_path / generator_path) matches it.
         coupling_args: for the coupling tools instead of `setup` — a JSON
             object of the arguments you will pass. Keys per tool:
             coupled_solve: problem, solver_a, solver_b, nx, ny, max_iter,
-            tol, relaxation, params; couple: participants, max_iter, tol,
-            accelerator, theta, monolithic, probe; couple_precice:
+            tol, relaxation, params; couple AND couple_levels: participants,
+            max_iter, tol, accelerator, theta, monolithic, probe -- the SAME
+            seven for both, and for `couple_levels` you pass the values you
+            will give it, NOT the per-level meshes, because one review
+            covers the whole ladder; couple_precice:
             participants, data, exchanges, scheme, dimensions, max_time,
             time_window, max_iterations, convergence_tol, relaxation,
             mapping. Pass EVERY key for the tool you will call, with the

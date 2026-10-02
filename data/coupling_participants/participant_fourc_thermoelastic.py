@@ -1,16 +1,15 @@
 """4C as the DIRICHLET side of a THERMO-ELASTIC coupling (steady thermoelasticity, plane strain).
     imports  values        = [T, ux, uy]   per interface point
     exports  normal_fluxes = [qn, qx, qy]  qn = -(k grad T).n_out, (qx, qy) = -(sigma_tot.n_out)
-The traction uses the heat flux's sign rule (minus the flux through n_out): the two sides' exports
-cancel and the Neumann partner applies them UNCHANGED. The task's OUTWARD traction is MINUS (qx, qy).
-TWO 4C RUNS PER ITERATION (your hole, both under a second): run T, a 2-D Scalar_Transport deck with
-CALCFLUX_BOUNDARY "diffusive" (4C's consistent boundary flux); run U, a Thermo_Structure_Interaction
-deck on a ONE-ELEMENT-THICK SOLIDSCATRA HEX8 slab with u_z pinned (exact plane strain), tsi_oneway,
-COUPVARIABLE Temperature, MAT_Struct_ThermoStVenantK (alpha = beta/(3 lambda + 2 mu), INITTEMP 0),
-`TAG: monitor_reaction` on the interface point conditions: 4C writes <out>-<id>_monitor_dbc.yaml per
-condition (node gid ZERO-based, force f) and (f_layer0 + f_layer1)/(h*t_z) IS the exported traction
-(measured order 2.0). SERVED: the handshake, the finish diagnosis, the recovery, self-checks and
-the exports. YOURS: the mesh (the 2-D layout and the slab), both decks and both runs.
+The traction follows the heat flux's sign rule (minus the flux through n_out): the two sides' exports
+cancel and the Neumann partner applies them UNCHANGED; the task's OUTWARD traction is MINUS (qx, qy).
+TWO 4C RUNS PER ITERATION (your hole): run T, a 2-D Scalar_Transport deck with CALCFLUX_BOUNDARY
+"diffusive"; run U, a Thermo_Structure_Interaction deck on a ONE-ELEMENT-THICK SOLIDSCATRA HEX8 slab
+with u_z pinned in EVERY Dirichlet entry (plane strain), tsi_oneway, COUPVARIABLE Temperature,
+MAT_Struct_ThermoStVenantK (alpha = beta/(3 lambda + 2 mu), INITTEMP 0), `TAG: monitor_reaction` on the
+interface point conditions: (f_layer0 + f_layer1)/(h*t_z) of the monitored reactions IS the exported
+traction (measured order 2.0). SERVED: handshake, finish diagnosis, recovery, self-checks, exports.
+YOURS: the mesh (2-D layout and slab), both decks, both runs.
 config.json: {"level","nx","ny","x0","x1","y0","y1","k","lam","mu","beta","iface":"left|right|
 bottom|top","source_T","source_ux","source_uy" (4C expressions: '^', lowercase pi),"fourc_bin","fourc_ld"}
 """
@@ -25,10 +24,10 @@ from pathlib import Path
 
 import numpy as np
 
-CFG = json.loads(Path("config.json").read_text())
-# A multi-level coupling call hands this level's keys in the environment
-# (OPENPASO_CONFIG_JSON, a JSON object) instead of writing this file.
-CFG.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+try:
+    CFG = {**json.loads(Path("config.json").read_text()), **json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}")}
+except (ValueError, TypeError) as _e:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON could not be read: {_e}")
 NX, NY = int(CFG["nx"]), int(CFG["ny"])
 X0, X1, Y0, Y1 = (float(CFG["x0"]), float(CFG["x1"]),
                   float(CFG["y0"]), float(CFG["y1"]))
@@ -37,24 +36,25 @@ LAM, MU, BETA = float(CFG["lam"]), float(CFG["mu"]), float(CFG["beta"])
 IF = CFG.get("iface", "right")
 SIDE = CFG.get("side", "dirichlet")
 if SIDE != "dirichlet":
-    raise SystemExit("this contract is the DIRICHLET role of a thermo-elastic "
-                     "exchange (T, ux, uy in; qn, qx, qy out). 4C on the NEUMANN "
-                     "side of a thermo-elastic exchange is not served: give that "
-                     "role to the partner code, or apply the imported [qn, qx, qy] "
-                     "yourself as POINT NEUMANN loads on both slab layers.")
+    raise SystemExit("this contract is the DIRICHLET role (T, ux, uy in; qn, qx, qy out); 4C on the "
+                     "NEUMANN side is not served: give that role to the partner code.")
 # 4C's material takes E, nu and the linear expansion coefficient; the task
 # gives Lame parameters and beta. These are the exact conversions.
 E_MOD = MU * (3.0 * LAM + 2.0 * MU) / (LAM + MU)
 NU = LAM / (2.0 * (LAM + MU))
 ALPHA = BETA / (3.0 * LAM + 2.0 * MU)
-# SOURCES AS 4C EXPRESSION STRINGS (not Python functions): '^' for powers,
-# lowercase 'pi', 'x', 'y'. "0.0" means none. They reach the solve only through
-# FUNCT blocks in YOUR decks; a Python src() that never reaches a deck does
-# nothing (the classic 4C trap).
+# SOURCES AS 4C EXPRESSION STRINGS ('^', lowercase pi, x, y; "0.0" = none): they reach the solve only
+# through FUNCT blocks in YOUR decks, never through a Python function.
 SRC_T = str(CFG.get("source_T", "0.0")).replace("**", "^")
 SRC_UX = str(CFG.get("source_ux", "0.0")).replace("**", "^")
 SRC_UY = str(CFG.get("source_uy", "0.0")).replace("**", "^")
 
+# stale reaction files of an earlier run would be SUMMED into this run's tractions (measured)
+for _old in glob.glob("*_monitor_dbc.yaml"):
+    try:
+        os.remove(_old)
+    except OSError:
+        pass
 # ---- the partner's interface samples, mapped onto THIS side (handshake) ----
 imp = {}
 if Path("imports.json").is_file():
@@ -97,8 +97,7 @@ def why_4c_did_not_finish(tag=""):
                 continue
             _hit = False
             for _i, _ln in enumerate(_lines):
-                # 4C's own stop: the PROC 0 ERROR block, or the YAML reader's `ERROR:` line with the offending row and
-                # its line:column (measured: an unquoted element row); the message ends where the stack frames begin
+                # 4C's own stop: the PROC 0 ERROR block, or the YAML reader's `ERROR:` line; ends where the stack frames begin
                 if "PROC 0 ERROR" in _ln or _ln.startswith("ERROR:"):
                     _said = [_ln.strip()] if _ln.startswith("ERROR:") else []
                     for l in _lines[_i + 1:_i + 16]:
@@ -111,13 +110,13 @@ def why_4c_did_not_finish(tag=""):
                     _why.append(f"4C said ({_lg}): " + " | ".join(_said[:8]))
                     _hit = True
                     break
-            if not _hit:   # a crash without an error message (measured: a zero-area flux boundary -> floating point exception)
+            if not _hit:   # a crash without an error message (measured: a zero-area flux boundary)
                 for _i, _ln in enumerate(_lines):
                     if "*** Process received signal ***" in _ln:
                         _sig = next((l.split("Signal:", 1)[1].strip() for l in _lines[_i:_i + 4] if "Signal:" in l), "a signal")
                         _bef = [l.strip() for l in _lines[max(0, _i - 12):_i] if l.strip() and not set(l.strip()) <= set("+-|=")]
                         _why.append(f"4C died on {_sig} ({_lg}) with no error message; the last thing it printed: " + " | ".join(_bef[-2:])
-                                    + " -- a flux table dividing by a ZERO boundary area means the flux-calc DLINE shares no edge with any element (its node ids do not match the element numbering)")
+                                    + " -- a flux table dividing by a ZERO boundary area means the flux-calc DLINE shares no edge with any element")
                         break
         for _deck in sorted(glob.glob("*.4C.yaml")) or sorted(glob.glob("*.yaml")):
             _txt = open(_deck, errors="ignore").read()
@@ -125,8 +124,7 @@ def why_4c_did_not_finish(tag=""):
             _dup = sorted({x for x in _secs if _secs.count(x) > 1})
             if _dup:
                 _why.append(f"{_deck}: section(s) written twice: " + ", ".join(_dup))
-            # section names, materials and their parameters are judged by the binary's own grammar in
-            # check_input(solver='fourc', input_path=<deck>); run it before the binary -- this check stays short
+            # section names and materials are judged by the binary's own grammar in check_input(solver='fourc', input_path=<deck>)
             if "Thermo_Structure_Interaction" in _txt:
                 if "CLONING MATERIAL MAP" not in _txt:
                     _why.append(f"{_deck}: TSI needs a CLONING MATERIAL MAP pairing the structure material with the MAT_Fourier thermal material")
@@ -150,7 +148,7 @@ def why_4c_did_not_finish(tag=""):
                 if "THERMAL DYNAMIC:" in _txt and "SCALAR TRANSPORT DYNAMIC:" not in _txt:
                     _why.append(f"{_deck}: Scalar_Transport needs `SCALAR TRANSPORT DYNAMIC`, not `THERMAL DYNAMIC`")
                 if "CALCFLUX_BOUNDARY" not in _txt or "FLUX CALC" not in _txt:
-                    _why.append(f"{_deck}: needs CALCFLUX_BOUNDARY \"diffusive\" AND a `SCATRA FLUX CALC LINE CONDITIONS` entry (E 2) for the flux recovery")
+                    _why.append(f"{_deck}: needs CALCFLUX_BOUNDARY \"diffusive\" AND a `SCATRA FLUX CALC LINE CONDITIONS` entry on the interface DLINE")
                 if re.search(r"^IO:\s*$", _txt, re.M):
                     _why.append(f"{_deck}: an `IO:` section in a Scalar_Transport deck is rejected; the VTU appears without it")
             _badkw = sorted({w for w in re.findall(r'"NODE\s+\d+\s+(D[A-Z]+)\s+\d+"', _txt) if w not in ("DNODE", "DLINE", "DSURFACE", "DVOL")})
@@ -187,12 +185,14 @@ atexit.register(_diagnose_at_exit)
 #    nodes yourself: partner_values(coord) returns the partner's (T, ux, uy) at one
 #    interface coordinate, and the two interface ENDPOINTS are outer nodes that keep the
 #    outer datum. Write deck T (Scalar_Transport, 2-D, with 4C's consistent boundary flux
-#    on the interface line) and deck U (the TSI slab, with the partner's T and (ux, uy)
-#    as point conditions on both layers and the reactions of those conditions monitored)
-#    for the problem you were given: the grammar is `4C -p`,
-#    prepare_simulation(solver='fourc', physics=...) and knowledge(solver='fourc').
-#    Before a run, check_input(solver='fourc', input_path=<deck>) names every defect the grammar
-#    can see in one call (4C stops at the first). Run each deck line-buffered with its console in a log
+#    on the interface line; its Dirichlet data go in DESIGN LINE / POINT DIRICH CONDITIONS --
+#    the scalar field never reads THERMO DIRICH) and deck U (the TSI slab: the partner's T and (ux, uy) as
+#    POINT conditions on both layers with their reactions monitored, and u_z pinned in EVERY Dirichlet
+#    entry -- ONOFF [1, 1, 1] with VAL [ux, uy, 0] on the interface points, [0, 0, 0] on the outer nodes:
+#    4C applies VOL, SURF, LINE, POINT in that order and an entry's ONOFF 0 FREES that dof on its nodes)
+#    for the problem you were given: the grammar is `4C -p`, prepare_simulation(solver='fourc',
+#    physics=...) and knowledge(solver='fourc'). Before a run, check_input(solver='fourc',
+#    input_path=<deck>) names every defect in one call. Run each deck line-buffered with its console in a log
 #    (stdbuf -oL -eL <bin> <deck> <prefix> > <deck>.log 2>&1); on a non-zero exit FALL
 #    THROUGH, the served check reads the log. LEAVE BEHIND exactly these names:
 #      nodes     the list of (x, y) of the 2-D layout; deck node id on the z = 0 layer = index + 1
@@ -208,10 +208,8 @@ raise SystemExit("the mesh-decks-and-runs hole above the recovery is not filled"
 # ── RECOVERY FROM 4C's OWN OUTPUTS (served): boundary flux VTU, displacement VTU, reaction yaml ──
 import meshio  # noqa: E402
 
-# ── 4C's OWN CONSOLE, ECHOED (served): the coupling tool captures THIS script's stdout as the
-#    level's run log, and a run log is credited to 4C only by 4C's own lines (its step and
-#    time-integration output), never by the NDOF line alone. Measured: a cell whose run logs held
-#    only the driver header and the NDOF line carried no evidence that this code ran at all.
+# ── 4C's OWN CONSOLE, ECHOED (served): this script's stdout becomes the level's run log, and a run
+#    log is credited to 4C only by 4C's own lines, never by the NDOF line alone.
 for _lg in sorted(glob.glob("*.log")):
     if _lg.startswith("participant_output") or "level" in _lg:      # the coupling tool's own captures, never re-echoed
         continue
@@ -225,9 +223,8 @@ for _lg in sorted(glob.glob("*.log")):
         print(f"── 4C console {_lg} ──")
         print(_txt if len(_txt) < 60000 else _txt[-60000:])
 
-# ── YOUR DECKS, CHECKED BEFORE ANYTHING IS READ (served): 4C drops a condition whose E id no
-#    topology section defines and RUNS THE WRONG PROBLEM to 'finished normally' (measured on a
-#    worker deck: every boundary condition and the source gone, rc 0). A run like that is refused here.
+# ── YOUR DECKS, CHECKED BEFORE ANYTHING IS READ (served): 4C drops a condition whose E id no topology
+#    section defines and RUNS THE WRONG PROBLEM to 'finished normally' (measured). Refused here.
 for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yaml")) if "monitor_dbc" not in p]:
     _txt = Path(_dk).read_text(errors="ignore")
     _topo = set(re.findall(r"\b(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)", _txt))
@@ -243,8 +240,16 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
                          f"({'; '.join(_lost[:6])}): 4C dropped them silently, so the run solved a different "
                          f"problem. E is the DESIGN-ENTITY id (the number after DNODE/DLINE/DSURFACE/DVOL in a topology "
                          f"line), never a node number: a node joins entity E through `NODE <n> DNODE <E>`. Add the "
-                         f"DNODE/DLINE/DSURF/DVOL-NODE TOPOLOGY entries for those ids (measured: a worker wrote its "
-                         f"interface NODE numbers as E ids and every interface condition was dropped).")
+                         f"DNODE/DLINE/DSURF/DVOL-NODE TOPOLOGY entries for those ids.")
+    # THERMO DIRICH in a Scalar_Transport deck is ignored: no Dirichlet condition, a singular solve, a uniform ~1e13
+    # field with rc 0 (measured; the same deck with DIRICH headers gave the expected field)
+    if ("SCALAR TRANSPORT DYNAMIC" in _txt
+            and re.search(r"^DESIGN (POINT|LINE|SURF|VOL) THERMO DIRICH CONDITIONS:", _txt, re.M)
+            and not re.search(r"^DESIGN (POINT|LINE|SURF|VOL) DIRICH CONDITIONS:", _txt, re.M)):
+        raise SystemExit(f"DECK CHECK: {_dk} is a Scalar_Transport deck whose Dirichlet data sit only in THERMO DIRICH "
+                         f"families, which the scalar field never reads: NO Dirichlet condition, a singular solve, a uniform "
+                         f"~1e13 field with rc 0. Put deck T's outer datum and interface values in DESIGN LINE / POINT DIRICH "
+                         f"CONDITIONS (NUMDOF 1); THERMO DIRICH belongs to deck U.")
     # twisted or clockwise 2-D elements (zero/negative area from the deck's own coordinates) solve nothing
     _cxy = {int(n): (float(x), float(y)) for n, x, y in re.findall(r'"NODE\s+(\d+)\s+COORD\s+(\S+)\s+(\S+)\s+\S+"', _txt)}
     _twist = []
@@ -258,8 +263,7 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
         raise SystemExit(f"DECK CHECK: {_dk} has {len(_twist)} element(s) with zero or negative area (first: element {_twist[0][0]} "
                          f"nodes {' '.join(map(str, _twist[0][1]))}). Every element's nodes must run counter-clockwise: for node "
                          f"id = i + 1 + (NX + 1) * j the quad of cell (i, j) is (id, id + 1, id + NX + 2, id + NX + 1).")
-    # table rows that are not quoted strings: the YAML reader stops with 'could not find ':' colon after key'
-    # at the first bare token (measured, te4c13 repair loop: `- 2 TRANSP QUAD4 2 3 12 11 MAT 1 TYPE Std`)
+    # table rows that are not quoted strings: the YAML reader stops at the first bare token (measured)
     _unq = [(_b.split(":", 1)[0].strip(), _r.strip()) for _b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", _txt, flags=re.M)
             if (_b.split(":", 1)[0].strip().endswith((" ELEMENTS", "-NODE TOPOLOGY")) or _b.split(":", 1)[0].strip() == "NODE COORDS")
             for _r in re.findall(r"^\s*-\s+([^\"'\n][^\n]*)$", _b, re.M) if re.match(r"(\d+\s+\w|NODE\s+\d+)", _r)]
@@ -267,8 +271,7 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
         raise SystemExit(f"DECK CHECK: {_dk} has {len(_unq)} table row(s) that are not quoted YAML strings (first, in {_unq[0][0]}: "
                          f"`- {_unq[0][1][:60]}`): every NODE COORDS, element and topology row is ONE quoted string, `- \"...\"`. "
                          f"4C's reader stops at the first bare token with 'could not find ':' colon after key'.")
-    # Dirichlet on EVERY node of a field leaves nothing to solve: 4C prints 'res-norm 0' and the field is the prescribed
-    # data (measured: an 'outer' surface of 90 of 108 slab nodes plus 18 interface points pinned both fields)
+    # Dirichlet on EVERY node of a field leaves nothing to solve: the field is the prescribed data (measured)
     _nodes = {int(a) for a in re.findall(r'"NODE\s+(\d+)\s+COORD\b', _txt)}
     _tp = {}
     for _n, _k, _e in re.findall(r'"NODE\s+(\d+)\s+(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)"', _txt):
@@ -279,7 +282,7 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
         _kw = re.search(r"\b(POINT|LINE|SURF|VOL)\b", _head) if ("DIRICH" in _head and _head.endswith("CONDITIONS")) else None
         if not _kw:
             continue
-        _fam = "temperature" if ("THERMO" in _head or "TRANSPORT" in _head) else "displacement"
+        _fam = "temperature" if ("THERMO" in _head or "TRANSPORT" in _head or "Scalar_Transport" in _txt) else "displacement"
         for _en in re.split(r"^\s*-\s", _b, flags=re.M)[1:]:
             _e = re.search(r"\bE:\s*(\d+)", _en); _on = re.search(r"ONOFF:\s*\[([^\]]*)\]", _en)
             _fl = [x.strip() for x in _on.group(1).split(",")] if _on else ["1"]
@@ -298,9 +301,8 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
     if _dup:
         raise SystemExit(f"DECK CHECK: {_dk} defines section(s) {', '.join(_dup)} more than once; 4C stops with "
                          f"'Section ... is defined more than once'. Merge each into ONE section with all its entries.")
-    # the slab's HEX8 node order: bottom quad counter-clockwise, then the SAME four nodes on the top layer. Any other
-    # order parses and stops later in the element with 'ZERO OR NEGATIVE JACOBIAN DETERMINANT' naming no node
-    # (measured, te4c13: layer-interleaved numbering)
+    # HEX8 node order: bottom quad counter-clockwise, then the SAME four nodes on the top layer; any other order
+    # stops in the element with 'ZERO OR NEGATIVE JACOBIAN DETERMINANT' naming no node (measured)
     _cxyz = {int(n): (float(x), float(y), float(z)) for n, x, y, z in re.findall(r'"NODE\s+(\d+)\s+COORD\s+(\S+)\s+(\S+)\s+(\S+)"', _txt)}
     if len({round(c[2], 9) for c in _cxyz.values()}) == 2:
         for _e, _ids in re.findall(r'"\s*(\d+)\s+\w+\s+HEX8\s+((?:\d+\s+){8})', _txt):
@@ -369,14 +371,36 @@ vtu_U = _latest(f"{OUT_U}-vtk-files/structure-*.vtu")
 vtu_UT = _latest(f"{OUT_U}-vtk-files/thermo-*.vtu")
 if vtu_U is None or vtu_UT is None:
     raise SystemExit(why_4c_did_not_finish("run U"))
-U2d = _nodal(meshio.read(vtu_U), "displacement", 2, zlayer=0.0)
+_mU = meshio.read(vtu_U)
+U2d = _nodal(_mU, "displacement", 2, zlayer=0.0)
+# PLANE STRAIN IS u_z = 0 ON EVERY NODE, AND 4C'S OWN VTU SAYS WHETHER IT HELD (measured: POINT DIRICH entries with
+# ONOFF [1, 1, 0] freed u_z on the interface nodes, and the tractions came out first order)
+_uall = np.asarray(_mU.point_data["displacement"], float)
+if _uall.ndim == 2 and _uall.shape[1] >= 3:
+    _uin = max(float(np.max(np.abs(_uall[:, :2]))), 1e-300)
+    _off = np.abs(_uall[:, 2]) > 1e-6 * _uin
+    if _off.any():
+        _where = sorted({(round(float(p[0]), 4), round(float(p[1]), 4)) for p in np.asarray(_mU.points)[_off]})
+        raise SystemExit(f"EXPORT SELF-CHECK: the slab LEFT PLANE STRAIN: |u_z| reaches {float(np.max(np.abs(_uall[:, 2]))):.3e} "
+                         f"against an in-plane {_uin:.3e} at {len(_where)} node position(s) (first: {_where[:3]}). A Dirichlet "
+                         f"entry released u_z there: 4C applies VOL, SURF, LINE, POINT in that order and an entry's ONOFF 0 RESETS "
+                         f"the toggle on its nodes. Pin z in EVERY DIRICH entry: ONOFF [1, 1, 1], VAL [ux, uy, 0] on the interface "
+                         f"points, [0, 0, 0] on the outer nodes. Nothing was exported from this run.")
+
 Ttsi = _nodal(meshio.read(vtu_UT), "temperature", 1, zlayer=0.0)[:, 0]
+# a uniform temperature of astronomical size is an unconstrained solve: no Dirichlet condition reached the scalar field
+_Tmax = float(np.max(np.abs(T2d)))
+if _Tmax > 1e6 and float(np.ptp(T2d)) < 1e-6 * _Tmax:
+    raise SystemExit(f"the scatra deck's temperature is a uniform {_Tmax:.2e}: an UNCONSTRAINED solve, not a field -- no "
+                     f"Dirichlet condition reached the scalar field (DIRICH, never THERMO DIRICH, on E ids the topology "
+                     f"defines). Nothing is exported from this run.")
 # the two runs solve the same heat problem up to the load rule (O(h^2)); a larger gap is a deck defect
 _dT = float(np.max(np.abs(Ttsi - T2d)) / max(float(np.max(np.abs(T2d))), 1e-300))
 if _dT > 0.05:
     raise SystemExit(f"the TSI deck's temperature differs from the scatra deck's by {_dT:.3f} relative: "
-                     f"the two decks do not solve the same heat problem (check FUNCT3 = the heat source, "
-                     f"the POINT THERMO DIRICH values and the outer SURF THERMO DIRICH of run U)")
+                     f"the two decks do not solve the same heat problem. Check BOTH decks: deck T's Dirichlet data in "
+                     f"DESIGN LINE / POINT DIRICH CONDITIONS (never THERMO DIRICH) and its FUNCT the heat source; deck U's "
+                     f"POINT and SURF THERMO DIRICH carrying the same data.")
 
 # REACTIONS -> TRACTION: one yaml per monitored condition (node gid ZERO-based, force f)
 _gid_xy = {}
@@ -444,20 +468,18 @@ if _chk_qin.size == _chk.size and _chk.size and np.array_equal(_chk.ravel(), -_c
     raise SystemExit("EXPORT SELF-CHECK: the exported fluxes are the partner's array negated, bit for "
                      "bit: a copy, not a recovery from this side's own runs")
 if np.abs(_chk[:, 1:]).max() == 0.0 and np.abs(U2d).max() > 0:
-    raise SystemExit("EXPORT SELF-CHECK: a zero traction against a nonzero displacement field: the "
-                     "reaction files carried nothing -- check TAG: monitor_reaction on the interface "
-                     "POINT DIRICH entries of BOTH layers")
-# exports.json LAST (the driver takes its existence as proof of success): the
-# Dirichlet side imposed the trace, it does not own one -> values = [].
+    raise SystemExit("EXPORT SELF-CHECK: a zero traction against a nonzero displacement field: the reaction "
+                     "files carried nothing -- check TAG: monitor_reaction on the interface POINT DIRICH entries of BOTH layers")
+# a dead heat-flux channel is one dead exchange (measured: qn = 0 everywhere, the coupled T 13 % off)
+if np.abs(_chk[:, 0]).max() == 0.0 and float(np.ptp(T2d)) > 0:
+    raise SystemExit("EXPORT SELF-CHECK: qn is 0 at EVERY interface node while T varies: the SCATRA FLUX CALC LINE entry's "
+                     "E id is not the interface DLINE (or that DLINE lists other nodes); nothing was exported")
+# exports.json LAST (its existence is the driver's proof of success); the Dirichlet side owns no trace -> values = []
 json.dump({"field_name": "thermoelastic", "coordinates": co, "values": [],
            "normal_fluxes": Q, "n_points": len(co)}, open("exports.json", "w"))
-# PER-LEVEL PERSISTENCE: this level's field, named by the config level, never
-# overwritten by the next level. Build the task's per-level files from these.
-# Interpolate THESE onto the probe points your task names. A file the next
-# level overwrites cannot carry a mesh study.
-# A DUMP DEFECT MUST NOT COST YOU THE RUN. exports.json is already written
-# above, so the coupling is safe either way, but a raise here would still
-# end this participant non-zero and leave a truncated file behind.
+# PER-LEVEL PERSISTENCE: this level's field, named by the config level and never overwritten by the
+# next level; interpolate THESE onto the probe points your task names. A dump defect must not cost
+# the run: exports.json is already written above.
 _LVL = CFG.get("level", "X")
 try:
     with open(f"field_level{_LVL}.csv", "w") as _f:
@@ -474,15 +496,12 @@ except Exception as _dump_exc:
     print(f"[4C thermo-elastic per-level dump] level {_LVL} dump failed: "\
           f"{_dump_exc!r}. exports.json was already written, so the coupling\n"\
           f"continues, but this level has no field file to hand in.")
-    for _partial in (f"field_level{_LVL}.csv", f"interface_level{_LVL}.csv"):
+    for _partial in (f"field_level{_LVL}.csv", f"interface_level{_LVL}.csv"):   # both files or neither
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
-# THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its own (T, ux, uy
-# per node of the 2-D discretisation), then the descriptive line.
+# THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its own (T, ux, uy per node), then the descriptive line.
 print(f"\nNDOF = {3 * len(nodes)}")
 print(f"4C thermo-elastic Dirichlet participant: NDOF = {3 * len(nodes)}  "
       f"T=[{T2d.min():.6g},{T2d.max():.6g}] u=[{U2d.min():.6g},{U2d.max():.6g}]  "

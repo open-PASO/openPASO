@@ -43,6 +43,7 @@ deformed coordinates makes the exchange chase its own tail.
 """
 import dolfinx
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -70,14 +71,12 @@ from petsc4py import PETSc
 #    Replace ALL of them with your problem's geometry, material and BCs.
 PARTNER    = "solid"     # the structure participant's `name` in your couple(...) call
 LX         = 1.2         # channel length
-HY         = 0.25        # channel height (undeformed)
+HY         = 0.18        # channel height (undeformed)
 IFACE_SIDE = "top"       # which fluid boundary is the FSI interface: "top" | "bottom"
-NX, NY     = 30, 6       # fluid mesh
+NX, NY     = 46, 6       # fluid mesh; config.json's nx, ny set it per level (below)
 MU         = 0.8         # dynamic viscosity
 RHO_F      = 1.2         # fluid density
 U_MEAN     = 0.75        # mean inflow speed (parabolic profile)
-ALE_STIFF  = 1.0         # Jacobian stiffening exponent for the ALE lift
-                         # (0.0 = plain harmonic; see the form below)
 DT         = 0.0         # 0.0 -> STEADY. >0 -> ONE backward-Euler step from rest:
                          # the unsteady term rho_f/dt * (u - 0) enters, and the
                          # interface is a MOVING wall with u = d/dt rather than a
@@ -88,6 +87,22 @@ D_INIT     = 0.0         # iteration-1 fallback interface displacement (both com
 MOVE_MESH  = True        # SET False ONLY to suppress the structure->fluid direction
                          # (the one-way control). A real FSI run keeps this True.
 # ─────────────────────────────────────────────────────────────────────────
+
+
+# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..} next to this
+#    script, and the keys a multi-level couple call hands in OPENPASO_CONFIG_JSON (they win), set
+#    NX, NY and name the level; the per-level dumps below carry that level, so the coarse levels
+#    survive the fine ones. A config that cannot be read stops the run: a level run on the edit
+#    block's mesh would hand in the wrong level.
+LEVEL = 1
+try:
+    _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
+    _cfg.update(**json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+    LEVEL = int(_cfg.get("level", LEVEL))
+    NX, NY = int(_cfg.get("nx", NX)), int(_cfg.get("ny", NY))
+except (ValueError, TypeError, AttributeError) as _cfg_exc:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON: the level and the mesh keys nx, ny could "
+                     f"not be read ({_cfg_exc!r}); fix them, nothing was solved")
 
 IFACE_Y = HY if IFACE_SIDE == "top" else 0.0
 # outward normal of the FLUID on the interface, as a sign on e_y
@@ -157,6 +172,38 @@ def _signed_areas(msh) -> np.ndarray:
     v1 = px[cells[:, 2]] - px[cells[:, 0]]
     return v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+
+# ── HOLE NAMES IN WORDS ─ begin
+#   PETSc  the PETSc module of petsc4py
+#   W      the function space the flow is solved on, velocity and pressure
+#          together; its dof count is printed as NDOF
+#   dofc   the dof coordinates of the continuous P1 VECTOR space that tt and
+#          vv belong to (its tabulate_dof_coordinates(), first gdim columns),
+#          taken BEFORE the mesh moves: one row per mesh node, in that space's
+#          dof order. The served lines pick the interface rows out of it and
+#          index the projected traction, one row per node of that space, with
+#          them. Not W's: a mixed space cannot tabulate
+#   ds     ufl.Measure('ds', domain=msh, subdomain_data=<facet tags>), the
+#          interface facets tagged 4 and the inlet facets tagged 1
+#   fem    the dolfinx.fem module
+#   gdim   the geometric dimension, msh.geometry.dim
+#   msh    the dolfinx mesh, moved by the imported interface displacement
+#          before the flow is solved on it
+#   n      ufl.FacetNormal(msh), the fluid's outward unit normal
+#   nit    the Newton iteration count of the flow solve, an int
+#   ph     the solved pressure, a fem.Function (the solution's pressure
+#          sub-function) or a UFL expression of it: the served lines
+#          integrate it over ds(1) and write it at the mesh nodes
+#   sigma  the fluid's Cauchy stress of the solved flow, a gdim x gdim UFL
+#          expression; the served lines project -dot(sigma, n) over ds(4)
+#   tt     ufl.TrialFunction of that same P1 vector space
+#   uh     the solved velocity, a fem.Function (the solution's velocity
+#          sub-function) or a UFL expression of it, written at the mesh
+#          nodes by the per-level dump
+#   ufl    the ufl module
+#   vv     ufl.TestFunction of that same P1 vector space
+# ── HOLE NAMES IN WORDS ─ end
 
 
 def main():
@@ -235,6 +282,7 @@ def main():
         # rather than as a bare `ALE_STIFF *` factor because a bare factor is a
         # NO-OP EVERYWHERE and would have read as a stiffening that was never
         # applied.
+        ALE_STIFF = 1.0          # Jacobian stiffening exponent; 0.0 = plain harmonic
         a = ((1.0 / ufl.CellVolume(msh)) ** ALE_STIFF
              * ufl.inner(ufl.grad(u_), ufl.grad(v_)) * ufl.dx)
         L = ufl.inner(fem.Constant(msh, np.zeros(gdim)), v_) * ufl.dx
@@ -381,7 +429,7 @@ def main():
     fy = fem.assemble_scalar(fem.form(-ufl.dot(sigma, n)[1] * ds(4)))
 
     # THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its OWN, printed
-    # PER LEVEL. It is how a grader tells a refined mesh from the same mesh run
+    # PER LEVEL. It is how anyone checking the result tells a refined mesh from the same mesh run
     # three times. The LEADING NEWLINE is deliberate: a program that writes without
     # a trailing newline glues its text onto the front of the next line.
     try:
@@ -411,6 +459,112 @@ def main():
                          "channel flow exerts a load on its wall; a zero here "
                          "means the stress was never evaluated on the interface "
                          "facets. Fix the recovery; do not couple on")
+
+    # ── STRESS AND MOMENTUM SELF-CHECK ─ keep this block. Both compare the flow with the stress of an
+    #    incompressible Newtonian fluid of the edit block's MU, -p I + MU (grad u + grad u^T), which is
+    #    -p I + 2 MU sym(grad u). Measured over three agent-written fluid sides of coupled runs: each
+    #    carried half of its viscous part -- MU sym(grad u) as sigma, or MU sym(grad u):sym(grad v)
+    #    in the momentum form -- and the two that solved exported half the traction their own flow
+    #    gives with the full term (x2.00 and x1.99 when corrected); every check of the coupling
+    #    passed them. (1) sigma.n on the interface against that traction: the
+    #    same expression gives the same numbers, so a gap there is sigma's own. (2) the net force of
+    #    that stress over the whole boundary, less the momentum the flow carries out (and the step's
+    #    inertia when DT > 0): measured on the served flow at four meshes, with a moved interface, a
+    #    time step and a hundred times smaller MU, a solved flow left at most 0.7 % of the forces;
+    #    a momentum form with half the viscous term left 24-34 %, and a solve that returned after 0
+    #    Newton iterations 62-99 %.
+    _sv = MU * (ufl.grad(uh) + ufl.grad(uh).T)
+    _sn = -ph * ufl.Identity(gdim) + _sv
+    _said = []
+    try:                                   # MU as the edit block writes it, or a fem.Constant of it
+        _mu = f"{float(np.asarray(getattr(MU, 'value', MU), dtype=float).reshape(-1)[0]):g}"
+    except (TypeError, ValueError, IndexError):
+        _mu = str(MU)
+    _tv = ufl.dot(_sv, n)
+    _ts = ufl.dot(sigma + ph * ufl.Identity(gdim), n)
+    _vv = float(fem.assemble_scalar(fem.form(ufl.inner(_tv, _tv) * ds(4))))
+    if _vv > 0.0:
+        _gap = (float(fem.assemble_scalar(fem.form(ufl.inner(_ts - _tv, _ts - _tv) * ds(4)))) / _vv) ** 0.5
+        _scl = float(fem.assemble_scalar(fem.form(ufl.inner(_ts, _tv) * ds(4)))) / _vv
+        print(f"[fluid self-check] sigma.n beside the pressure: {_scl:.4g} x MU (grad u + grad u^T).n "
+              f"on the interface, gap {_gap:.2e}", flush=True)
+        if _gap > 0.05:
+            _said.append(
+                f"STRESS SELF-CHECK: on the interface, sigma.n beside the pressure is {_scl:.3g} times "
+                f"MU (grad u + grad u^T).n, with MU = {_mu} from the edit block, and differs from it by "
+                f"{_gap:.0%}. The stress of an incompressible Newtonian fluid is -p I + MU (grad u + "
+                f"grad u^T) = -p I + 2 MU sym(grad u): MU sym(grad u) is half of its viscous part. Use "
+                f"that stress in sigma and in the momentum form.")
+    _bal, _mag = [], []
+    for _i in range(gdim):
+        _flux = RHO_F * uh[_i] * ufl.dot(uh, n)
+        _f = float(fem.assemble_scalar(fem.form((ufl.dot(_sn, n)[_i] - _flux) * ufl.ds(domain=msh))))
+        _m = float(fem.assemble_scalar(fem.form((abs(ufl.dot(_sn, n)[_i]) + abs(_flux)) * ufl.ds(domain=msh))))
+        if DT > 0.0:
+            _f -= float(fem.assemble_scalar(fem.form((RHO_F / DT) * uh[_i] * ufl.dx(domain=msh))))
+            _m += float(fem.assemble_scalar(fem.form(abs((RHO_F / DT) * uh[_i]) * ufl.dx(domain=msh))))
+        _bal.append(_f)
+        _mag.append(_m)
+    _rel = [abs(_f) / _m if _m > 0.0 else 0.0 for _f, _m in zip(_bal, _mag)]
+    _c = int(np.argmax(_rel))
+    print(f"[fluid self-check] momentum balance of -p I + MU (grad u + grad u^T): "
+          + ", ".join(f"{'xyz'[_k]} {_r:.2e}" for _k, _r in enumerate(_rel)), flush=True)
+    if max(_rel) > 0.05:
+        _said.append(
+            f"MOMENTUM SELF-CHECK: the solved flow does not balance the stress -p I + MU (grad u + "
+            f"grad u^T) of the edit block's MU = {_mu}: over the whole boundary its net force in "
+            f"{'xyz'[_c]}, less the momentum the flow carries out"
+            + (" and the step's inertia" if DT > 0.0 else "")
+            + f", is {_rel[_c]:.0%} of the forces that make it up; a solved flow leaves its "
+            f"discretisation error. Measured on record, each left this: a momentum form whose viscous "
+            f"term was half of MU (grad u + grad u^T):grad(v) -- MU sym(grad u):sym(grad v), or "
+            f"MU sym(grad u):grad(v) -- and a flow solve that returned after 0 Newton iterations "
+            f"(reason -3) with w unchanged. Read the solve's converged reason "
+            f"(problem.solver.getConvergedReason() for a NonlinearProblem) and the viscous term of "
+            f"your form.")
+    if _said:
+        raise SystemExit(" ".join(_said) + " Nothing was exported; do not couple on")
+
+
+    # PER-LEVEL PERSISTENCE: this level's whole flow field, at the nodes of the moved mesh, and its
+    # interface data -- the reference coordinates, the displacement imposed there, the traction
+    # exported -- named by LEVEL and never overwritten by the next level (exports.json is).
+    # Interpolate THESE onto the points your task names. A DUMP DEFECT MUST NOT COST THE SOLVE:
+    # exports.json is written after them either way, and a failed dump keeps neither file.
+    _dumps = (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv")
+    try:
+        def _at_nodes(value, space):
+            _f = fem.Function(space)
+            if isinstance(value, fem.Function):
+                _f.interpolate(value)
+            else:                                   # a UFL expression of the solution
+                _ip = space.element.interpolation_points
+                _f.interpolate(fem.Expression(value, _ip() if callable(_ip) else _ip))
+            return _f.x.array.reshape(-1, space.dofmap.index_map_bs)
+        _Vn = tt.ufl_function_space()               # the P1 vector space of the projection
+        _Pn = fem.functionspace(msh, ("Lagrange", 1))
+        _xv = _Vn.tabulate_dof_coordinates()[:, :gdim]
+        _xp = _Pn.tabulate_dof_coordinates()[:, :gdim]
+        _iv = np.lexsort((np.round(_xv[:, 1], 12), np.round(_xv[:, 0], 12)))
+        _ip = np.lexsort((np.round(_xp[:, 1], 12), np.round(_xp[:, 0], 12)))
+        _vel, _pre = _at_nodes(uh, _Vn)[_iv], _at_nodes(ph, _Pn)[_ip, 0]
+        with open(_dumps[0], "w") as _f:
+            _f.write("x,y,vx,vy,p\n")
+            for (_px, _py), (_vx, _vy), _pp in zip(_xv[_iv], _vel, _pre):
+                _f.write(f"{_px:.11e},{_py:.11e},{_vx:.11e},{_vy:.11e},{_pp:.11e}\n")
+        with open(_dumps[1], "w") as _f:
+            _f.write("x,y,dx,dy,tx,ty\n")
+            for (_px, _py), (_dx, _dy), (_tx, _ty) in zip(ref_coords, d_iface, traction):
+                _f.write(f"{_px:.11e},{_py:.11e},{_dx:.11e},{_dy:.11e},{_tx:.11e},{_ty:.11e}\n")
+    except Exception as _dump_exc:
+        for _partial in _dumps:                     # both files or neither, whatever they hold
+            try:
+                Path(_partial).unlink(missing_ok=True)
+            except OSError:
+                pass
+        print(f"[fsi-fluid per-level dump] level {LEVEL} dump failed: {_dump_exc!r}. exports.json is "
+              f"still written, so the coupling continues, but this level has no field file to hand "
+              f"in. Fix the names the dump reads and run this level again.")
 
     out = {
         "field_name": "traction_on_structure",

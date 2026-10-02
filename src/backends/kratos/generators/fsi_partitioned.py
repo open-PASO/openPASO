@@ -6,8 +6,15 @@ partitioned coupling. This template uses one for exactly that, driving a
 Dirichlet-Neumann exchange between two real Kratos ConvectionDiffusion
 solves.
 
-VERIFIED BY EXECUTION on Kratos 10.3.0 against two things independent of the
-run. The converged interface temperature must equal the value derived from
+THE SERVED SCRIPT LEAVES EACH SIDE'S SETUP AND SOLVE TO THE AGENT (2026-09-25):
+openPASO serves no working solve, and a complete Dirichlet-Neumann pair of
+Kratos solves is exactly what a coupled problem asks its Kratos side to write.
+Served: the accelerator, the exchange, the flux recovery and the checks.
+tests/test_the_kratos_partitioned_contract_leaves_the_solve_out.py fills the
+gap with a validation fill (never served) and runs it.
+
+VERIFIED BY EXECUTION (with that fill) on Kratos 10.3.0 against two things
+independent of the run. The converged interface temperature must equal the value derived from
 the two conductivities, the two lengths and the two boundary temperatures --
 it does, to six figures, at conductivity ratios of 1, 10 and 100. And the
 accelerator must not move that fixed point, only reach it sooner -- at a
@@ -24,10 +31,13 @@ from string import Template
 _PARTITIONED = Template(r"""
 '''$title
 
-Partitioned Dirichlet-Neumann coupling of two REAL Kratos solves, with the
-fixed-point iteration driven by a KratosFSIApplication convergence
-accelerator. Both sides are ConvectionDiffusion solves; nothing here
-assembles a system by hand.
+Partitioned Dirichlet-Neumann coupling of two Kratos ConvectionDiffusion
+solves, with the fixed-point iteration driven by a KratosFSIApplication
+convergence accelerator.
+
+THIS IS A CONTRACT, NOT A PROGRAM: the accelerator loop, the exchange order,
+the flux recovery and the checks are served; each side's model part,
+material, boundary conditions and solve are yours, in the marked region.
 
 It checks itself against two things independent of the run: the converged
 interface temperature must equal the value derived from the two
@@ -48,81 +58,27 @@ L1, L2, H = $l1, $l2, $height
 K1, K2 = $k1, $k2
 T_LEFT, T_RIGHT = $t_left, $t_right
 
-def make_strip(model, name, x0, x1, k):
-    mp = model.CreateModelPart(name)
-    mp.ProcessInfo[KM.DOMAIN_SIZE] = 2
-    for v in (KM.TEMPERATURE, KM.REACTION_FLUX, KM.HEAT_FLUX,
-              KM.FACE_HEAT_FLUX, KM.CONDUCTIVITY, KM.SPECIFIC_HEAT, KM.DENSITY):
-        mp.AddNodalSolutionStepVariable(v)
-    xs = np.linspace(x0, x1, NX + 1); ys = np.linspace(0.0, H, NY + 1)
-    nid = lambda i, j: j * (NX + 1) + i + 1
-    for j in range(NY + 1):
-        for i in range(NX + 1):
-            mp.CreateNewNode(nid(i, j), float(xs[i]), float(ys[j]), 0.0)
-    # CONVECTION_DIFFUSION_SETTINGS tells LaplacianElement WHICH variables
-    # are the unknown, the conductivity and the source. Without it the
-    # element dereferences an unset pointer and the process SEGFAULTS -- no
-    # exception, no message, just exit 139.
-    st = KM.ConvectionDiffusionSettings()
-    st.SetUnknownVariable(KM.TEMPERATURE)
-    st.SetDiffusionVariable(KM.CONDUCTIVITY)
-    st.SetVolumeSourceVariable(KM.HEAT_FLUX)
-    st.SetSurfaceSourceVariable(KM.FACE_HEAT_FLUX)
-    st.SetDensityVariable(KM.DENSITY)
-    st.SetSpecificHeatVariable(KM.SPECIFIC_HEAT)
-    mp.ProcessInfo.SetValue(KM.CONVECTION_DIFFUSION_SETTINGS, st)
-    p = mp.CreateNewProperties(1)
-    p[KM.CONDUCTIVITY] = k; p[KM.DENSITY] = 1.0; p[KM.SPECIFIC_HEAT] = 1.0
-    eid = 1
-    for j in range(NY):
-        for i in range(NX):
-            a, b, c, d = nid(i,j), nid(i+1,j), nid(i+1,j+1), nid(i,j+1)
-            mp.CreateNewElement("LaplacianElement2D3N", eid, [a,b,c], p); eid += 1
-            mp.CreateNewElement("LaplacianElement2D3N", eid, [a,c,d], p); eid += 1
-    for n in mp.Nodes:
-        n.AddDof(KM.TEMPERATURE, KM.REACTION_FLUX)
-        n.SetSolutionStepValue(KM.CONDUCTIVITY, k)
-    return mp
-
-def solver_for(mp):
-    lin = plsf.ConstructSolver(KM.Parameters('{"solver_type": "skyline_lu_factorization"}'))
-    # THE FIRST FLAG IS CalculateReactionsFlag AND A PARTITIONED COUPLING
-    # DIES WITHOUT IT. With it False the solve is correct and REACTION_FLUX
-    # stays identically zero, so a Dirichlet-Neumann exchange transfers
-    # nothing, the residual is zero on the first pass, and the coupling
-    # reports CONVERGED IN ONE ITERATION to the wrong answer.
-    s = KM.ResidualBasedLinearStrategy(
-        mp, KM.ResidualBasedIncrementalUpdateStaticScheme(), lin,
-        True, False, False, False)
-    s.SetEchoLevel(0); return s
-
-model = KM.Model()
-left = make_strip(model, "left", 0.0, L1, K1)
-right = make_strip(model, "right", L1, L1 + L2, K2)
-# A NODAL FLUX IS NOT A LOAD. FACE_HEAT_FLUX set on nodes contributes
-# nothing unless FACE CONDITIONS integrate it over the boundary. Without
-# them the receiving side sees no source at all and stays at its initial
-# value, while every variable you set looks correctly assigned.
-iface_r_nodes = sorted((n for n in right.Nodes if abs(n.X - L1) < 1e-12),
-                       key=lambda n: n.Y)
-pr = right.GetProperties()[1]
-for ci, (a, b) in enumerate(zip(iface_r_nodes[:-1], iface_r_nodes[1:]), start=1):
-    right.CreateNewCondition("ThermalFace2D2N", 10000 + ci, [a.Id, b.Id], pr)
-
-sl, sr = solver_for(left), solver_for(right)
-for mp in (left, right):
-    mp.ProcessInfo[KM.DELTA_TIME] = 1.0; mp.CloneTimeStep(1.0)
-tol = 1e-12
-iface_l = [n for n in left.Nodes if abs(n.X - L1) < tol]
-iface_r = [n for n in right.Nodes if abs(n.X - L1) < tol]
-for n in left.Nodes:
-    if abs(n.X) < tol:
-        n.Fix(KM.TEMPERATURE); n.SetSolutionStepValue(KM.TEMPERATURE, T_LEFT)
-for n in right.Nodes:
-    if abs(n.X - (L1 + L2)) < tol:
-        n.Fix(KM.TEMPERATURE); n.SetSolutionStepValue(KM.TEMPERATURE, T_RIGHT)
-for n in iface_l:
-    n.Fix(KM.TEMPERATURE)
+# ── SIDE SETUP AND SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
+# Yours to write: the two sides as real Kratos ConvectionDiffusion solves. The loop below needs:
+#   left, right       ModelParts on x in [0, L1] and [L1, L1 + L2], conductivity K1 and K2,
+#                     NX x NY cells of height H, with TEMPERATURE and REACTION_FLUX as dof pair;
+#   sl, sr            one object per side whose .Solve() solves it (the loop calls them);
+#   iface_l, iface_r  the interface nodes (x == L1) of each side in the SAME order (by y), so
+#                     index i is the same point on both sides;
+#   and the boundary conditions: TEMPERATURE fixed to T_LEFT at x = 0 and to T_RIGHT at
+#   x = L1 + L2, and fixed on the left side's interface nodes (the Dirichlet side: the loop
+#   sets their values each iteration).
+# Measured facts the fill has to get right -- the first gives no message at all, the other two
+# a clean convergence to a wrong answer:
+#   * LaplacianElement2D3N reads CONVECTION_DIFFUSION_SETTINGS (unknown, diffusion, volume and
+#     surface source, density, specific heat); without it the process segfaults, exit 139.
+#   * the strategy must compute reactions (CalculateReactionsFlag): otherwise REACTION_FLUX
+#     stays zero, nothing crosses the interface and the coupling "converges" in one iteration.
+#   * FACE_HEAT_FLUX on nodes is a density that only FACE CONDITIONS integrate: the Neumann
+#     side needs ThermalFace2D2N conditions on its interface, or it sees no source at all.
+raise SystemExit("fill the marked region: each side's model part, material, boundary "
+                 "conditions and solver -- the comments above it say what the loop needs")
+# ── SIDE SETUP AND SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 def coupled(acc, label):
     for n in iface_l: n.SetSolutionStepValue(KM.TEMPERATURE, 0.0)
@@ -204,7 +160,8 @@ KNOWLEDGE = {
         "description": (
             "Partitioned Dirichlet-Neumann coupling driven by a "
             "KratosFSIApplication convergence accelerator (Aitken, MVQN, "
-            "IBQN-MVQN, constant relaxation)."
+            "IBQN-MVQN, constant relaxation). The served script is a "
+            "contract: each side's setup and solve are yours."
         ),
         "application": "FSIApplication",
         "pitfalls": [
@@ -216,9 +173,10 @@ KNOWLEDGE = {
             "0.5 converged cleanly to 0.177 instead. Divide by the node's "
             "tributary length -- h for an interior node, h/2 at each end -- "
             "and the same run lands on 0.500000. Nothing about the failure "
-            "looks like a failure. Signal: a coupling that converges cleanly to a "
-            "value you can also derive analytically, and misses it by a "
-            "factor of roughly the tributary length -- 0.177 where 0.5 was "
+            "looks like a failure. Signal: the interface TEMPERATURE "
+            "converges cleanly under the Aitken loop to a value you can "
+            "also derive analytically, and misses it by a factor of "
+            "roughly the tributary length -- 0.177 where 0.5 was "
             "derivable. Derive the interface value and compare; a clean "
             "convergence to the wrong number has no other symptom.",
 

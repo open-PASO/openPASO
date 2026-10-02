@@ -51,6 +51,7 @@ TOOL_GROUPS = {
         "coupled_solve": "A ready-made coupled setup for common pairs of physics.",
         "couple_precice": "Couples two solvers through the preCICE library instead of openPASO's own driver.",
         "transfer_field": "Moves a result from one solver's output into another solver's input.",
+        "write_participant_contract": "Writes the fill-in participant script for one solver of a coupled problem into your folder: everything around the solve, which you then write yourself.",
     },
     "Set up and develop": {
         "setup_backend": "Explains how to install a missing solver, with the route that works on this system.",

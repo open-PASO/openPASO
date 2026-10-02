@@ -77,7 +77,7 @@ def _fourc_diagnostic(stdout_text: str, stderr_text: str,
     parts = []
     # A SEGFAULT IS NOT A DIAGNOSTIC, SO NAME THE CAUSE THAT PRODUCES IT.
     #
-    # Measured on one development run that was lost entirely to this. 4C dies
+    # Measured on one recorded run that was lost entirely to this. 4C dies
     # with "Signal: Segmentation fault (11) / Address code: Address not mapped"
     # and prints no error, no line number and no mention of conditions. The
     # crash lands during "Read/generate conditions", so it reads as a problem
@@ -285,7 +285,7 @@ does not use the plain mechanical section, and a deck that names the wrong one
 is rejected rather than silently ignored.
 
 When a section is rejected, dump the grammar and grep for the words you expect
-rather than trying spellings. Trying spellings is how a 45-minute budget
+rather than trying spellings. Trying spellings is how an afternoon
 disappears.
 """
 
@@ -622,7 +622,7 @@ class FourcBackend(SolverBackend):
         # problem never calls knowledge(topic='coupling') -- it has no
         # coupling. So agents on single-code tasks received nothing about how
         # to write a runnable deck, which is the same defect that killed three
-        # development runs of one coupled problem.
+        # recorded runs of one coupled problem.
         #
         # One copy, in backends/fourc/deck_grammar.py, served from both paths.
         # The interface-probe text taught why that matters: it existed in four
@@ -1626,6 +1626,7 @@ class FourcBackend(SolverBackend):
         job = JobHandle(job_id=job_id, backend_name="fourc", work_dir=work_dir, status="running")
 
         start = time.time()
+        job.started_at = start
         try:
             env = os.environ.copy()
             # Ensure 4C dependencies are on the library path
@@ -1642,6 +1643,7 @@ class FourcBackend(SolverBackend):
                 cwd=str(work_dir),
                 env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a
@@ -1689,7 +1691,7 @@ class FourcBackend(SolverBackend):
                 # agent was handed "Invalid MIT-MAGIC-COOKIE-1 key ... MPI_ABORT
                 # was invoked on rank 0" and nothing else.
                 #
-                # THE COST, MEASURED: two development runs of one coupled
+                # THE COST, MEASURED: two recorded runs of one coupled
                 # problem concluded from exactly that string that the 4C BINARY
                 # was broken on this machine, wrote a could-not-finish report
                 # with zero deliverables, and stopped at 30 and 37 tool calls
@@ -1705,11 +1707,12 @@ class FourcBackend(SolverBackend):
                 stderr_text = stderr.decode(errors="replace")
                 job.error = _fourc_diagnostic(stdout_text, stderr_text)
             else:
-                # Skip post_vtu — 4C writes VTU directly via IO/RUNTIME VTK OUTPUT.
-                # post_vtu is only needed for legacy .control/.result files and
-                # has caused server hangs/bottlenecks. All our templates include
-                # the VTK output sections, so post_vtu is unnecessary.
-                pass
+                # 4C's runtime VTK writer covers STRUCTURE, FLUID and BEAMS only. A run that
+                # produced no runtime output (Thermo, Ale, Lubrication, ...) is converted to VTU
+                # here so its result can be opened at all; a run that has VTK is left alone.
+                # (The comment this replaces claimed every template requests runtime output;
+                # twelve served decks did not, measured 2026-09-24.)
+                await self._convert_native_output_to_vtu(work_dir, binary, since=start)
             (work_dir / "stdout.log").write_text(stdout.decode(errors="replace"))
             (work_dir / "stderr.log").write_text(stderr.decode(errors="replace"))
         except asyncio.TimeoutError:
@@ -1723,62 +1726,118 @@ class FourcBackend(SolverBackend):
 
         return job
 
-    async def _run_post_vtu(self, work_dir: Path):
-        """Launch post_vtu in the background (fire-and-forget).
+    async def _convert_native_output_to_vtu(self, work_dir: Path, binary=None,
+                                            since: float | None = None) -> None:
+        """Make a run that wrote only 4C-native output readable, by converting it to VTU.
 
-        Does NOT block the MCP server. VTU files from IO/RUNTIME VTK OUTPUT
-        are usually already written during the simulation — post_vtu is a
-        best-effort fallback for additional field conversion.
+        4C's runtime VTK writer exists for STRUCTURE, FLUID and BEAMS only. A Thermo, Ale,
+        Lubrication or ReducedAirways run -- and any deck that requests no runtime output --
+        leaves just <prefix>.control plus .result/.mesh binaries, which neither a model nor
+        openPASO's own result gate can open. Measured 2026-09-24: twelve served decks did exactly
+        that and every one read "output unreadable" to the coverage judge. This backend already
+        carried a converter step that never fired: it looked for a binary named post_vtu (this
+        build ships post_processor --filter=vtu), launched it fire-and-forget with its output on
+        /dev/null, and run() never called it, behind a comment saying every template requests
+        runtime output.
 
-        The process runs independently; if it finishes, VTU files appear.
-        If it hangs or fails, no harm done — the simulation result is already
-        returned to the agent.
+        Runs ONLY when no runtime VTK exists and a control file does; waits for the converter
+        (bounded); keeps its console in post_processor.log beside the results. A failed
+        conversion (the 1-D airways result type is one, measured) leaves the solve as it was:
+        the result simply stays unreadable and the log says why.
+
+        `since` is when this run started. A reused work directory can hold an earlier
+        run's VTU: counted, it made this run skip its conversion and hand back the
+        earlier run's fields as its own result (Copilot review of the org PR, verified
+        in the code). Only files written since the run started count.
         """
-        post_vtu = None
+        def _this_run(paths):
+            return [q for q in paths if since is None or q.stat().st_mtime >= since - 1.0]
+        # PER FIELD, NOT PER FOLDER. Measured 2026-09-28 on 4C 2026.3.0 (the interface
+        # session): a poro-fluid run writes a runtime VTK series "fluid-poro" by itself, while
+        # its structure, fluid and porofluid fields exist only as native results; the folder
+        # held a .vtu, so nothing was converted and three fields stayed unreadable. A field is
+        # covered when a VTU series of its own name exists (series = the file name without its
+        # trailing -NNNNN step and rank numbers); convert when any native field is not.
+        import re as _re
+        native = {m.group(1) for q in _this_run(work_dir.glob("*.result.*"))
+                  for m in [_re.search(r"\.result\.([A-Za-z0-9_]+)\.s\d+", q.name)] if m}
+        series = set()
+        for q in _this_run(list(work_dir.rglob("*.vtu")) + list(work_dir.rglob("*.pvtu"))
+                           + list(work_dir.rglob("*.pvd"))):
+            stem = _re.sub(r"(-\d+)+$", "", q.stem)
+            series.add(stem)
+            series.add(stem.split("-", 1)[1] if "-" in stem else stem)   # "<prefix>-<field>"
+        if series and native <= series:
+            return                                   # every native field has runtime output
+        controls = sorted(_this_run(work_dir.glob("*.control")))
+        if not controls:
+            return
+        candidates: list[Path] = []
+        if binary:
+            here = Path(str(binary)).parent
+            candidates += [here / "post_processor", here / "post_vtu"]
         if FOURC_ROOT:
-            for d in ["build", "build/release"]:
-                p = FOURC_ROOT / d / "post_vtu"
-                if p.is_file():
-                    post_vtu = p
-                    break
-        if not post_vtu:
-            post_vtu_path = shutil.which("post_vtu")
-            if post_vtu_path:
-                post_vtu = Path(post_vtu_path)
-
-        if not post_vtu:
+            for d in ("build", "build/release"):
+                candidates += [FOURC_ROOT / d / "post_processor", FOURC_ROOT / d / "post_vtu"]
+        for name in ("post_processor", "post_vtu"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(Path(found))
+        tool = next((c for c in candidates if c.is_file()), None)
+        log = work_dir / "post_processor.log"
+        if tool is None:
+            log.write_text("no post_processor (or post_vtu) beside the 4C binary, under FOURC_ROOT/build or on "
+                           "PATH: the native result files could not be converted to VTU\n")
+            logger.warning("4C run wrote only native output and no post_processor was found; result stays unreadable")
             return
-
-        control_files = list(work_dir.glob("*.control"))
-        if not control_files:
-            return
-
-        for ctrl in control_files:
-            prefix = str(ctrl).replace(".control", "")
+        env = os.environ.copy()
+        env.pop("DISPLAY", None)                      # the converter links VTK; a stray X display only adds noise
+        dep_lib = "/opt/4C-dependencies/lib"
+        ld = env.get("LD_LIBRARY_PATH", "")
+        if dep_lib not in ld:
+            env["LD_LIBRARY_PATH"] = f"{dep_lib}:{ld}" if ld else dep_lib
+        for ctrl in controls:
+            prefix = str(ctrl)[: -len(".control")]
+            args = [str(tool), f"--file={prefix}"]
+            if tool.name == "post_processor":
+                args += ["--filter=vtu", "--postprocessor_deprecation_warning_off"]
+            elif tool.read_bytes()[:2] == b"#!":
+                # this build's post_vtu is a script that adds --filter=vtu and passes the
+                # rest on to post_processor, which otherwise stops at "Press Enter to
+                # continue" (measured); an old compiled post_vtu does not know the flag
+                args += ["--postprocessor_deprecation_warning_off"]
             try:
-                env = os.environ.copy()
-                ld = env.get("LD_LIBRARY_PATH", "")
-                dep_lib = "/opt/4C-dependencies/lib"
-                if dep_lib not in ld:
-                    ld = f"{dep_lib}:{ld}" if ld else dep_lib
-                env["LD_LIBRARY_PATH"] = ld
-
-                # Fire-and-forget: launch post_vtu without waiting
                 proc = await asyncio.create_subprocess_exec(
-                    str(post_vtu), f"--file={prefix}",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    cwd=str(work_dir),
-                    env=env,
-                )
-                logger.info(f"post_vtu launched for {ctrl.name} (PID {proc.pid}, background)")
-            except Exception as e:
-                logger.warning(f"post_vtu launch failed for {ctrl.name}: {e}")
+                    *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                    cwd=str(work_dir), env=env, stdin=asyncio.subprocess.DEVNULL)
+                try:
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=30)   # reaped, not left behind
+                    except asyncio.TimeoutError:
+                        pass
+                    with log.open("a") as fh:
+                        fh.write(f"$ {' '.join(args)}\nTIMED OUT after 300 s\n")
+                    logger.warning(f"post_processor timed out on {ctrl.name}")
+                    continue
+                with log.open("a") as fh:
+                    fh.write(f"$ {' '.join(args)}\nexit {proc.returncode}\n{out.decode(errors='replace')}\n")
+                if proc.returncode != 0:
+                    logger.warning(f"post_processor exit {proc.returncode} on {ctrl.name}; see post_processor.log")
+            except Exception as e:  # noqa: BLE001
+                with log.open("a") as fh:
+                    fh.write(f"$ {' '.join(args)}\nFAILED TO LAUNCH: {e}\n")
+                logger.warning(f"post_processor launch failed on {ctrl.name}: {e}")
 
     def get_result_files(self, job: JobHandle) -> list[Path]:
         results = []
         for ext in ["*.vtu", "*.pvd", "*.pvtu"]:
             results.extend(job.work_dir.rglob(ext))
+        if job.started_at is not None:
+            # an earlier run's files in a reused work directory are not this run's result
+            results = [q for q in results if q.stat().st_mtime >= job.started_at - 1.0]
         return sorted_by_step(results)
 
 

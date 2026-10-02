@@ -349,7 +349,8 @@ class KratosBackend(SolverBackend):
                 name="fsi_partitioned",
                 description=("Partitioned Dirichlet-Neumann coupling driven "
                              "by a KratosFSIApplication convergence "
-                             "accelerator (FSIApplication)"),
+                             "accelerator (FSIApplication); a contract: "
+                             "each side's setup and solve are yours"),
                 spatial_dims=[2],
                 element_types=["LaplacianElement2D3N", "ThermalFace2D2N"],
                 template_variants=["2d"],
@@ -625,6 +626,7 @@ class KratosBackend(SolverBackend):
                 cwd=str(work_dir),
                 env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

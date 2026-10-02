@@ -34,21 +34,24 @@ class _FakeDDGS:
         return type(self).answers[i]
 
 
-def _use(monkeypatch, answers):
-    """Stand in for whichever search package is installed.
-
-    The tool imports duckduckgo_search and falls back to ddgs, so a test that
-    patches one of them by name passes or fails according to what happens to be
-    installed. Both names are provided here."""
+def _use(monkeypatch, answers, installed=("ddgs", "duckduckgo_search")):
+    """Stand in for the search package(s) named in `installed`; the other name is
+    made unimportable. The tool prefers ddgs (several engines, one call per
+    attempt) and falls back to duckduckgo_search (DuckDuckGo's three backends per
+    attempt), so what is installed decides the number of requests; a test that
+    left it to the machine passed or failed by accident."""
     import types
 
     _FakeDDGS.calls, _FakeDDGS.answers = 0, answers
     monkeypatch.setattr(agent, "_SEARCH_CACHE", {}, raising=False)
     monkeypatch.setattr(agent, "_SEARCH_BLOCKED", {}, raising=False)
     for name in ("duckduckgo_search", "ddgs"):
-        module = types.ModuleType(name)
-        module.DDGS = _FakeDDGS
-        monkeypatch.setitem(sys.modules, name, module)
+        if name in installed:
+            module = types.ModuleType(name)
+            module.DDGS = _FakeDDGS
+            monkeypatch.setitem(sys.modules, name, module)
+        else:
+            monkeypatch.setitem(sys.modules, name, None)      # import raises ImportError
     monkeypatch.setattr(agent.time, "sleep", lambda s: None)
 
 
@@ -57,13 +60,38 @@ def test_a_throttled_search_says_it_could_not_search(monkeypatch):
     out = agent.web_search.invoke({"query": "Schaefer Turek cylinder benchmark", "max_results": 3})
     assert "could not search" in out
     assert "NOT as 'the web has nothing on this'" in out
+    assert _FakeDDGS.calls == 3, "ddgs: one multi-engine request per attempt, three attempts"
+
+
+def test_the_older_client_tries_its_three_backends(monkeypatch):
+    _use(monkeypatch, [[]], installed=("duckduckgo_search",))
+    out = agent.web_search.invoke({"query": "Schaefer Turek cylinder benchmark", "max_results": 3})
+    assert "could not search" in out
     assert _FakeDDGS.calls == 9, "three backends, three attempts"
+
+
+def test_the_maintained_client_is_the_one_asked(monkeypatch):
+    """Measured 2026-09-28: duckduckgo_search 8.1.1 answered nothing, or unrelated
+    shop pages, for the queries of one run; ddgs answered them all. With both
+    installed, ddgs must be the one used."""
+    import types
+
+    class _Old(_FakeDDGS):
+        def text(self, query, max_results=5, backend="auto"):
+            raise AssertionError("the old client was asked while ddgs is installed")
+
+    _use(monkeypatch, [[{"title": "Benchmark", "href": "h", "body": "b"}]])
+    old = types.ModuleType("duckduckgo_search")
+    old.DDGS = _Old
+    monkeypatch.setitem(sys.modules, "duckduckgo_search", old)
+    out = agent.web_search.invoke({"query": "cylinder benchmark", "max_results": 3})
+    assert "Benchmark" in out
 
 
 def test_a_later_attempt_still_counts(monkeypatch):
     hit = [{"title": "Benchmark Computations of Laminar Flow Around a Cylinder",
             "href": "https://example.org/turek", "body": "Cd, Cl and Strouhal for Re=100."}]
-    _use(monkeypatch, [[], [], [], hit])          # blocked three times, then served
+    _use(monkeypatch, [[], [], [], hit], installed=("duckduckgo_search",))   # three empties, then served
     out = agent.web_search.invoke({"query": "cylinder benchmark", "max_results": 3})
     assert "Benchmark Computations" in out and "could not search" not in out
 

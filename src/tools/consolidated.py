@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from core.backend import detect_template_language, error_excerpt
 from core.registry import get_backend, available_backends, all_backends
-from core.fabrication_gate import inspect_result_artefacts
+from core.fabrication_gate import inspect_result_artefacts, result_content_findings
 from core.critic_gate import (CriticRegistry, CriticGateError,
                               setup_digest)
 from core.quality_checks import check_result_files_finite, check_summary_finite
@@ -77,6 +77,49 @@ _PATHLIKE = re.compile(
 )
 _LOCAL_IMPORT = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", re.M)
 _SYSPATH = re.compile(r"""sys\.path\.\w+\(\s*\d*\s*,?\s*["']([^"'\n]+)["']""")
+
+
+def _at_sentence(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters at the end of a sentence; a cut
+    with no sentence end in its second half ends at a word and says so."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    end = max(head.rfind(". "), head.rfind(".\n"))
+    if end >= limit // 2:
+        return head[:end + 1]
+    return head[:head.rfind(" ")] + " [...]" if " " in head else head
+
+
+def _cut_outside_commands(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters at a sentence or line end that lies outside every
+    bracket -- never inside a served command such as spawn_subagent(...) or couple_levels(...).
+    Measured: every level reply of a set of runs was cut at a flat 4000 characters, inside
+    the served spawn command, in the middle of the run's own path. The cut is marked."""
+    if len(text) <= limit:
+        return text
+    mark = " [cut here to fit this reply]"
+    room = max(0, limit - len(mark))
+    depth, best, first_open, ws = 0, -1, None, -1
+    for i, ch in enumerate(text[:room]):
+        if ch in "([{":
+            if depth == 0:
+                first_open = i
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            if depth == 0:
+                first_open = None
+        if depth == 0:
+            if ch == "\n" or (ch == "." and i + 1 < len(text) and text[i + 1] in " \n"):
+                best = i + 1
+            elif ch == " ":
+                ws = i
+    if best >= room // 4:
+        return text[:best].rstrip() + mark
+    cut = first_open if first_open is not None else ws
+    cut = text.rfind(" ", 0, cut) if cut and cut > 0 else ws
+    return (text[:cut].rstrip() if cut and cut > 0 else text[:room]) + mark
 
 
 def _referenced_file_digest(setup_text: str) -> str:
@@ -220,6 +263,17 @@ def _open_concerns(rec) -> str:
     return f"; the critic left {len(lines)} point(s) open: {shown}"
 
 
+def _earlier_rejections(rec, records) -> str:
+    """How many times a critic turned down earlier versions of the file this approval names."""
+    name = getattr(rec, "source_name", "")
+    if not name:
+        return ""
+    n = sum(1 for r in records if getattr(r, "rejected", False) and getattr(r, "source_name", "") == name
+            and r.digest != rec.digest and r.created <= rec.created)
+    return (f"; approved after {n} rejection{'s' if n != 1 else ''} of earlier versions of {name}"
+            if n else "")
+
+
 def _critic_state(solver: str, setup_text: str, *, token: str = "",
                   job_id: str = "") -> tuple[bool, str]:
     """Has an independent critic reviewed THIS setup, on this server's record?
@@ -246,21 +300,210 @@ def _critic_state(solver: str, setup_text: str, *, token: str = "",
     is a self-report, and replacing the self-report is the entire point.
     """
     digest = review_digest(solver, setup_text)
+    live = [r for r in _CRITIC_REGISTRY.records() if r.solver == solver and not r.expired()]
+    turned_down = [r for r in live if getattr(r, "rejected", False) and r.digest == digest]
+    if turned_down:
+        # THE SAME TEXT CANNOT BE BOTH REJECTED AND APPROVED. A later critic's approval of
+        # text an earlier critic turned down is not a second opinion that wins; it is the
+        # first opinion asked again. The text has to change (a fix, or the rebuttal written
+        # into it) and be reviewed as changed.
+        first = (turned_down[-1].findings.strip().splitlines() or [""])[0][:200]
+        return False, (f"a critic REJECTED this exact setup ({first}); it stays NOT VERIFIED "
+                       f"until the text changes and a critic approves the changed text")
+    approvals = [r for r in live if not getattr(r, "rejected", False)]
     if token:
         try:
             rec = _CRITIC_REGISTRY.consume(token, digest=digest, solver=solver,
                                            job_id=job_id)
             return True, ("reviewed (critic token redeemed; single use)"
-                          + _open_concerns(rec))
+                          + _open_concerns(rec) + _earlier_rejections(rec, live))
         except CriticGateError as exc:
             return False, f"critic review token refused: {exc}"
-    for rec in _CRITIC_REGISTRY.records():
-        if rec.solver == solver and rec.digest == digest and not rec.expired():
-            return True, "reviewed (submitted review matches this setup)" + _open_concerns(rec)
-    if any(r.solver == solver for r in _CRITIC_REGISTRY.records()):
+    for rec in approvals:
+        if rec.digest == digest:
+            return True, ("reviewed (submitted review matches this setup)" + _open_concerns(rec)
+                          + _earlier_rejections(rec, live))
+    near = approvals
+    if near:
+        # SAY WHICH PART CHANGED. "The input changed after it was reviewed" is
+        # true and unusable: the caller has a participant list, seven scalar
+        # arguments and the CONTENTS of every script in it, and is told that
+        # one of them moved. Measured 2026-09-19: ten of ten coupled runs were
+        # told exactly this and not one of them recovered the binding, because
+        # nothing in the reply -- or in the record afterwards -- said what to
+        # look at. The setup text is the caller's own arguments, so naming the
+        # keys that differ gives nothing away.
         return False, ("a critic review exists for this solver but NOT for this "
-                       "setup: the input changed after it was reviewed")
+                       "setup: the input changed after it was reviewed"
+                       + _setup_difference(near, setup_text))
     return False, "no critic review is on record for this setup"
+
+
+# A FILE NAME IS NOT A SETUP. Measured 2026-09-30 in the web interface: 14 of the 15 reviews
+# filed on one run passed the script's FILE NAME as `setup` ("cylinder_final.py"). Each was
+# accepted and bound to the digest of those few characters, which no run can match, so every
+# run came back "the input changed after it was reviewed": a review bound to nothing, and a
+# diagnosis that was not true. A name of a file in the run folder now stands for the file's
+# text, and a name with no such file is refused before anything is recorded.
+_A_FILE_NAME = re.compile(r"^[\w.~/+-]+\.[A-Za-z0-9]{1,10}$")
+_SETUP_FILE_LIMIT = 20_000_000
+
+
+def _text_of_named_file(raw: str) -> tuple[str | None, str | None]:
+    """(text, error) when `raw` names a file instead of holding text; (None, None) when it
+    is text, to be used as it is."""
+    s = (raw or "").strip()
+    if not s or "\n" in s or len(s) > 400:
+        return None, None
+    from tools.result_audit import resolve_under_cell
+    path = resolve_under_cell(s)
+    try:
+        is_file = path.is_file()
+    except OSError:
+        is_file = False
+    if not is_file:
+        if _A_FILE_NAME.match(s):
+            return None, (f"`{s}` names a file, and no such file is in this run's folder. Pass "
+                          "the name of a file that exists, or the exact text that will run.")
+        return None, None
+    # INSIDE THE RUN FOLDER ONLY, links followed. The server may be able to read files the
+    # model cannot (a sandboxed cell): a run of such a file prints its lines in the traceback.
+    import os as _os
+    root = Path(_os.environ.get("OPENPASO_CELL_WORKDIR") or Path.cwd()).resolve()
+    real = path.resolve()
+    if real != root and root not in real.parents:
+        return None, (f"`{s}` is outside this run's folder (or links out of it). A review and a "
+                      "run name a file inside the run folder; pass the exact text instead.")
+    try:
+        if path.stat().st_size > _SETUP_FILE_LIMIT:
+            return None, f"`{s}` is larger than {_SETUP_FILE_LIMIT:,} bytes; pass a smaller file"
+        return path.read_text(encoding="utf-8"), None
+    except UnicodeDecodeError:
+        return None, f"`{s}` is not a text file, so it cannot be a script or a deck"
+    except OSError as exc:
+        return None, f"`{s}` could not be read: {exc}"
+
+
+def _run_text(text_arg: str, path_arg: str, text_name: str, path_name: str):
+    """(text, error) for a run tool given its input as text or as a file in the run folder.
+
+    Running the file is how a run matches the review of that file: the review is bound to the
+    file's text, and a copy retyped into the call is a different setup wherever it differs."""
+    if path_arg and text_arg:
+        return None, f"pass {text_name} or {path_name}, not both"
+    if not path_arg:
+        if not text_arg:
+            return None, (f"pass {text_name} (the text to run) or {path_name} (the name of a file "
+                          f"in the run folder that holds it)")
+        return text_arg, None
+    text, err = _text_of_named_file(path_arg)
+    if err:
+        return None, err
+    if text is None:
+        return None, f"{path_name} names no file in the run folder: `{path_arg.strip()[:120]}`"
+    return text, None
+
+
+def _text_difference(records, setup_text: str) -> str:
+    """Where a script differs from the closest review on record: its first changed line.
+
+    Measured 2026-09-29/30 in the web interface: a model retyped a reviewed script into the
+    run call and turned its time-derivative term `(a0 / dt) * ufl.inner(u, v)` into
+    `(a0 / dt) * ufl.inner(ufl.grad(u), ufl.grad(v))`. The run was told only that "the input
+    changed after it was reviewed", and it reported a drag coefficient of 53,288 at every
+    step. The line that changed is the caller's own text, so naming it gives nothing away."""
+    import difflib
+    now = (setup_text or "").splitlines()
+    best = None
+    for rec in records:
+        was = (getattr(rec, "setup_text", "") or "").splitlines()
+        if not was:
+            continue
+        ops = [o for o in difflib.SequenceMatcher(a=was, b=now, autojunk=False).get_opcodes()
+               if o[0] != "equal"]
+        changed = sum(max(i2 - i1, j2 - j1) for _t, i1, i2, j1, j2 in ops)
+        if ops and (best is None or changed < best[0]):
+            best = (changed, was, ops[0])
+    if best is None:
+        return ""
+    changed, was, (_t, i1, _i2, j1, _j2) = best
+
+    def shown(lines, k):
+        if k >= len(lines):
+            return "(nothing: the text ends before this line)"
+        t = lines[k].strip() or "(an empty line)"
+        return t if len(t) <= 140 else t[:140] + " …"
+    # THE CALLER'S OWN LINE ONLY. The reviewed text stays on the server (it may hold private
+    # literals; Copilot on the org PR): the reply names where the run first differs and quotes
+    # this run's line, which the caller has just sent, never the stored one.
+    return (f" — the closest review on record is of a text that differs from this run's first at "
+            f"its line {j1 + 1} (this run's line there: `{shown(now, j1)}`; {changed} line(s) "
+            f"differ). Run the reviewed file itself (input_path / generator_path) rather than a "
+            f"copy of it.")
+
+
+def _setup_difference(records, setup_text: str) -> str:
+    """Which keys differ between the closest review on record and this call."""
+    try:
+        now = json.loads(setup_text)
+    except (TypeError, ValueError):
+        return _text_difference(records, setup_text)
+    if not isinstance(now, dict):
+        return _text_difference(records, setup_text)
+    best, best_diff = None, None
+    for rec in records:
+        try:
+            was = json.loads(getattr(rec, "setup_text", "") or "")
+        except (TypeError, ValueError):
+            continue
+        diff = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
+        # A TIE GOES TO THE LATER REVIEW: the records come oldest first, and the
+        # oldest of two equally close reviews was named (measured).
+        if diff and (best_diff is None or len(diff) <= len(best_diff)):
+            best, best_diff = was, diff
+    if not best_diff:
+        return ""
+    parts = []
+    for key in best_diff[:4]:
+        if key == "__participant_files__":
+            # the most common one, and the least obvious: a script was edited
+            # after the review, so the review is of code that no longer runs
+            changed = sorted(
+                f"{name}/{fn}"
+                for name, files in (now.get(key) or {}).items()
+                for fn, h in files.items()
+                if (best.get(key) or {}).get(name, {}).get(fn) != h)
+            # A FILE THE REVIEW NEVER SAW DID NOT CHANGE. Measured: a review named its
+            # work_dir "$(pwd)/side_A", which is not expanded here, so it found no
+            # script at all, and this said the scripts' CONTENTS changed after it.
+            unseen = sorted(
+                f"{name}/{fn}"
+                for name, files in (now.get(key) or {}).items()
+                for fn, h in files.items()
+                if (best.get(key) or {}).get(name, {}).get(fn) == "absent" and h != "absent")
+            # A FILE THE REVIEWED SETUP NEVER NAMED is not a file that changed.
+            absent_from_review = sorted(
+                f"{name}/{fn}"
+                for name, files in (now.get(key) or {}).items()
+                for fn, h in files.items()
+                if fn not in ((best.get(key) or {}).get(name) or {}))
+            if unseen:
+                parts.append("the review found no file at " + ", ".join(unseen[:3])
+                             + " (the work_dir it named held none), so it is not a review "
+                               "of these scripts")
+            elif absent_from_review and len(absent_from_review) == len(changed):
+                parts.append(", ".join(absent_from_review[:3]) + " was not in the reviewed setup")
+            elif changed:
+                parts.append("the CONTENTS of " + ", ".join(changed[:3])
+                             + " changed after the review")
+            else:
+                parts.append("the participant files changed after the review")
+            continue
+        was_v, now_v = best.get(key), now.get(key)
+        parts.append(f"{key}: reviewed {was_v!r}, now {now_v!r}"
+                     if len(f"{was_v!r}{now_v!r}") < 160 else
+                     f"{key} differs")
+    return " — " + "; ".join(parts)
 
 
 def _attest_run_quantities(work_dir, job_id: str) -> dict:
@@ -397,6 +640,13 @@ def _residual_coverage_note(result: dict) -> str:
                 "declared problem ("
                 + str(result["residual_check"].get("detail", ""))[:160]
                 + "), so this verdict covers the run, not the physics.")
+    if "exports" in result and "graph" in result:
+        # A COUPLING DECLARES ITS PROBLEM IN EACH SIDE'S config.json, and is checked against it
+        # across levels. Measured: a converged couple() reply told a run whose two configs
+        # stated the source and k that it "declared no problem to check against".
+        return ("NOTE: this single couple() call did not check each side's field against its "
+                "own equation. couple_levels does, from each side's config.json and per-level "
+                "dumps (from the second level on), and audit_results does at hand-in.")
     return ("NOTE: nothing here checked whether this output satisfies any "
             "equations — the run declared no problem to check against. Pass "
             "verify_pde with the problem's source term to have openPASO assemble "
@@ -422,14 +672,19 @@ _VARIANT_QUALIFIERS = [
     ("steady", ("steady", "stationary", "static"),
      ("transient", "unsteady", "dynamic")),
     ("nonlinear", ("nonlinear", "non_linear"), ()),
+    ("cylinder", ("cylinder",), ()),
 ]
 _QUALIFIER_WORDS = {
     "3d": ("3d", "three-dimensional", "three dimensional"),
     "2d": ("2d", "two-dimensional", "plane stress", "plane strain"),
+    # a wake that sheds vortices has no steady state: asking for the shedding, the
+    # Strouhal number or a vortex street is asking for an unsteady run
     "transient": ("transient", "unsteady", "time-dependent", "time dependent",
-                  "time-varying", "evolving"),
+                  "time-varying", "evolving", "vortex shedding", "shedding", "strouhal",
+                  "vortex street", "wake"),
     "steady": ("steady", "stationary", "static", "steady-state"),
     "nonlinear": ("nonlinear", "non-linear", "large deformation", "finite strain"),
+    "cylinder": ("cylinder", "obstacle", "bluff body"),
 }
 
 
@@ -453,30 +708,46 @@ def _select_template_variant(query: str, variants: list[str]) -> tuple[str, str]
     if not variants:
         return "", ""
     q = (query or "").lower()
+    # WHOLE WORDS: "steady" is inside "unsteady", and a request for an unsteady run
+    # was also read as a request for a steady one -- and told that no variant is
+    # steady, so "adapt it rather than running it as-is".
     asked = [name for name, words in _QUALIFIER_WORDS.items()
-             if any(w in q for w in words)]
+             if any(re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", q) for w in words)]
 
-    chosen, unmet = variants[0], []
-    for name in asked:
-        satisfies, contradicts = next(
-            (s, c) for n, s, c in _VARIANT_QUALIFIERS if n == name)
-        hit = next((v for v in variants
-                    if any(t in v.lower() for t in satisfies)
-                    and not any(t in v.lower() for t in contradicts)), None)
-        if hit:
-            chosen = hit
-        else:
-            unmet.append(name)
+    # THE VARIANT THAT SATISFIES THE MOST OF WHAT WAS ASKED. Each qualifier used to
+    # overwrite the choice of the one before, so "an unsteady wake behind a cylinder"
+    # ended on whichever cylinder variant came first -- the steady one -- although a
+    # variant satisfying both was in the list. Ties keep catalog order.
+    def _fits(v: str, name: str) -> bool:
+        satisfies, contradicts = next((s, c) for n, s, c in _VARIANT_QUALIFIERS if n == name)
+        if any(t in v.lower() for t in contradicts):
+            return False
+        if name == "steady" and "steady" not in v.lower():
+            # a variant whose name says nothing about time is a steady one (channel_cylinder
+            # is steady, and the transient twin says so in its name)
+            return True
+        return any(t in v.lower() for t in satisfies)
+    chosen = max(variants, key=lambda v: sum(_fits(v, name) for name in asked))
+    # what the CHOSEN variant does not provide, and whether another one does: a
+    # request for "unsteady 3d flow" was told `3d` was selected "for: 3d, transient"
+    missed = [name for name in asked if not _fits(chosen, name)]
+    elsewhere = {name: [v for v in variants if v != chosen and _fits(v, name)] for name in missed}
 
     bits = []
-    if unmet:
+    nowhere = [u for u in missed if not elsewhere[u]]
+    if nowhere:
         bits.append(
-            "⚠ You asked for " + " and ".join(f"**{u}**" for u in unmet)
+            "⚠ You asked for " + " and ".join(f"**{u}**" for u in nowhere)
             + f", and no template variant provides it. Serving `{chosen}`, "
             f"which does NOT satisfy that — adapt it rather than running it "
             f"as-is.")
-    elif asked:
-        bits.append(f"Selected `{chosen}` for: {', '.join(asked)}.")
+    for u in missed:
+        if elsewhere[u]:
+            bits.append(f"⚠ You asked for **{u}**, and `{chosen}` does NOT satisfy it: "
+                        f"`{elsewhere[u][0]}` does -- request it by name.")
+    satisfied = [name for name in asked if name not in missed]
+    if satisfied:
+        bits.append(f"Selected `{chosen}` for: {', '.join(satisfied)}.")
     if len(variants) > 1:
         others = [v for v in variants if v != chosen]
         bits.append(f"Other variants available: {', '.join(others)} — request "
@@ -569,7 +840,7 @@ def _participant_fingerprints(participants_json: str, monolithic_json: str = "")
     is invisible, and rewriting it leaves the digest identical while the coupled
     answer changes completely. Four routes were demonstrated, each taking a
     reviewed x=2.666667 to x=334.666665 with the verdict still reading VERIFIED,
-    "an independent critic reviewed this exact setup":
+    "a critic review of this exact setup is on record":
 
       * `from model import step` — an ordinary helper module beside run.py. No
         trickery at all, and the most likely shape of real code;
@@ -605,7 +876,30 @@ def _participant_fingerprints(participants_json: str, monolithic_json: str = "")
         name = str(s.get("name", "?"))
         wd = Path(str(s.get("work_dir", "."))).expanduser()
         seen: dict = {}
-        for token in list(s.get("command") or []) + list(s.get("data_files") or []):
+        # THE INTERPRETER IS NOT PART OF THE SETUP BEING REVIEWED.
+        #
+        # command[0] is an executable, normally an absolute path to a Python
+        # that belongs to the machine rather than to the run. Hashing it put a
+        # third-party binary inside the review digest, so an unrelated upgrade
+        # would invalidate every review on the box -- and, because the miss
+        # path joins the token onto the work_dir, it rendered as
+        # `A//home/<user>/.../bin/python` with a doubled slash. Measured, C2
+        # one run: "the CONTENTS of
+        # A//home/<user>/<venv>/bin/python,
+        # A/participant_A.py changed after the review".
+        #
+        # A command[0] INSIDE the participant's own directory is a different
+        # thing -- a launcher script the caller wrote -- and stays in the
+        # digest, which is why this tests the location rather than the index.
+        _cmd = [str(t) for t in (s.get("command") or [])]
+        if _cmd:
+            try:
+                _first = Path(_cmd[0]).expanduser()
+                if _first.is_absolute() and not _first.is_relative_to(wd):
+                    _cmd = _cmd[1:]
+            except (OSError, ValueError):
+                pass
+        for token in _cmd + list(s.get("data_files") or []):
             tok = str(token)
             for cand in (Path(tok).expanduser(), wd / tok):
                 try:
@@ -622,6 +916,55 @@ def _participant_fingerprints(participants_json: str, monolithic_json: str = "")
         if seen:
             out[name] = seen
     return out
+
+
+def _coupling_work_dir_faults(parsed: dict) -> list:
+    """Participants whose work_dir `couple` would refuse, named at review time.
+
+    THE SAME RULE AS THE RUN DOOR, and deliberately no stricter: absolute, and
+    inside this task's tree when the server was told what that tree is. A check
+    here that refused something `couple` accepts would be worse than none --
+    the agent would be unable to review a setup it can legally run.
+    """
+    import os as _os
+    cell = _os.environ.get("OPENPASO_CELL_WORKDIR")
+    root = Path(cell).resolve() if cell else None
+    raw = parsed.get("participants")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    faults = []
+    for spec in raw:
+        if not isinstance(spec, dict):
+            continue
+        name = str(spec.get("name", "?"))
+        wd = str(spec.get("work_dir", "") or "")
+        if not wd:
+            continue
+        path = Path(wd)
+        if not path.is_absolute():
+            # THE THIRD DOOR WITH THIS RULE, AND THE RULE HAD DRIFTED AGAIN.
+            # `couple` and `couple_levels` resolve a relative work_dir against
+            # the declared task directory; this one still refused it, so a
+            # setup spelled the way the served example shows could be RUN and
+            # not REVIEWED. One rule, stated once, in each of the three places
+            # that must agree.
+            if root is None:
+                faults.append(f"participant {name}: work_dir must be an "
+                              f"ABSOLUTE path, got {wd!r} — nothing has told "
+                              f"this server which directory a relative path "
+                              f"would be relative TO")
+            continue
+        if root is not None and not path.resolve().is_relative_to(root):
+            faults.append(f"participant {name}: work_dir {path.resolve()} is "
+                          f"outside this task's working directory {root}, so "
+                          f"the run you review here is not a run that can be "
+                          f"made")
+    return faults
 
 
 def _coupling_setup_text(**kwargs) -> str:
@@ -641,6 +984,107 @@ def _coupling_setup_text(**kwargs) -> str:
     # correctly-reviewed coupling. The marker rather than the fingerprints
     # themselves, so the rule still holds when a caller has no files to
     # fingerprint or a test strips them out.
+    # ONE SPELLING PER SETUP, OR THE GATE CANNOT BE SATISFIED.
+    #
+    # The digest is a hash of this text, so two spellings of the SAME setup are
+    # two setups. Measured 2026-09-19: `couple_levels` builds its digest with
+    # `monolithic=""`, while THIS SERVER'S OWN `coupling_args_example` tells the
+    # caller to send `"monolithic": false, "probe": null`. Of the twelve
+    # combinations of the three falsy spellings for those two keys, exactly ONE
+    # matches what `couple_levels` computes, and it is not the one we document.
+    # The example also shows `participants` as a LIST while the tool takes the
+    # JSON STRING, which is a second guaranteed mismatch on its own.
+    #
+    # Consequence, measured over every coupled run on this machine that reached
+    # `couple_levels`: 10 of 10 were served "THIS LADDER IS NOT VERIFIED ... a
+    # critic review exists for this solver but NOT for this setup" AFTER
+    # submitting a review this server had accepted. So no coupled result in the
+    # record carries a verification verdict, and the reason was our own example.
+    #
+    # Canonicalising here rather than at each door: absent, empty, null and
+    # false all mean "no monolithic reference" and "no probe", so they must
+    # hash alike; and a participant spec means the same thing whether it
+    # arrives as a list or as the string of that list. This only MERGES
+    # digests that already meant the same setup -- it can never make two
+    # different setups collide, because the canonical form is a lossless
+    # re-serialisation.
+    for _key in ("monolithic", "probe"):
+        if not payload.get(_key):
+            payload[_key] = ""
+    _specs = payload.get("participants")
+    if _specs not in (None, "", []):
+        try:
+            _parsed = json.loads(_specs) if isinstance(_specs, str) else _specs
+            # A work_dir MEANS THE SAME DIRECTORY whether it is written
+            # relative to the task or in full, and `couple` now accepts both.
+            # Left as typed, the two spellings are two setups: measured
+            # 2026-09-19, the relative form also makes the fingerprinter
+            # record every participant script as 'absent', because it looks
+            # for them beside the SERVER. Two digests, one setup, and a
+            # verification gate nothing can satisfy.
+            if isinstance(_parsed, list):
+                import os as _os
+                _cell = _os.environ.get("OPENPASO_CELL_WORKDIR")
+                for _spec in _parsed:
+                    if not isinstance(_spec, dict):
+                        continue
+                    # A TIME LIMIT DOES NOT CHANGE WHAT IS SOLVED. Measured: a
+                    # review submitted with "timeout" in each spec and a ladder
+                    # called without it were two setups, and the ladder was told
+                    # no review of it was on record.
+                    _spec.pop("timeout", None)
+                    _wd = str(_spec.get("work_dir", "") or "")
+                    if _cell and _wd and not Path(_wd).is_absolute():
+                        _spec["work_dir"] = str(Path(_cell) / _wd)
+            payload["participants"] = json.dumps(_parsed, sort_keys=True,
+                                                 separators=(",", ":"))
+        except (TypeError, ValueError):
+            payload["participants"] = str(_specs)
+    for _key, _cast in (("max_iter", int), ("tol", float), ("theta", float)):
+        if payload.get(_key) is not None:
+            try:
+                payload[_key] = _cast(payload[_key])
+            except (TypeError, ValueError):
+                pass
+    if isinstance(payload.get("accelerator"), str):
+        payload["accelerator"] = payload["accelerator"].strip().lower()
+    # THE DIGEST COVERS WHAT IS SOLVED, AND NOTHING ELSE.
+    #
+    # `submit_critic_review` took whatever keys the caller sent, and our own
+    # docstring tells them to "pass EVERY key for the tool you will call".
+    # `couple_levels` takes arguments that do not change what is solved --
+    # where the residual history is written, what it is named, the level list
+    # it resolves ONE review for -- and its digest covers only the participants
+    # and the seven solver arguments. So a caller who follows the instruction
+    # reviews a payload the run can never reproduce.
+    #
+    # MEASURED on one coupled round, in all five runs, and readable
+    # only because the mismatch now names its keys:
+    #
+    #     the input changed after it was reviewed — history_dir: reviewed '.',
+    #     now None; history_pattern: reviewed 'residual_level{k}.csv', now None
+    #
+    # Restricting here rather than at the door, because this one function is
+    # what both sides hash: an unknown key cannot change the digest, so it
+    # cannot break a binding, and a key that DOES change what is solved is in
+    # the list below and still does.
+    # AN ITERATION CAP DOES NOT CHANGE WHAT IS SOLVED, any more than a time limit
+    # does: the answer is the tolerance's, and a run that hits the cap says it did
+    # not converge. Measured: a review of couple(max_iter=100) and the ladder
+    # couple() itself recommends, run with couple_levels' own default of 150, were
+    # two setups, and a right ladder read "no critic review of this coupling setup
+    # is on record (max_iter: reviewed 100, now 150)".
+    # AND HOW THE ITERATION IS RELAXED DOES NOT CHANGE WHAT IS SOLVED EITHER. theta,
+    # the accelerator and the relaxation decide how fast the fixed point is reached,
+    # not which one: a review at theta 0.001 and a right ladder run at 0.5 were two
+    # setups, and the ladder read NOT VERIFIED (measured).
+    _COVERED = ("participants", "monolithic", "probe", "tol",
+                "problem", "solver_a",
+                "solver_b", "nx", "ny", "params", "data", "exchanges",
+                "scheme", "dimensions", "max_time", "time_window",
+                "convergence_tol", "mapping")
+    payload = {k: v for k, v in payload.items()
+               if k in _COVERED or k.startswith("__")}
     payload["__coupling_setup__"] = True
     if payload.get("participants") or payload.get("monolithic"):
         fp = _participant_fingerprints(str(payload.get("participants") or ""),
@@ -709,7 +1153,7 @@ def _run_monolithic_check(monolithic: str, exports: dict,
         out.unlink()
     try:
         p = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True,
-                           timeout=int(spec.get("timeout", 3600)))
+                           timeout=int(spec.get("timeout", 3600)), stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError, ValueError) as e:
         return ({"status": "reference solve failed", "detail": str(e)[:200]}, [],
                 [f"monolithic consistency: NOT CHECKED — the un-split reference "
@@ -939,26 +1383,415 @@ def _couple_failure_reason(r, checks_ok: bool) -> str:
     """
     if checks_ok:
         return ""
-    if getattr(r, "error", None) or not getattr(r, "history", None):
-        err = str(getattr(r, "error", "") or "").strip()
-        rcs = getattr(r, "returncodes", None)
+    err = str(getattr(r, "error", "") or "").strip()
+    hist = list(getattr(r, "history", None) or [])
+    rcs = getattr(r, "returncodes", None)
+    codes = list(rcs.values()) if isinstance(rcs, dict) else list(rcs or [])
+    # A run that iterated to its cap with every exit code 0 is NOT a crash, even
+    # though the driver puts its "did not converge" text in `error`: one that
+    # iterated 150 times was told "a participant failed to run ... nothing
+    # iterated".
+    ran_to_the_cap = (bool(hist) and not any(c not in (0, None) for c in codes)
+                      and (not err or err.startswith("did not converge")))
+    if (err or not hist) and not ran_to_the_cap:
         return (
-            "the coupling did not produce an iteration history — a "
-            "participant failed to run, so there is no residual to read. "
+            ("a participant failed to run after " + str(len(hist)) + " "
+             "iteration(s), so the coupling stopped there. " if hist else
+             "the coupling did not produce an iteration history — a "
+             "participant failed to run, so there is no residual to read. ")
             + (f"The error was: {err[:400]} " if err else
                "No error text was captured. ")
             + (f"Per-participant exit codes: {rcs}. " if rcs else "")
-            + "Fix the participant that failed and re-run; do NOT read "
-              "`history`, which is empty because nothing iterated.")
+            + ("Fix the participant that failed and re-run; `history` holds "
+               "only the iterations before it failed." if hist else
+               "Fix the participant that failed and re-run; do NOT read "
+               "`history`, which is empty because nothing iterated."))
     if not getattr(r, "converged", False):
-        return ("the coupling did not reach the requested tolerance "
-                "(see `history` for the residual per iteration)")
+        return ("the coupling did not reach the requested tolerance: every "
+                f"participant ran, and `history` holds the residual of each of "
+                f"its {len(hist)} iteration(s)"
+                + (f". The driver's words: {err[:300]}" if err else ""))
     return (
         "the coupling CONVERGED, and then failed one of openPASO's "
         "silent-wrong checks (see `validation`). This is a converged "
         "result with a caveat, NOT a failed run: report the numbers "
         "and the caveat. A downstream check can fail on discretisation "
-        "error alone at the coarsest level and pass on the finer ones.")
+        "error alone at the coarsest level and pass on the finer ones; "
+        "whether this one did is decided by the next level's number, "
+        "not assumed.")
+
+
+def _interface_profile_trend(out_levels: list, shrink: float = 0.6):
+    """(faults, notes, excused_levels) from the per-level POINT-BY-POINT flux
+    mismatch, judged as the balance is (see _interface_balance_trend).
+
+    MEASURED on a correct vector Dirichlet-Neumann ladder: the pointwise mismatch
+    read 11.1% / 15.2% at level 1, 7.2% / 7.8% at level 2 and 5.8% / 3.9% at level
+    3 -- the Neumann side's consistent recovery smoothing the flux it was given by
+    the boundary mass matrix -- and the level-1 finding alone made the correct
+    ladder NOT VERIFIED. A mismatch that shrinks, or ends inside tolerance, is
+    that smoothing; one that does not is a mis-mapped exchange. Neither says
+    anything about the operator: the equation check does.
+    """
+    return _interface_numbers_trend(out_levels, "interface_profile",
+                                    "pointwise interface flux mismatch", shrink)
+
+
+def _interface_numbers_trend(out_levels: list, key: str, what: str, shrink: float = 0.6):
+    rows = []
+    for x in out_levels:
+        b = x.get(key) if isinstance(x, dict) else None
+        if isinstance(b, dict) and b.get("rel") and not b.get("tautology"):
+            try:
+                rows.append((int(x.get("level")), [float(v) for v in b["rel"]],
+                             float(b.get("rtol", 0.10))))
+            except (TypeError, ValueError):
+                continue
+    if len(rows) < 2:
+        return [], [], set()
+    ncomp = min(len(r) for _, r, _ in rows)
+    faults, notes, excused, held = [], [], set(), set()
+    for c in range(ncomp):
+        seq = [(k, r[c]) for k, r, _ in rows]
+        rtol = rows[0][2]
+        fired = [k for k, v in seq if v == v and v > rtol]
+        if not fired:
+            continue
+        vals = [v for _, v in seq]
+        ratios = [vals[i + 1] / vals[i] if vals[i] > 0 else 1.0
+                  for i in range(len(vals) - 1)]
+        name = f"flux component {c}" + (" (the only one)" if ncomp == 1 else "")
+        path = " -> ".join(f"{v:.1%}" for v in vals)
+        lv = ", ".join(str(k) for k, _ in seq)
+        if all(r <= shrink for r in ratios) or vals[-1] <= rtol:
+            notes.append(
+                f"The {what} of {name}: {path} over levels {lv}, shrinking under "
+                f"refinement or ending inside tolerance -- discretisation, and the "
+                f"coarse-level caveat is not held against the ladder.")
+            excused.update(fired)
+        else:
+            held.update(fired)
+            faults.append(
+                f"the {what} of {name} does NOT shrink under refinement ({path} over "
+                f"levels {lv}): a mismatch that stays or grows is a mis-mapped or "
+                f"inconsistent exchange of that component, and refinement will not "
+                f"cure it")
+    return faults, notes, excused - held
+
+
+def _res_coefficient_check(res: dict, ks) -> None:
+    """verify_interface_flux: one side's implied coefficient q_n / (-du/dn) against the
+    one k its config states, written into `res` in place.
+
+    LEG BY LEG ON A BENT INTERFACE, AND ONE k ONLY WHERE ONE k CAN SAY IT. Measured: a
+    side with several materials was told "THE IMPLIED COEFFICIENT ... IS NOT THE k YOUR
+    CONFIG STATES", from a ratio taken across both legs at once. Where the implied
+    coefficient differs between legs, what was measured is said, and it is not held
+    against one stated k: a conductivity that differs by region along the interface
+    reads this way, and so does a flux scaled on one leg only."""
+    rows = res.get("per_leg") or [res]
+    ki = []
+    for r in rows:
+        for c in r.get("per_component") or []:
+            k = c.get("implied_coefficient")
+            if isinstance(k, (int, float)) and k > 0:
+                ki.append((r.get("leg"), float(k), r.get("verdict")))
+    if not ki:
+        return
+    by_leg = [(lab, k, v) for lab, k, v in ki if lab]
+    if len(by_leg) >= 2 and max(k for _l, k, _v in by_leg) > 1.3 * min(k for _l, k, _v in by_leg):
+        res["coefficient_check"] = (
+            "NOT COMPARED WITH ONE k: the implied coefficient differs between the legs ("
+            + ", ".join(f"{k:.4g} on leg {lab}" for lab, k, _v in by_leg)
+            + (", steady along each" if all(v == "CONSISTENT" for _l, _k, v in by_leg) else "")
+            + (f"; your config states k = {ks:g}" if ks else "") + "). A side whose conductivity "
+            "differs by region along the interface reads this way, so one stated k is not held "
+            "against it here. Where this side has one conductivity, the leg that departs from it "
+            "is the one to look at.")
+        return
+    if ks and any(abs(k / ks - 1.0) > 0.3 for _l, k, _v in ki):
+        res["stated_coefficient"] = ks
+        res["coefficient_check"] = (
+            f"THE IMPLIED COEFFICIENT ({', '.join(f'{k:.4g}' for _l, k, _v in ki)}) IS NOT "
+            f"THE k YOUR CONFIG STATES ({ks:g}): a flux computed as -k du/dn from "
+            f"this field would read about {ks:g}. The sign test passes, but the flux "
+            f"this side delivers does not follow from this field with this k.")
+
+
+def _ratio_misfit_trend(per_side: list, shrink: float = 0.6) -> list:
+    """verify_interface_flux: the per-level trend of each side's (and leg's) misfit
+    (flux_multiple_consistency; the spread of flux_ratio_consistency is read the same
+    way), written into the per-side results in place; returns one plain statement per
+    side or leg whose misfit went over tolerance at some level.
+
+    MEASURED on a right field: the implied coefficient varied along the interface by
+    31 % at level 1, 12 % at level 2 and 8 % at level 3, and level 1 alone read "the two
+    were not computed from each other". A misfit (or spread) that falls at every level (by
+    `shrink` or more per step, or into tolerance) is what discretisation error does: those
+    levels read MISFIT_SHRINKS. One that does not keeps INCONSISTENT with its numbers; a
+    single level says what one level cannot tell. No cause is named."""
+    groups: dict = {}
+    for res in per_side:
+        for r in (res.get("per_leg") or [res]):
+            pc = next(iter(r.get("per_component") or []), None)
+            v = pc.get("misfit", pc.get("spread")) if isinstance(pc, dict) else None
+            if not isinstance(v, (int, float)):
+                continue
+            groups.setdefault((str(res.get("side")), r.get("leg") or ""), []).append(
+                (int(res.get("level") or 0), float(v), r,
+                 float(r.get("misfit_tolerance") or r.get("spread_tolerance") or 0.30)))
+    notes = []
+    for (side, leg), seq in sorted(groups.items()):
+        seq.sort(key=lambda t: t[0])
+        bad = [r for _l, _s, r, _t in seq if r.get("verdict") == "INCONSISTENT"]
+        if not bad:
+            continue
+        who = f"side {side}" + (f", leg {leg}" if leg else "")
+        vals, lv, tol = [t[1] for t in seq], [str(t[0]) for t in seq], seq[0][3]
+        path = " -> ".join(f"{v:.0%}" for v in vals)
+        what = (f"{who}: the flux differs from the best constant multiple of this field's normal "
+                f"derivative by")
+        falls = len(seq) >= 2 and all(b < a for a, b in zip(vals, vals[1:]))
+        if falls and (all(b <= shrink * a for a, b in zip(vals, vals[1:])) or vals[-1] <= tol):
+            txt = (f"{what} {path} over levels {', '.join(lv)}. It falls at every level, as "
+                   f"discretisation error does, so a level over the {tol:.0%} tolerance is not read "
+                   f"as a verdict against the coupling. The trend is all this measures.")
+            for r in bad:
+                r["verdict"] = "MISFIT_SHRINKS"
+                r["detail"] = txt
+        elif len(seq) >= 2:
+            txt = (f"{what} {path} over levels {', '.join(lv)}"
+                   + (f": it falls at every level but stays over the {tol:.0%} tolerance at the finest"
+                      if falls else " and does not fall at every level")
+                   + ". A flux computed as -k du/dn from this field is a constant multiple of its normal "
+                     "derivative. This measures the flux against the field, not why they differ.")
+            for r in bad:
+                r["detail"] = txt
+        else:
+            txt = (f"{what} {vals[0]:.0%} at level {lv[0]}, over the {tol:.0%} tolerance. One level "
+                   f"cannot tell discretisation error from a flux that does not follow from this "
+                   f"field: give every level's files, and a misfit that falls under refinement is "
+                   f"discretisation.")
+            for r in bad:
+                r["detail"] = txt
+        notes.append(txt)
+    try:
+        from .result_audit import _worst_leg
+    except Exception:                                        # noqa: BLE001
+        from tools.result_audit import _worst_leg
+    for res in per_side:
+        if res.get("per_leg"):
+            w = _worst_leg(res["per_leg"])
+            res["verdict"], res["detail"] = w["verdict"], w["detail"]
+    return notes
+
+
+_BLOCK_CAVEAT = "Global residual is NOT representative"
+_CLEAN_HEAD = "this level's iteration CONVERGED and your files are self-consistent. "
+_BLOCK_NAMED = re.compile(r"([A-Za-z0-9_.\-]+?\.(?:values|normal_fluxes)(?:\[\d+\])?)=([0-9.eE+\-]+)")
+
+
+def _straight_interface_ends(dirs, coords, level, since):
+    """The two points where a straight interface along x or y ends, as the sides' own mesh dumps of
+    this level carry them: the extremes, along the interface, of the dump nodes that lie on its
+    line. None where the interface is not one such line, the level is unknown, or no dump of it
+    written by this call (newer than `since`) has a node on the line. Read by the point-by-point
+    flux check, which leaves out only the rows at these points (see check_interface_flux_profile)."""
+    import numpy as np
+    try:
+        P = np.asarray(coords, float)
+        P = P.reshape(len(P), -1)
+    except (TypeError, ValueError):
+        return None
+    if not level or P.ndim != 2 or P.shape[0] < 2 or P.shape[1] < 2:
+        return None
+    span = float(np.ptp(P, axis=0).max())
+    if span <= 0 or (P.shape[1] > 2 and float(np.ptp(P[:, 2:], axis=0).max()) > 1e-9 * span):
+        return None
+    ax = int(np.argmin(np.ptp(P[:, :2], axis=0)))
+    if float(np.ptp(P[:, ax])) > 1e-9 * span:
+        return None                                  # not one straight line along x or y
+    c, al, tol = float(P[:, ax].mean()), 1 - ax, 1e-6 * span
+    lo = hi = None
+    for d in dirs:
+        q = Path(d) / f"field_level{int(level)}.csv"
+        try:
+            if q.stat().st_mtime < since:
+                continue
+            rows = np.loadtxt(q, delimiter=",", skiprows=1, usecols=(0, 1), ndmin=2)
+        except (OSError, ValueError, TypeError):
+            continue
+        on = rows[np.abs(rows[:, ax] - c) <= tol]
+        if len(on):
+            lo = float(on[:, al].min()) if lo is None else min(lo, float(on[:, al].min()))
+            hi = float(on[:, al].max()) if hi is None else max(hi, float(on[:, al].max()))
+    if lo is None or hi <= lo:
+        return None
+    ends = [[0.0, 0.0], [0.0, 0.0]]
+    ends[0][ax] = ends[1][ax] = c
+    ends[0][al], ends[1][al] = lo, hi
+    return ends
+
+
+def _block_caveat_trend(out_levels: list, blocks_by_level: dict):
+    """(faults, notes, excused_levels) from the per-block iteration caveat.
+
+    The caveat measures how far one block's worst entry still moved, relative to its own
+    value, at a level's LAST iteration: the iteration's precision at that level. Its own
+    per-level trend -- the same block's last-step change at every level, from each level's
+    block residuals -- decides: shrinking level by level, it is not a ladder fault and the
+    note states the trend; otherwise the fault states the trend and the level to couple
+    again with a smaller tol. Measured on the ladders of a steady problem: the caveat fired at the finest
+    level only (1.74e-4 against a 1e-5 limit; the same block moved 1.4e-6 and 3.8e-6 at the
+    two coarser levels, and the entry held 0.9 % of its block's largest value), and every
+    correct ladder read NOT VERIFIED under a text that framed it as discretisation."""
+    order = [int(x["level"]) for x in out_levels if isinstance(x, dict) and "level" in x]
+    faults, notes, excused = [], [], set()
+    for x in out_levels:
+        k = x.get("level") if isinstance(x, dict) else None
+        cav = [str(v) for v in (x.get("validation") or []) if _BLOCK_CAVEAT in str(v)] if k else []
+        if not cav:
+            continue
+        lim = re.search(r"more than ([0-9.eE+\-]+) relative", cav[0])
+        named = sorted({b for v in cav for b, _ in _BLOCK_NAMED.findall(v)})
+        if not named:
+            continue
+        rows, all_shrink = [], True
+        for b in named:
+            seq = []
+            for j in order:
+                try:
+                    v = float((blocks_by_level.get(j) or {}).get(b))
+                except (TypeError, ValueError):
+                    continue
+                if v == v:
+                    seq.append((j, v))
+            shrinks = len(seq) >= 2 and all(b2 < a2 for (_, a2), (_, b2) in zip(seq, seq[1:]))
+            all_shrink = all_shrink and shrinks
+            rows.append(f"{b} {', '.join(f'{v:.1e}' for _, v in seq)} at levels "
+                        f"{', '.join(str(j) for j, _ in seq)}")
+        where = "; ".join(rows) + (f" (limit {lim.group(1)})" if lim else "")
+        if all_shrink:
+            excused.add(int(k))
+            notes.append(f"The per-block iteration caveat at level {k} shrinks level by level: {where}. "
+                         f"It is the iteration's precision at each level, not a ladder fault.")
+        else:
+            faults.append(f"level {k}: the per-block iteration caveat does not shrink across the ladder "
+                          f"(the last-step change of its worst entry, relative to that entry's own value: "
+                          f"{where}): the iteration at level {k} stopped before that block settled. That "
+                          f"is the iteration's precision at that level, not a discretisation trend; couple "
+                          f"level {k} again with a smaller tol.")
+    return faults, notes, excused
+
+
+def _interface_balance_trend(out_levels: list, shrink: float = 0.6):
+    """(faults, notes, excused_levels) from the per-level interface balance.
+
+    Reads the `interface_balance` numbers each level's couple() reply carried
+    (per flux component: |net_A + net_B| / max|net|). A component whose
+    imbalance exceeded its tolerance at some level is classified by how it
+    moves across the levels: shrinking (every step at most `shrink` of the
+    previous, or the last level inside tolerance) is discretisation error and
+    the levels it fired on are EXCUSED; anything else is a fault. Levels whose
+    numbers are a tautology (the two exports cannot disagree) carry no
+    evidence and are skipped. Measured on a correct thermo-mechanical ladder
+    the per-channel jump falls ~4x per halving; on a wrong one two channels
+    fell 1.2x and 1.05x while the third fell 4x.
+    """
+    rows = []
+    for x in out_levels:
+        b = x.get("interface_balance") if isinstance(x, dict) else None
+        if isinstance(b, dict) and b.get("rel") and not b.get("tautology"):
+            try:
+                rows.append((int(x.get("level")), [float(v) for v in b["rel"]],
+                             float(b.get("rtol", 0.05))))
+            except (TypeError, ValueError):
+                continue
+    if len(rows) < 2:
+        return [], [], set()
+    ncomp = min(len(r) for _, r, _ in rows)
+    faults, notes, excused, held = [], [], set(), set()
+    for c in range(ncomp):
+        seq = [(k, r[c]) for k, r, _ in rows]
+        rtol = rows[0][2]
+        fired = [k for k, v in seq if v == v and v > rtol]
+        if not fired:
+            continue
+        vals = [v for _, v in seq]
+        ratios = [vals[i + 1] / vals[i] if vals[i] > 0 else 1.0
+                  for i in range(len(vals) - 1)]
+        name = f"flux component {c}" + (" (the only one)" if ncomp == 1 else "")
+        path = " -> ".join(f"{v:.1%}" for v in vals)
+        lv = ", ".join(str(k) for k, _ in seq)
+        if all(r <= shrink for r in ratios) or vals[-1] <= rtol:
+            # THE TREND, NOT A CAUSE. "discretisation error, as a consistent exchange
+            # shows" was said of an imbalance of exactly h (12.5 % -> 6.2 % -> 3.1 %):
+            # two zeroed end nodes against a partner's constant placeholder flux of
+            # 1e-10 (measured). A shrinking imbalance is what discretisation error does,
+            # and not the only thing that does it.
+            notes.append(
+                f"Interface balance of {name}: {path} over levels {lv}, shrinking under "
+                f"refinement, as discretisation error does; the coarse-level caveat is not "
+                f"held against the ladder. The trend is all this measures: an error that "
+                f"lives on a fixed number of nodes shrinks the same way.")
+            excused.update(fired)
+        else:
+            held.update(fired)
+            faults.append(
+                f"the interface balance of {name} does NOT shrink under "
+                f"refinement ({path} over levels {lv}): discretisation error "
+                f"falls by about 4x per mesh halving (2x for a first-order "
+                f"recovery); an imbalance that stays or grows is a wrong sign, "
+                f"scaling or missing term in what one side EXPORTS for that "
+                f"component against what the partner APPLIES, and refinement "
+                f"will not cure it")
+    # EACH LEG OF A BENT INTERFACE, as the whole. Measured: the whole-interface net fell
+    # 9.1 % -> 3.5 % -> 1.3 % and read as discretisation error while each leg's grew,
+    # 15 % -> 18 % -> 22 % and 6 % -> 14 % -> 21 % (a flux applied by row index moved it
+    # from one leg to the other). The worst leg is judged by the same rule, and where it
+    # does not shrink, no level is excused and the whole-interface note is not served.
+    leg_rows = []
+    for x in out_levels:
+        b = x.get("interface_balance") if isinstance(x, dict) else None
+        lg = b.get("legs") if isinstance(b, dict) and not b.get("tautology") else None
+        if isinstance(lg, dict) and lg.get("rel"):
+            try:
+                leg_rows.append((int(x.get("level")), [float(v) for v in lg["rel"]],
+                                 float(lg.get("rtol", 0.05))))
+            except (TypeError, ValueError):
+                continue
+    if len(leg_rows) >= 2:
+        whole_path = {c: " -> ".join(f"{r[c]:.1%}" for _k, r, _t in rows if c < len(r))
+                      for c in range(ncomp)} if rows else {}
+        for c in range(min(len(r) for _, r, _ in leg_rows)):
+            seq = [(k, r[c]) for k, r, _ in leg_rows]
+            rtol = leg_rows[0][2]
+            fired = [k for k, v in seq if v == v and v > rtol]
+            if not fired:
+                continue
+            vals = [v for _, v in seq]
+            ratios = [vals[i + 1] / vals[i] if vals[i] > 0 else 1.0 for i in range(len(vals) - 1)]
+            path = " -> ".join(f"{v:.1%}" for v in vals)
+            lv = ", ".join(str(k) for k, _ in seq)
+            comp = f" (flux component {c})" if len(leg_rows[0][1]) > 1 else ""
+            if all(r <= shrink for r in ratios) or vals[-1] <= rtol:
+                notes.append(
+                    f"Interface balance of the worst leg of the bent interface{comp}: {path} over "
+                    f"levels {lv}, shrinking under refinement, as discretisation error does. The "
+                    f"trend is all this measures.")
+                excused.update(fired)
+            else:
+                held.update(fired)
+                notes[:] = [t for t in notes if not t.startswith("Interface balance of flux component")]
+                faults.append(
+                    f"the interface balance of the worst leg of the bent interface{comp} does NOT "
+                    f"shrink under refinement ({path} over levels {lv}, as a share of the flux the "
+                    f"whole interface carries"
+                    + (f"; the whole interface: {whole_path[c]}" if whole_path.get(c) else "")
+                    + "): flux one side puts on one leg and its partner puts on another cancels in "
+                    "the whole-interface sum, so a shrinking whole-interface imbalance does not say "
+                    "the exchange is right, and refinement will not cure this")
+    return faults, notes, excused - held
 
 
 def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
@@ -966,7 +1799,9 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                         solver: str | None = None,
                         setup_text: str | None = None,
                         critic_token: str = "",
-                        job_id: str = "") -> dict:
+                        job_id: str = "",
+                        field_defect: bool = False,
+                        iteration_caveat: bool = False) -> dict:
     """Attach openPASO's verification-gate verdict to a run/coupling result in place.
 
     A result is trustworthy ONLY when it (1) passes the numerical checks — the
@@ -1031,7 +1866,7 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
         # a result"). The agent obeys the imperative it is holding.
         # ROUTE ON THE PROPERTY, NOT ON THREE WORDS. The first router
         # recognised a converged-with-caveat run only when the reason contained
-        # balance/conserv/flux. One development run's caveat read "the
+        # balance/conserv/flux. One recorded run's caveat read "the
         # coupling CONVERGED, and then failed one of openPASO's silent-wrong
         # checks ... report the numbers and the caveat" -- no listed word -- so
         # it fell to the else-branch, and the agent received both "report the
@@ -1046,15 +1881,62 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
         _conserv = any(w in _low for w in ("balance", "conserv", "flux",
                                            "caveat", "silent-wrong"))
         _converged = ("did not converge" not in _low
-                      and "not converged" not in _low)
+                      and "not converged" not in _low
+                      and "not finite" not in _low)             # a NaN field is no result
+        # THE FLAG DECIDES WHERE THERE IS ONE, NOT THE WORDS. Measured: a level that crashed
+        # (converged False, residual NaN) was told "CONVERGED -- THIS IS A RESULT, SAVE IT NOW"
+        # because its failure text said "flux".
+        if result.get("converged") is False:
+            _converged = False
         _says_converged = "converged" in _low and _converged
-        if (_conserv or _says_converged) and _converged:
+        if field_defect:
+            # A DEFECT OF THE FIELD ITSELF IS NOT A CAVEAT THE NEXT LEVEL DECIDES.
+            # Measured: a level whose side left part of a held edge free, and a
+            # level whose sides exchanged nothing, were told "CONVERGED -- THIS IS A
+            # RESULT, SAVE IT NOW" because the finding's text said "converges".
+            result["verification"] = (
+                "NOT VERIFIED -- " + (reason or "a side's field is defective")
+                + ". This is a defect of what this level produced, not a "
+                "caveat that refinement settles: do not save this level as a "
+                "result. Fix the side named here, then couple this level again.")
+        elif iteration_caveat and _converged:
+            # AN ITERATION CAVEAT IS NOT A DISCRETISATION QUESTION. Measured: a per-block
+            # caveat at a ladder's finest level was framed as "discretisation error or a wrong
+            # transmission condition ... decided by the next level" on every correct ladder
+            # of a steady round; it measures how far the iteration had settled.
+            result["verification"] = (
+                "CONVERGED WITH AN ITERATION CAVEAT (" + (reason or "a per-block caveat") + "). "
+                "It measures how far one exchanged block had settled at the last iteration, "
+                "not a discretisation trend. Coupling this level again with a smaller tol "
+                "shows whether that block settles. "
+                + ("The ladder verdict states that block's per-level trend." if _IN_LADDER.get() else
+                   "Report it beside this level's numbers."))
+        elif (_conserv or _says_converged) and _converged and _IN_LADDER.get():
+            # INSIDE A LADDER THE NEXT LEVEL RUNS BY ITSELF, and the ladder's verdict
+            # judges the caveat's trend. Measured: ladder replies read "THIS LADDER IS
+            # NOT VERIFIED ... level 2: CONVERGED -- THIS IS A RESULT, SAVE IT NOW" and
+            # "Fix that before the deliverables" in one breath (three cells of one round).
+            result["verification"] = (
+                "CONVERGED WITH A CAVEAT (" + (reason or "a conservation check") + "). "
+                "Whether that is discretisation error or a wrong transmission "
+                "condition is decided by the next level: discretisation error "
+                "shrinks by about 4x per mesh halving (2x for a first-order "
+                "recovery); a caveat that stays or grows is a wrong sign, scaling "
+                "or missing term. The ladder verdict states its per-level trend.")
+        elif (_conserv or _says_converged) and _converged:
             result["verification"] = (
                 "CONVERGED — THIS IS A RESULT, SAVE IT NOW. The coupling "
                 "reached its fixed point; a downstream check flagged a "
-                "caveat (" + (reason or "a conservation check") + "), which "
-                "on a COARSE mesh is normally interface discretisation error "
-                "that SHRINKS as you refine, not a wrong answer. Do NOT "
+                "caveat (" + (reason or "a conservation check") + "). "
+                "Whether that caveat is discretisation error or a wrong "
+                "transmission condition is decided by the NEXT level, not "
+                "assumed here: discretisation error shrinks by about 4x per "
+                "mesh halving (2x for a first-order recovery); a caveat that "
+                "stays or grows across levels is a wrong sign, scaling or "
+                "missing term, and refinement will not cure it. The ladder "
+                "verdict states the per-level trend of every check that "
+                "fired, and one that does not shrink makes the ladder NOT "
+                "VERIFIED whatever the residuals did. Do NOT "
                 "discard this and do NOT hand-write a residual file: this "
                 "reply already carries `residual_csv` (the measured "
                 "iteration history), `interface_csv` (your interface tables) "
@@ -1073,29 +1955,45 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                 + ". Per openPASO attestation this claim must NOT be reported as "
                 "a result; revise the setup and re-run.")
     elif not critic_ok:
+        # THE CAUSE FIRST, AND WHAT "PASSED" COVERS. Measured 2026-09-29 in the web interface:
+        # this read "the automated checks passed, but openPASO's MANDATORY independent critic
+        # has not reviewed this setup" on runs whose review WAS on record -- filed for another
+        # version of the script -- so the history showed an approved review and the verdict
+        # denied one, and a reader took "the automated checks passed" for a physics check on a
+        # run whose drag coefficient was 53,288 at every step.
         result["trustworthy_result"] = False
         result["verification"] = (
-            "NOT VERIFIED — the automated checks passed, but openPASO's MANDATORY "
-            "independent critic has not reviewed this setup, and openPASO treats no "
-            "result as trustworthy until it has (" + critic_note + "). Spawn a "
+            "NOT VERIFIED — no critic review on record matches this setup ("
+            + critic_note + "). openPASO's MANDATORY independent critic review is the gate "
+            "still open, and openPASO treats no result as trustworthy until it is closed. The "
+            "automated checks passed, and they are narrow: the run finished and wrote its "
+            "output, every number in it is finite, the mesh is not degenerate and the result "
+            "is not zero everywhere. They do not check that the physics is right. Spawn a "
             "critic to challenge the parameters, units, discretisation, problem "
             "statement and boundary conditions and to cross-check against "
-            "literature/benchmarks, then call submit_critic_review with what it "
-            "found and re-run. Asserting critic_approved=True does not work: "
+            "literature/benchmarks, and give it the file to review: the critic files its "
+            "own verdict with submit_critic_review, naming that file. Then run the file "
+            "unchanged (input_path / generator_path). A review you write yourself is not a "
+            "review. Asserting critic_approved=True does not work: "
             "openPASO looks the review up rather than taking your word for it.")
     else:
         result["trustworthy_result"] = True
         result["verification"] = (
+            # WHO WROTE THE REVIEW IS NOT KNOWN HERE. Measured: all five cells of one round filed
+            # the review themselves, no critic was spawned, and each read "an independent critic
+            # reviewed this exact setup".
             "VERIFIED — a critic review of this exact setup is on record ("
             + critic_note + ") and the run passed openPASO's verification-gate "
-            "numerical checks. This is verification, not validation: confirm "
+            "numerical checks (it finished; its output is finite, on a mesh that is not "
+            "degenerate, and not zero everywhere). This is verification, not validation: confirm "
             "physical validity against reality yourself. WHAT THE REVIEW PART DOES "
             "NOT PROVE: openPASO holds the review that was submitted and binds it to "
             "this exact setup, but it cannot see who wrote it. A model that composes a "
             "review of its own script and submits it reaches this line too — measured "
             "on a live run whose critic sub-agent returned nothing at all. So read this "
             "as 'a review exists and matches what ran', not as 'someone independent "
-            "approved it'. "
+            "approved it'. The review covers the setup's own text; files it reads when it "
+            "runs (a mesh, a module it imports) are not part of it. "
             "A VERIFIED arrangement is SETTLED: write its deliverable files "
             "now, from these numbers, then move to the next arrangement "
             "(finer level, next case). Re-running a verified arrangement "
@@ -1106,8 +2004,72 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
             "first level was verified. "
             + _residual_coverage_note(result)
             + " " + _critic_coverage_note())
+    # WHAT THE RESULT ITSELF SHOWS rides in the verdict, whatever the verdict is: a note in a
+    # key of its own is a note nobody reads (the verdict is the line a reader and a model act on).
+    _notes = result.get("result_notes") or []
+    if _notes:
+        result["verification"] += (" MEASURED IN THE RESULT, and worth a look before relying on "
+                                   "it: " + "; ".join(_notes) + ".")
     result["critic_review"] = critic_note
     return result
+
+
+def _solver_module_owners() -> dict:
+    """Top-level module -> the solver it belongs to."""
+    from tools.participant_lint import _MODULE_TO_BACKEND
+    return {**_MODULE_TO_BACKEND, "basix": "fenics"}
+
+
+def _solver_modules_in(script: str) -> dict:
+    """The top-level modules a script imports that belong to one of openPASO's solvers,
+    each with that solver's name."""
+    import ast
+    import re as _re
+    try:
+        tops = set()
+        for node in ast.walk(ast.parse(script or "")):
+            if isinstance(node, ast.Import):
+                tops |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                tops.add(node.module.split(".")[0])
+    except SyntaxError:
+        tops = set(_re.findall(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", script or "", _re.M))
+    owners = _solver_module_owners()
+    return {m: owners[m] for m in tops if m in owners}
+
+
+def _what_the_error_is(error: str, solver: str) -> str:
+    """What a failed run already told us, with the call that works: the scrambled square, a
+    script run under the wrong solver, and the measured table in participant_lint. Empty when
+    openPASO has nothing measured to say about this failure.
+
+    Measured 2026-09-29 in the web interface: an NGSolve run failed nine times in a row, and
+    no reply named a fix -- the table of measured errors was handed only to coupled
+    participants' shell runs, never to run_simulation, the call a single-solver run makes
+    (and it did not yet hold those errors; they are in it now)."""
+    import re as _re
+    from tools.participant_lint import findings_from_output, scrambled_exponent_hint
+    named = []
+    hint = scrambled_exponent_hint(error or "")
+    if hint:
+        named.append(hint)
+    # the whole dotted name: a missing SUBmodule (dolfinx.io.gmshio) is an API change, not
+    # a missing solver, and the table below names it
+    missing = _re.search(r"No module named '([A-Za-z_][\w.]*)'", error or "")
+    owner = _solver_module_owners().get(missing.group(1)) if missing else None
+    if owner and owner != solver:
+        named.append(f"the script imports {missing.group(1)}, which is {owner}'s: run it with "
+                     f"solver='{owner}'. Each solver runs in its own interpreter, and {solver}'s "
+                     f"does not have {missing.group(1)}")
+    elif owner:
+        named.append(f"{solver}'s own interpreter cannot import {missing.group(1)} on this "
+                     f"install: discover(query='list') shows the interpreter openPASO found "
+                     f"for {solver}")
+    # the table's "its own interpreter" entries tell a PARTICIPANT to change its command;
+    # a run_simulation script has no command of its own, so the lines above say it instead
+    named += [f for f in findings_from_output(error or "")
+              if "this code has its own interpreter" not in f]
+    return "\n".join(named)
 
 
 def _short_reason(msg: str, limit: int = 240) -> str:
@@ -1833,6 +2795,16 @@ def _fuzzy_match_physics(backend, query: str) -> str:
             and tokens.intersection({"advection", "convection"})
             and tokens.intersection({"diffusion", "sipg", "ipdg"})):
         return "dg_advection_diffusion"
+    # AN ANISOTROPIC DIFFUSION IS A DIFFUSION WITH A TENSOR COEFFICIENT, NOT A
+    # TRANSPORT PROBLEM. Measured: "anisotropic diffusion" resolved to
+    # convection_diffusion on four codes and reaction_diffusion on DUNE-fem, and
+    # two runs read transport knowledge for a steady conduction problem.
+    if (tokens.intersection({"anisotropic", "orthotropic", "tensor"})
+            and tokens.intersection({"diffusion", "conduction", "conductivity", "diffusivity"})
+            and not tokens.intersection({"advection", "convection", "reaction", "transport"})):
+        for _name in ("heat", "poisson"):
+            if _name in available:
+                return _name
     if ("thermo_transient_mms" in available
             and tokens.intersection({"heat", "thermal", "thermo"})
             and tokens.intersection({"transient", "crank", "theta"})):
@@ -1869,10 +2841,18 @@ def _fuzzy_match_physics(backend, query: str) -> str:
     # query containing those letters, which is the same
     # collision class we just guarded the other direction
     # against.
-    for p in backend.supported_physics():
-        if (len(p.name) >= _MIN_LOOSE_MATCH_LEN
-                and p.name.lower() in query_lower):
-            return p.name
+    #
+    # THE MOST SPECIFIC NAME WINS, and the words are read with their
+    # separators normalised too. Measured 2026-09-28 in the web interface:
+    # "transient incompressible Navier-Stokes" matched `stokes` -- a substring
+    # of "navier-stokes", where the hyphen kept `navier_stokes` from matching --
+    # and the run was served the Stokes deciding facts for a Navier-Stokes
+    # problem. Catalog order decided which name a query holding two got.
+    hits = [p.name for p in backend.supported_physics()
+            if len(p.name) >= _MIN_LOOSE_MATCH_LEN
+            and (p.name.lower() in query_lower or p.name.lower() in normalised)]
+    if hits:
+        return max(hits, key=len)
 
     # 5. Loose substring of physics description (last resort,
     # same length guard).
@@ -2156,7 +3136,7 @@ def _make_input_snapshot(input_content: str, solver: str = "",
 def _unsaved_work_notice(work_dir, out_files) -> str | None:
     """Warn, at the moment a solve SUCCEEDS, that nothing is written down yet.
 
-    Measured over the development runs: the runs that fail most often are
+    Measured over the recorded runs: the runs that fail most often are
     not the ones that fail to solve. They solve, keep working, and end with
     nothing a reader can find — three of the five failing single-code runs in
     one batch made 85-107 tool calls, produced solver output, and wrote no
@@ -2194,7 +3174,7 @@ def _unsaved_work_notice(work_dir, out_files) -> str | None:
             "now, from the numbers you have, before doing anything else — "
             "including before investigating anything that looks wrong. A "
             "result that exists only in this conversation is not a result: if "
-            "the session ends here, the run counts for nothing. If you have "
+            "the session ends here, the run leaves nothing. If you have "
             "more levels or cases to run, write the summary now with what you "
             "have and an honest marker for what is missing, then rewrite it "
             "after each later run. Rewriting a small text file costs nothing "
@@ -2243,12 +3223,16 @@ _PREPARED_SOLVERS: dict = {}
 # the agent needs for its own work. One server process is one session, so a
 # module flag is the session; `register_consolidated_tools` resets it.
 _MUST_READ_STATE: dict = {"served": False}
+# TRUE FOR A SUB-AGENT TOO. A sub-agent shares this server process but not its
+# parent's context, and "was served earlier in this session" told one it had read
+# a page it never saw (measured: a critic sub-agent then fetched the 75 kB page and
+# its next reply ran to the output cap).
 _MUST_READ_POINTER = (
     "THE COUPLED MUST-READ (the couple() call recipe, history_path, the "
     "fields-vs-evidence rule, the measured-not-modelled history rule, the "
-    "sign convention, the rho budget, the silent no-flux trap) was served "
-    "earlier in this session and is not repeated here, to leave you the "
-    "context for your own work. To see it again: "
+    "sign convention, the rho budget, the silent no-flux trap) was served to "
+    "this session -- to you, or to the agent that started you -- and is not "
+    "repeated here. If your own conversation lacks it: "
     "knowledge(topic='coupling', signal='must-read').\n\n")
 
 
@@ -2268,7 +3252,8 @@ _DECIDING_FACTS = {
         "SCALES VAL. `VAL: 0` with a function set is an identically zero load "
         "that parses and exits 0 (measured: error flat at 1.0000 across all "
         "levels, order exactly 0.0000).\n"
-        "4. STRUCTURE runtime-VTK carries `node_gid`, 0-BASED while NODE "
+        "4. STRUCTURE runtime-VTK carries `node_gid` (with NODE_GID: true), "
+        "0-BASED while NODE "
         "COORDS ids are 1-based, and the .vtu holds one point PER ELEMENT "
         "CORNER (160 points, 54 distinct gids, for a 40-element mesh). "
         "Scatter results by gid: `out[int(gid)] = value`. Zipping instead "
@@ -2277,10 +3262,14 @@ _DECIDING_FACTS = {
         "point_data is only `phi_1` (plus `flux_boundary_phi_1` when "
         "requested; measured KeyError on a 240-point scatra VTU) -- so on "
         "scatra output collapse the duplicated points BY COORDINATE "
-        "instead.\n"
+        "instead, in one call: `_, first = np.unique(np.round(pts[:, :2], 10), "
+        "axis=0, return_index=True)`, then pts[first] and phi[first] (a pairwise "
+        "loop over the points is O(N^2); measured, 26 s per run).\n"
         "5. A spatially varying interface trace needs one DESIGN POINT DIRICH "
         "condition PER NODE -- no fitted FUNCT required.\n"
-        "6. INVOKE IT AS `stdbuf -oL -eL /path/to/4C deck.4C.yaml out` or as `mpirun -np 1 /path/to/4C deck.4C.yaml out`. "
+        "6. INVOKE IT AS `stdbuf -oL -eL /path/to/4C deck.4C.yaml out` or as `mpirun -np 1 /path/to/4C deck.4C.yaml out` "
+        "-- from INSIDE your participant script: the participant you hand to couple() and to the critic review is that "
+        "Python script, never the binary. "
         "The binary finds its libraries by itself (rpath-linked; measured to run with LD_LIBRARY_PATH unset), so add no prefix -- and if you ever do add one, an assignment must come BEFORE the wrapper: `stdbuf -oL VAR=x prog` makes stdbuf try to execute a file called `VAR=x` and your command never runs. "
         "4C's stdout is BLOCK-BUFFERED, and when a deck is "
         "rejected MPI_Abort tears the process down before that buffer is "
@@ -2291,9 +3280,7 @@ _DECIDING_FACTS = {
         "4C_io_input_file.cpp, line 546: Section 'NOT_A_REAL_SECTION' is not "
         "a valid section name.`. A bare `MPI_ABORT ... errorcode 1` with an "
         "empty stdout is NOT an MPI or environment problem -- it is your deck, "
-        "and the reason is one flag away. One run diagnosed it as \"the 4C "
-        "binary requires specific MPI environment configuration\" and "
-        "delivered nothing.\n"
+        "and the reason is one flag away.\n"
         "7. `No protocol specified` and `Invalid MIT-MAGIC-COOKIE-1 key` on "
         "stderr are X11 noise from a headless session. They are not the "
         "failure and they appear on successful runs too."
@@ -2324,19 +3311,47 @@ _DECIDING_FACTS = {
     # ufl 2025.2.1) on 2026-09-03. repr-generated literal: the measured
     # text contains brace/quote sequences that hand-escaping kept
     # breaking.
-    "fenics": "1. `ufl.FiniteElement` NO LONGER EXISTS (dolfinx 0.10 / ufl 2025.2: AttributeError; the lowercase hint `ufl.finiteelement` is NOT what you want either). Build spaces the modern way -- fem.functionspace(mesh, ('Lagrange', 1)) with lowercase f, or basix.ufl.element('Lagrange', 'triangle', 1). Both measured working on this install.\n2. `LinearProblem` REQUIRES the keyword `petsc_options_prefix` on this install (TypeError without it). Measured working:\n       p = dolfinx.fem.petsc.LinearProblem(a, L, bcs=[bc],\n           petsc_options={'ksp_type': 'preonly', 'pc_type': 'lu'},\n           petsc_options_prefix='run')\n       uh = p.solve()\n   Its solver is the PUBLIC `p.solver`; touching `p._solver` raises AttributeError (one run died on exactly that).\n3. `ufl.Constant` TAKES A DOMAIN, NOT A VALUE. ufl.Constant(0.0) raises AttributeError: 'float' object has no attribute 'ufl_domain' (measured; a run wrote it into a Dirichlet condition). A boundary value is a plain scalar -- fem.dirichletbc(default_scalar_type(0.0), dofs, V) -- and a constant INSIDE a form is fem.Constant(mesh, default_scalar_type(0.0)).\n4. THE RECTANGLE CONSTRUCTOR TAKES THE CORNERS AS A LIST OF POINTS AND THE COUNTS AS A SEQUENCE: dmesh.create_rectangle(MPI.COMM_WORLD, [[X0, Y0], [X1, Y1]], [NX, NY], dmesh.CellType.triangle) -- measured signature (comm, points, n, cell_type, ...). Building a unit square and rescaling domain.geometry.x by hand is not the same thing and a worker lost a run to it.\n5. SELECT DOFS WITH fem.locate_dofs_topological(V, fdim, facets) (facets from mesh.locate_entities_boundary(domain, fdim, marker), fdim = domain.topology.dim - 1) or fem.locate_dofs_geometrical(V, marker). IT RETURNS THE ARRAY ITSELF FOR ONE SPACE -- do NOT index it with [0]. Measured: for a single space the result is an ndarray of shape (n,), and [0] is the first dof NUMBER, so everything downstream silently becomes one point; only when you pass a LIST of two spaces does it return a pair of arrays. A worker lost a run to exactly that [0]. There is NO V.subset_dofs -- AttributeError, measured, and one run invented exactly that. The condition is then fem.dirichletbc(value, dofs, V) for a scalar or Constant and fem.dirichletbc(g, dofs) for a Function: passing V as well with a Function raises TypeError: incompatible function arguments (measured, and it is the second death of that worker's repair).\n6. dolfinx is SILENT by default: before creating the mesh, call dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO) -- the DOLFINX_LOGLEVEL environment variable is NOT honoured, and a run whose console output stays empty cannot show which code ran.\n7. Evaluate a Function at arbitrary points with the bb-tree route: bb = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim); cand = dolfinx.geometry.compute_collisions_points(bb, pts); cells = dolfinx.geometry.compute_colliding_cells(mesh, cand, pts); then uh.eval(pts, first_cell_per_point). Nearest-DOF lookup is the export defect that turns a converged solve into a wrong answer.\n8. FIRST USE COMPILES TOO: dolfinx JIT-compiles every new form with ffcx (a minute or more the first time, more under load). A short `timeout` around that first run, or a pipe into `head`, kills it mid-compile and looks like a crash. Run each participant once standalone with a generous timeout before coupling; the cached modules make later runs start in seconds.\n9. `fem.VectorFunctionSpace` DOES NOT EXIST on this install (AttributeError, measured dolfinx 0.10): a vector P1 space is fem.functionspace(mesh, ('Lagrange', 1, (2,))), and in its array component c of node n sits at index 2*n + c (tabulate_dof_coordinates() has one row per node). A vector fem.Function is interpolated from a callable returning shape (2, n) -- np.vstack((fx, fy)) -- and its TRANSPOSE fails with 'Interpolation data has the wrong shape/size' (measured).\n10. UFL arguments have no `.geometric_dimension()` (AttributeError, measured ufl 2025.2): write ufl.Identity(2) for plane strain; ufl.sym(ufl.grad(u)) is the strain. fem.dirichletbc takes (Function, dofs) or (Constant, dofs, V) -- a Constant WITHOUT the space as third argument is a TypeError (measured).\n11. INTERPOLATION IS A METHOD OF THE FUNCTION: f = fem.Function(V); f.interpolate(lambda X: <expression of X[0], X[1]>) with X the (3, n) coordinate array. There is NO module-level fem.interpolate(callable, V) (AttributeError, measured), and a lambda with two arguments (x, y) is a TypeError.\n12. UFL FORMS ARE PYTHON EXPRESSIONS: scalar products are ufl.inner(a, b) (or ufl.dot), products are `*`, integrals are `<integrand> * ufl.dx` and `<integrand> * ds_measure`; the strain is ufl.sym(ufl.grad(u)), the trace ufl.tr(...), the divergence ufl.div(u). There is no `.` operator between UFL objects: a form written as `ufl.grad(u) . ufl.grad(v)` is Python attribute access and dies with \"'Grad' object has no attribute 'ufl'\" (measured on a worker script).\n13. A MIXED (TAYLOR-HOOD) SPACE COMES FROM basix, AND EVERY LEGACY SPELLING IS GONE. Measured on this install (dolfinx 0.10 / basix 0.10 / ufl 2025.2): `ufl.MixedElement` and `ufl.VectorElement` both raise AttributeError: module 'ufl' has no attribute 'MixedElement' / 'VectorElement', and `fem.FunctionSpace` with a capital F is TypeError: FunctionSpace.__init__() missing 1 required positional argument: 'cppV'. What this install accepts:\n       Ve = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_v>, shape=(gdim,))\n       Qe = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_q>)\n       W  = fem.functionspace(mesh, basix.ufl.mixed_element([Ve, Qe]))\n   Reaching the components: ufl.split(w) on a fem.Function, ufl.TrialFunctions(W) / ufl.TestFunctions(W) for the arguments, and w.split() on the Function. W.sub(i).collapse() returns a PAIR (space, dof indices), not a space -- unpack it -- and W.split() does not exist (AttributeError, measured). A velocity-pressure pair needs deg_v > deg_q to be stable; picking them is yours.\n14. FACET TAGS ARE A LOWERCASE FUNCTION IN THE MESH MODULE. `fem.MeshTags(...)` and `dolfinx.MeshTags` are both AttributeError (measured dolfinx 0.10): the constructor is dolfinx.mesh.meshtags(mesh, dim, indices, values) with indices and values as int32 arrays, and you tag facets with dim = mesh.topology.dim - 1. Pass it to a measure as ufl.Measure('ds', domain=mesh, subdomain_data=<tags>) and integrate one tag with ds(<value>). MEASURED AND NOT REQUIRED: the indices do NOT have to be sorted -- a shuffled index array gives the same integral to the last bit on this install, so do not spend a step sorting them. A connectivity the topology has not built raises RuntimeError: 'Connectivity between dimension 0 and 2 has not been computed', and that message names its own fix -- call mesh.topology.create_connectivity(<from>, <to>) once before the lookup.",
+    "fenics": "1. `ufl.FiniteElement` NO LONGER EXISTS (dolfinx 0.10 / ufl 2025.2: AttributeError; the lowercase hint `ufl.finiteelement` is NOT what you want either). Build spaces the modern way -- fem.functionspace(mesh, ('Lagrange', 1)) with lowercase f, or basix.ufl.element('Lagrange', 'triangle', 1). Both measured working on this install.\n2. `LinearProblem` REQUIRES the keyword `petsc_options_prefix` on this install (TypeError without it). Measured working:\n       p = dolfinx.fem.petsc.LinearProblem(a, L, bcs=[bc],\n           petsc_options={'ksp_type': 'preonly', 'pc_type': 'lu'},\n           petsc_options_prefix='run')\n       uh = p.solve()\n   Its solver is the PUBLIC `p.solver`; touching `p._solver` raises AttributeError (one run died on exactly that).\n3. `ufl.Constant` TAKES A DOMAIN AND A SHAPE, NOT A VALUE: ufl.Constant(0.0) raises AttributeError: 'float' object has no attribute 'ufl_domain', and ufl.Constant(mesh, np.array([0.0, 0.0])) reads the array as the SHAPE (measured). A constant INSIDE a form is fem.Constant(mesh, value).\n4. THE RECTANGLE CONSTRUCTOR TAKES THE CORNERS AS A LIST OF POINTS AND THE COUNTS AS A SEQUENCE: dmesh.create_rectangle(MPI.COMM_WORLD, [[X0, Y0], [X1, Y1]], [NX, NY], dmesh.CellType.triangle) -- measured signature (comm, points, n, cell_type, ...). Building a unit square and rescaling domain.geometry.x by hand is not the same thing and a worker lost a run to it.\n5. SELECT DOFS WITH fem.locate_dofs_topological(V, fdim, facets) (facets from mesh.locate_entities_boundary(domain, fdim, marker), fdim = domain.topology.dim - 1) or fem.locate_dofs_geometrical(V, marker). IT RETURNS THE ARRAY ITSELF FOR ONE SPACE -- do NOT index it with [0]. Measured: for a single space the result is an ndarray of shape (n,), and [0] is the first dof NUMBER, so everything downstream silently becomes one point; only when you pass a LIST of two spaces does it return a pair of arrays. A worker lost a run to exactly that [0]. There is NO V.subset_dofs -- AttributeError, measured, and one run invented exactly that. The condition is fem.dirichletbc(value, dofs, V), the value of the space's shape -- np.zeros(gdim, dtype=default_scalar_type) on a vector space, where a plain number raises Rank mismatch between Constant and function space -- or fem.dirichletbc(g, dofs) for a Function (with V too: incompatible function arguments). A block of a mixed space takes the Function WITH the sub-space: V0, _ = W.sub(0).collapse(); fem.dirichletbc(g, fem.locate_dofs_topological((W.sub(0), V0), fdim, facets), W.sub(0)), g on V0; a constant there raises 'Constant size is not equal to the block size'. All measured.\n6. dolfinx is SILENT by default: before creating the mesh, call dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO) -- the DOLFINX_LOGLEVEL environment variable is NOT honoured, and a run whose console output stays empty cannot show which code ran.\n7. Evaluate a Function at arbitrary points with the bb-tree route: bb = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim); cand = dolfinx.geometry.compute_collisions_points(bb, pts); cells = dolfinx.geometry.compute_colliding_cells(mesh, cand, pts); then uh.eval(pts, first_cell_per_point). Nearest-DOF lookup is the export defect that turns a converged solve into a wrong answer.\n8. FIRST USE COMPILES TOO: dolfinx JIT-compiles every new form with ffcx (a minute or more the first time, more under load). A short `timeout` around that first run, or a pipe into `head`, kills it mid-compile and looks like a crash. Run each participant once standalone with a generous timeout before coupling; the cached modules make later runs start in seconds.\n9. `fem.VectorFunctionSpace` DOES NOT EXIST on this install (AttributeError, measured dolfinx 0.10): a vector P1 space is fem.functionspace(mesh, ('Lagrange', 1, (2,))), and in its array component c of node n sits at index 2*n + c (tabulate_dof_coordinates() has one row per node). A vector fem.Function is interpolated from a callable returning shape (2, n) -- np.vstack((fx, fy)) -- and its TRANSPOSE fails with 'Interpolation data has the wrong shape/size' (measured).\n10. UFL arguments have no `.geometric_dimension()` (AttributeError, measured ufl 2025.2): write ufl.Identity(2) for plane strain; ufl.sym(ufl.grad(u)) is the strain. fem.dirichletbc takes (Function, dofs) or (Constant, dofs, V) on a plain space -- a Constant WITHOUT the space as third argument is a TypeError (measured).\n11. INTERPOLATION IS A METHOD OF THE FUNCTION: f = fem.Function(V); f.interpolate(lambda X: <expression of X[0], X[1]>) with X the (3, n) coordinate array. There is NO module-level fem.interpolate(callable, V) (AttributeError, measured), and a lambda with two arguments (x, y) is a TypeError.\n12. UFL FORMS ARE PYTHON EXPRESSIONS: scalar products are ufl.inner(a, b) (or ufl.dot), products are `*`, integrals are `<integrand> * ufl.dx` and `<integrand> * ds_measure`; the strain is ufl.sym(ufl.grad(u)), the trace ufl.tr(...), the divergence ufl.div(u). There is no `.` operator between UFL objects: a form written as `ufl.grad(u) . ufl.grad(v)` is Python attribute access and dies with \"'Grad' object has no attribute 'ufl'\" (measured on a worker script).\n13. A MIXED (TAYLOR-HOOD) SPACE COMES FROM basix, AND EVERY LEGACY SPELLING IS GONE. Measured on this install (dolfinx 0.10 / basix 0.10 / ufl 2025.2): `ufl.MixedElement` and `ufl.VectorElement` both raise AttributeError: module 'ufl' has no attribute 'MixedElement' / 'VectorElement', and `fem.FunctionSpace` with a capital F is TypeError: FunctionSpace.__init__() missing 1 required positional argument: 'cppV'. What this install accepts:\n       Ve = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_v>, shape=(gdim,))\n       Qe = basix.ufl.element('Lagrange', mesh.basix_cell(), <deg_q>)\n       W  = fem.functionspace(mesh, basix.ufl.mixed_element([Ve, Qe]))\n   Reaching the components: ufl.split(w) on a fem.Function in a form, ufl.TrialFunctions(W) / ufl.TestFunctions(W) for the arguments, and w.split() only to read the solved parts (in a residual it empties the Jacobian, measured). W.sub(i).collapse() returns a PAIR (space, dof indices), not a space -- unpack it -- and W.split() does not exist (AttributeError, measured). A velocity-pressure pair needs deg_v > deg_q to be stable; picking them is yours.\n14. FACET TAGS ARE A LOWERCASE FUNCTION IN THE MESH MODULE. `fem.MeshTags(...)` and `dolfinx.MeshTags` are both AttributeError (measured dolfinx 0.10): the constructor is dolfinx.mesh.meshtags(mesh, dim, indices, values) with indices and values as int32 arrays, and you tag facets with dim = mesh.topology.dim - 1. Pass it to a measure as ufl.Measure('ds', domain=mesh, subdomain_data=<tags>) and integrate one tag with ds(<value>). MEASURED AND NOT REQUIRED: the indices do NOT have to be sorted -- a shuffled index array gives the same integral to the last bit on this install, so do not spend a step sorting them. A connectivity the topology has not built raises RuntimeError: 'Connectivity between dimension 0 and 2 has not been computed', and that message names its own fix -- call mesh.topology.create_connectivity(<from>, <to>) once before the lookup.\n15. ASSEMBLING BY HAND (fem.petsc), MEASURED ON dolfinx 0.10: a UFL form goes through fem.form(...) first -- a bare one raises AttributeError: 'Form' object has no attribute '_cpp_object'. assemble_matrix(a_form, bcs=[bc]) zeroes the bc rows AND columns, so the right-hand side needs all three: fem.petsc.apply_lifting(b, [a_form], bcs=[[bc]]), b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE), fem.petsc.set_bc(b, [bc]). On a linear test: without them the boundary AND interior are wrong (4, 3.6), set_bc alone fixes the boundary only (0, 3.6), all three give 3e-15. A Function's PETSc vector is uh.x.petsc_vec (Function.vector is gone, and a PETSc Vec has no petsc_vec). A number times dx needs the domain: fem.Constant(mesh, value) * ufl.dx, or ufl.dx(domain=mesh); 1.0 * ufl.dx raises ValueError: This integral is missing an integration domain.",
     # Every line measured by execution on this install (dune-fem on
     # dune-py313) on 2026-09-03. repr-generated literal.
-    "dune": "1. `ufl.Eq` NO LONGER EXISTS in this ufl (ImportError; five hits in one round). The lowercase `ufl.eq` does, and it is ONLY a conditional's test: ufl.conditional(ufl.eq(a, b), val_true, val_false). The equation handed to galerkin is written with Python's `==`: `scheme = galerkin([a == L, dbc], solver='cg')` -- passing `eq(a, L)` or a bare form dies with `ValueError: first argument should be a ufl equation (not only a form) or an 'integrands' model` (measured: one of three trial scripts read the `eq` line above as the equation builder).\n2. `DirichletBC` takes (functionSpace, value, subDomain=None) -- there is NO `marker` keyword (TypeError). Measured signature on this install.\n3. A VERTEX'S COORDINATES ARE vertex.geometry.center (or .corner(0)) -- there is no .geometry.point (AttributeError, measured; a run writing the 3-D side died on it). The dof array of a discrete function is u.as_numpy.\n4. A UFL Form HAS NO .copy() (AttributeError, measured). A form is immutable and cheap: build the second one by writing the expression again, e.g. keep the volume load as its own form rather than copying the full one.\n5. `scheme.solve(target=uh)` returns a DICT with keys converged, iterations, linear_iterations, timing -- read info['converged'], never info.converged (AttributeError on dict; one round hit it three times). Measured: a 4x4 Laplace solve returns converged=True with max|u| = 7.768e-02.\n6. Solver verbosity for a captured log: parameters={'linear.verbose': True} on galerkin(...) -- the old 'newton.linear.verbose' spelling is deprecated and warns.\n7. Create functions with a name -- space.interpolate(0.0, name='uh') -- because a plain UFL expression has no .name and downstream I/O that asks for one dies on AttributeError.\n8. FIRST USE COMPILES. 'DUNE-INFO: Compiling Integrands (new)' means dune-fem is JIT-compiling your UFL forms -- minutes on a loaded machine, and again for every new form. Do NOT wrap the run in a short `timeout` and do NOT pipe it into `head`: a PETSc 'Caught signal number 15 Terminate' printed after those lines means the process was killed from OUTSIDE (a timeout or a closed pipe), not that the solver crashed (measured: one run wrapped its participant in `timeout 120`, read the signal-15 message as 'DUNE crashes on every attempt' and gave up with a working install). Run each participant once standalone with a generous timeout so the compiled modules are cached; the coupling iterations then start in seconds.\n9. THE IMPORT LINES, EXACTLY (measured by execution; three of three trial scripts written without them invented `dune.gdt`, `dune.fem.Grid` or `from dune.fem import galerkin`, none of which exist): import json; from pathlib import Path; import numpy as np; from dune.grid import structuredGrid; from dune.fem import assemble; from dune.fem.space import lagrange; from dune.fem.scheme import galerkin; from dune.fem.operator import galerkin as operator_galerkin; from dune.ufl import DirichletBC; from ufl import (TrialFunction, TestFunction, SpatialCoordinate,. `galerkin` lives in dune.fem.scheme, `lagrange` in dune.fem.space, `structuredGrid` in dune.grid, `DirichletBC` and `Constant` in dune.ufl; there is no dune.gdt.\n10. THE GRID CALL, EXACTLY: `gridView = structuredGrid([X0, Y0], [X1, Y1], [NX, NY])` -- lower corner, upper corner, cell counts, in that order (measured: a trial that passed the cell counts first died with `EquidistantOffsetCoordinates(...) Invoked with: array([6., 10.]), ...`).\n11. `abs`, `min`, `max` are NOT importable from ufl in this version (ImportError); the Python built-ins work on UFL expressions, and `ufl.conditional(ufl.lt(a, b), x, y)` is the branch.\n12. A grid entity has no `.index`: use `gridView.indexSet.index(entity)` (or `subIndex(entity, i, codim)` for its vertices); vertex coordinates come from `entity.geometry.center` / `corner(i)`, and the vertex-ordered nodal values of a Lagrange P1 function from `uh.as_numpy` (measured: `e.index` raises AttributeError on the generated Entity type).\n13. IN dune-fem's UFL THE SPACE CARRIES THE DOMAIN: `TrialFunction(space)`, `TestFunction(space)`, `SpatialCoordinate(space)`, and every integrand must contain one of them before `* dx` / `* ds`. Measured in three of three trial scripts: passing the grid gives `LeafGrid has no attribute ufl_domain`, a bare `dx` on a space-free expression gives `This integral is missing an integration domain`, and `space.domain` does not exist (`dimDomain` does).\n14. THE SPACE COUNTS ITS DOFS WITH .size (or len(space)) -- there is no space.dim and no space.dofCoordinates() (both AttributeErrors, measured; two runs writing the 3-D side died on exactly those two). Coordinates come from the grid, not the space: see the mesh access below.\n15. MESH ACCESS, EXACTLY (measured): `for v in gridView.vertices` / `for e in gridView.elements` iterate; `gridView.indexSet.index(v)` numbers a vertex and `gridView.indexSet.subIndex(e, i, 2)` numbers corner i of element e; `e.geometry.corners` is a TUPLE of the corner points (`len()` counts them) and `e.geometry.center` a point. There is no `gridView.entity(i)`, no `gridView.entitySet(...)`, no `gridView.corner(e, j)` and no `geometry.corner(i)` -- each was invented by a trial script and each raises AttributeError/TypeError. A SIMPLEX grid: `from dune.grid import cartesianDomain; from dune.alugrid import aluConformGrid; gridView = aluConformGrid(cartesianDomain([X0, Y0], [X1, Y1], [NX, NY]))` (6 x 10 -> 120 triangles, 77 vertices; `structuredGrid` makes 60 quadrilaterals). On this install a P1 Lagrange dof order equalled the vertex order on both grids, but never rely on it: map through interpolated coordinate fields.\n16. COEFFICIENTS GO IN AS `dune.ufl.Constant(value, name='k')`, never as a bare Python number: `0.0 * u * v * dx` (a zero reaction written as a float) folds to a domainless UFL Zero and dies with `This integral is missing an integration domain` (measured; the same fold hits a zero source).\n17. POWERS ARE `**`: `x[1]^2` is Python's XOR on a UFL expression and dies in as_tensor with `Expecting a tuple of Index objects` (measured).\n18. UFL CONDITIONS DO NOT COMBINE WITH `|` OR `&`: `lt(...) | lt(...)` dies with `unsupported operand type(s) for |: 'LT' and 'LT'` (measured). Build 0/1 indicators with `conditional(lt(abs(x[0] - X0), eps), 1, 0)`, ADD them for a union of edges, and take `1 - ind` for the complement (the outer boundary is `1 - <interface indicator>`); `ufl.Or(a, b)` / `ufl.And(a, b)` also exist. There is NO `SubDomain` in ufl (`from ufl import SubDomain` is an ImportError; two of three trial scripts reached for one) and none is needed: `DirichletBC(space, value, <that 0/1 UFL indicator>)` takes the indicator directly.",
+    "dune": "1. `ufl.Eq` NO LONGER EXISTS in this ufl (ImportError; five hits in one round). The lowercase `ufl.eq` does, and it is ONLY a conditional's test: ufl.conditional(ufl.eq(a, b), val_true, val_false). The equation handed to galerkin is written with Python's `==`: `scheme = galerkin([a == L, dbc], solver='cg')` -- passing `eq(a, L)` or a bare form dies with `ValueError: first argument should be a ufl equation (not only a form) or an 'integrands' model` (measured: one of three trial scripts read the `eq` line above as the equation builder).\n2. `DirichletBC` takes (functionSpace, value, subDomain=None) -- there is NO `marker` keyword (TypeError). Measured signature on this install.\n3. A VERTEX'S COORDINATES ARE vertex.geometry.center (or .corner(0)) -- there is no .geometry.point (AttributeError, measured; a run writing the 3-D side died on it). The dof array of a discrete function is u.as_numpy.\n4. A UFL Form HAS NO .copy() (AttributeError, measured). A form is immutable and cheap: build the second one by writing the expression again, e.g. keep the volume load as its own form rather than copying the full one.\n5. `scheme.solve(target=uh)` returns a DICT with keys converged, iterations, linear_iterations, timing -- read info['converged'], never info.converged (AttributeError on dict; one round hit it three times). Measured: a 4x4 Laplace solve returns converged=True with max|u| = 7.768e-02.\n6. Solver verbosity for a captured log: parameters={'linear.verbose': True} on galerkin(...) -- the old 'newton.linear.verbose' spelling is deprecated and warns.\n7. Create functions with a name -- space.interpolate(0.0, name='uh') -- because a plain UFL expression has no .name and downstream I/O that asks for one dies on AttributeError.\n8. FIRST USE COMPILES. 'DUNE-INFO: Compiling Integrands (new)' means dune-fem is JIT-compiling your UFL forms -- minutes on a loaded machine, and again for every new form. Do NOT wrap the run in a short `timeout` and do NOT pipe it into `head`: a PETSc 'Caught signal number 15 Terminate' printed after those lines means the process was killed from OUTSIDE (a timeout or a closed pipe), not that the solver crashed (measured: one run wrapped its participant in `timeout 120`, read the signal-15 message as 'DUNE crashes on every attempt' and gave up with a working install). Run each participant once standalone with a generous timeout so the compiled modules are cached; the coupling iterations then start in seconds.\n9. THE IMPORT LINES, EXACTLY -- COPY THIS BLOCK, DO NOT RECONSTRUCT IT. Every line below was executed on this install. Writing these by hand is the most expensive mistake made here: across 246 coupled runs on this machine, 141 of them raised an ImportError they had written themselves, 218 times in all, and each one costs a rewrite and a rerun.\n    import json\n    from pathlib import Path\n    import numpy as np\n    from dune.grid import structuredGrid, cartesianDomain\n    from dune.alugrid import aluConformGrid\n    from dune.fem import assemble, integrate\n    from dune.fem.space import lagrange\n    from dune.fem.scheme import galerkin\n    from dune.fem.function import uflFunction, gridFunction\n    from dune.ufl import DirichletBC, Constant\n    from ufl import (TrialFunction, TestFunction, SpatialCoordinate,\n                     FacetNormal, grad, inner, dot, div, dx, ds,\n                     conditional, lt, gt, le, ge, eq, And, Or,\n                     sin, cos, exp, sqrt, pi, as_vector)\n   THE THREE WRONG GUESSES THAT COST THE MOST, in order: `from ufl import abs` (71 times -- abs, min and max are NOT in ufl; Python's own built-ins work on a UFL expression), `from ufl import Eq` (45 -- only the lowercase `eq` exists, and the equation itself is written with Python's `==`), and `from dune.ufl import SpatialCoordinate` (39 -- it is in ufl; dune.ufl holds DirichletBC, Constant and cell, nothing else). Also measured absent: `dune.gdt` entirely, `aluConformGrid` in dune.grid (it is in dune.alugrid), `GridFunction` in dune.fem.function (the callables are `gridFunction` and `uflFunction`), and `SubDomain` in ufl. Of those two, `uflFunction(gridView, name=..., order=..., ufl=<expr>)` is DEPRECATED on this install and warns; the replacement takes its arguments in a different order -- `gridFunction(<expr>, gridView, name, order)`, expression FIRST (measured 2026-09-19).\n10. THE GRID CALL, EXACTLY: `gridView = structuredGrid([X0, Y0], [X1, Y1], [NX, NY])` -- lower corner, upper corner, cell counts, in that order (measured: a trial that passed the cell counts first died with `EquidistantOffsetCoordinates(...) Invoked with: array([6., 10.]), ...`).\n11. `abs`, `min`, `max` are NOT importable from ufl in this version (ImportError); the Python built-ins work on UFL expressions, and `ufl.conditional(ufl.lt(a, b), x, y)` is the branch.\n12. A grid entity has no `.index`: use `gridView.indexSet.index(entity)` (or `subIndex(entity, i, codim)` for its vertices); vertex coordinates come from `entity.geometry.center` / `corner(i)`, and the vertex-ordered nodal values of a Lagrange P1 function from `uh.as_numpy` (measured: `e.index` raises AttributeError on the generated Entity type).\n13. IN dune-fem's UFL THE SPACE CARRIES THE DOMAIN: `TrialFunction(space)`, `TestFunction(space)`, `SpatialCoordinate(space)`, and every integrand must contain one of them before `* dx` / `* ds`. Measured in three of three trial scripts: passing the grid gives `LeafGrid has no attribute ufl_domain`, a bare `dx` on a space-free expression gives `This integral is missing an integration domain`, and `space.domain` does not exist (`dimDomain` does).\n14. THE SPACE COUNTS ITS DOFS WITH .size (or len(space)) -- there is no space.dim and no space.dofCoordinates() (both AttributeErrors, measured; two runs writing the 3-D side died on exactly those two). Coordinates come from the grid, not the space: see the mesh access below.\n15. MESH ACCESS, EXACTLY (measured): `for v in gridView.vertices` / `for e in gridView.elements` iterate; `gridView.indexSet.index(v)` numbers a vertex and `gridView.indexSet.subIndex(e, i, 2)` numbers corner i of element e; `e.geometry.corners` is a TUPLE of the corner points (`len()` counts them) and `e.geometry.center` a point. There is no `gridView.entity(i)`, no `gridView.entitySet(...)`, no `gridView.corner(e, j)` and no `geometry.corner(i)` -- each was invented by a trial script and each raises AttributeError/TypeError. A SIMPLEX grid: `from dune.grid import cartesianDomain; from dune.alugrid import aluConformGrid; gridView = aluConformGrid(cartesianDomain([X0, Y0], [X1, Y1], [NX, NY]))` (6 x 10 -> 120 triangles, 77 vertices; `structuredGrid` makes 60 quadrilaterals). On this install a P1 Lagrange dof order equalled the vertex order on both grids, but never rely on it: map through interpolated coordinate fields.\n16. COEFFICIENTS GO IN AS `dune.ufl.Constant(value, name='k')`, never as a bare Python number: `0.0 * u * v * dx` (a zero reaction written as a float) folds to a domainless UFL Zero and dies with `This integral is missing an integration domain` (measured; the same fold hits a zero source).\n17. POWERS ARE `**`: `x[1]^2` is Python's XOR on a UFL expression and dies in as_tensor with `Expecting a tuple of Index objects` (measured).\n18. UFL CONDITIONS DO NOT COMBINE WITH `|` OR `&`: `lt(...) | lt(...)` dies with `unsupported operand type(s) for |: 'LT' and 'LT'` (measured). Build 0/1 indicators with `conditional(lt(abs(x[0] - X0), eps), 1, 0)`, ADD them for a union of edges, and take `1 - ind` for the complement (the outer boundary is `1 - <interface indicator>`); `ufl.Or(a, b)` / `ufl.And(a, b)` also exist. There is NO `SubDomain` in ufl (`from ufl import SubDomain` is an ImportError; two of three trial scripts reached for one) and none is needed: `DirichletBC(space, value, <that 0/1 UFL indicator>)` takes the indicator directly.",
     # Every line measured by execution on this install (FEBio 4.12,
     # febio4 binary) on 2026-09-04. repr-generated literal.
-    "febio": '1. READING RESULTS BACK IS ONE DECK LINE, and a solve that is never read back counts for nothing. Put inside <Output><logfile>:\n       <node_data data="x;y;z;ux;uy;uz" delim="," file="nodal_out.csv"/>\n   FEBio then writes one block PER TIME STEP, each headed *Step/*Time/*Data lines (measured: 51 blocks for 50 steps, header \'*Data  = x;y;z;ux;uy;uz\'); parse the LAST block for the final state and interpolate those nodal values at your probe points (scipy LinearNDInterpolator on the coordinate columns works). Runs that reached NORMAL TERMINATION and still delivered nothing all skipped this line.\n2. THE VISCOELASTIC WRAPPER FAMILY MUST MATCH THE NESTED ELASTIC\'S FAMILY (measured on FEBio 4.12): type="uncoupled viscoelastic" REFUSES a coupled child like isotropic elastic -- the error says \'Component ... needs to have property "elastic" defined\' even though <elastic> is present, because its FAMILY does not fit the slot. The coupled wrapper type="viscoelastic" accepts <elastic type="isotropic elastic"> (E, v) and runs to NORMAL TERMINATION. Uncoupled wrappers take uncoupled children (Mooney-Rivlin with k, etc.).\n3. \'negative jacobians detected\' during a solve is usually NOT the mesh: a hex8 grid whose first element has positive centroid jacobian can still invert under too-large load steps or a too-stiff/soft material pairing. Before rebuilding the mesh, halve the step (<time_steps> up, <step_size> down) and re-check the material family pairing of fact 2.\n4. FEBio prints its banner and \'N O R M A L   T E R M I N A T I O N\' letter-spaced -- grep for \'N O R M A L\', not \'NORMAL\'.',
+    "febio": '1. READING RESULTS BACK IS ONE DECK LINE, and a solve that is never read back is no result. Put inside <Output><logfile>:\n       <node_data data="x;y;z;ux;uy;uz" delim="," file="nodal_out.csv"/>\n   FEBio then writes one block PER TIME STEP, each headed *Step/*Time/*Data lines (measured: 51 blocks for 50 steps, header \'*Data  = x;y;z;ux;uy;uz\'); parse the LAST block for the final state and interpolate those nodal values at your probe points (scipy LinearNDInterpolator on the coordinate columns works). Runs that reached NORMAL TERMINATION and still delivered nothing all skipped this line.\n2. THE VISCOELASTIC WRAPPER FAMILY MUST MATCH THE NESTED ELASTIC\'S FAMILY (measured on FEBio 4.12): type="uncoupled viscoelastic" REFUSES a coupled child like isotropic elastic -- the error says \'Component ... needs to have property "elastic" defined\' even though <elastic> is present, because its FAMILY does not fit the slot. The coupled wrapper type="viscoelastic" accepts <elastic type="isotropic elastic"> (E, v) and runs to NORMAL TERMINATION. Uncoupled wrappers take uncoupled children (Mooney-Rivlin with k, etc.).\n3. \'negative jacobians detected\' during a solve is usually NOT the mesh: a hex8 grid whose first element has positive centroid jacobian can still invert under too-large load steps or a too-stiff/soft material pairing. Before rebuilding the mesh, halve the step (<time_steps> up, <step_size> down) and re-check the material family pairing of fact 2.\n4. FEBio prints its banner and \'N O R M A L   T E R M I N A T I O N\' letter-spaced -- grep for \'N O R M A L\', not \'NORMAL\'.',
     # Every line measured by execution on this install (NGSolve 6.2.2604)
     # on 2026-09-04. repr-generated literal.
-    "ngsolve": "1. NEVER EVALUATE A COMPOUND-SPACE GridFunction DIRECTLY. On a product space (H1*H1, mixed), gfu(mesh(x,y)) either raises 'CompoundFESpace does not have an evaluator for VOL!' or -- measured, worse -- silently returns 0.0 while the field is nonzero. Evaluate the component: gfu.components[i](mesh(x,y)) (measured 0.2524 at the same point where the direct call returned 0.0).\n2. FORMS DO NOT SUPPORT -= (TypeError: unsupported operand). Subtract by adding the negated term at definition: a += (-1) * u * v * dx. Same for LinearForm.\n3. grad()/Grad() WORKS ON PROXIES AND GridFunctions, NOT ON ASSEMBLED CoefficientFunctions -- 'Operator grad not overloaded for CF ngfem::VectorialCoefficientFunction' (measured). Take grad(gfu.components[i]) and assemble what you need from those, or differentiate the symbolic expression BEFORE wrapping it in CoefficientFunction.\n4. Verbosity for a captured log: ngsolve.ngsglobals.msg_level = 3, or solvers.CG(..., printrates=True); NGSolve is otherwise quiet on success.\n5. THE 2-D GEOMETRY IS BUILT WITH netgen's SplineGeometry, AND IT HAS NEITHER AddVertex NOR AddRect (AttributeError, measured -- two runs died on it). A rectangle is one call: geo.AddRectangle((X0, Y0), (X1, Y1), bcs=('bottom', 'right', 'top', 'left')) -- FOUR NAMES IN THAT EDGE ORDER, which is what later lets you write ds('interface') and H1(..., dirichlet='outer'); mesh with Mesh(geo.GenerateMesh(maxh=h)) and read the names back with mesh.GetBoundaries(). For a shape that is not a rectangle use AddPoint/AppendPoint plus Append/AddSegment -- and note both point calls take SEPARATE coordinates, AddPoint(x, y): handing them a tuple raises TypeError: AppendPoint(): incompatible function arguments (measured). Vertex coordinates come back as np.array([v.point for v in mesh.vertices]).\n6. THE DOF OF A VERTEX COMES FROM THE SPACE, NOT FROM THE VERTEX. A MeshNode carries .nr (its number) and .point (its coordinates) and NOTHING ELSE you want here -- it has no .ndof and no .index (both AttributeErrors, measured), and the space has no fes.Dofs() either. So the two calls you need are v.point for a vertex's coordinates and fes.GetDofNrs(NodeId(VERTEX, v.nr))[0] for its dof; WHICH vertices are yours to choose. (For H1(order=1) that dof map is the identity on this install, measured over 87 vertices, but read it with GetDofNrs rather than assuming it for a higher order.) Mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges -- mesh.Faces() and mesh.Vertices() are both AttributeErrors -- and a vertex's coordinates are v.point, not v.x. Boundary names come back from mesh.GetBoundaries(); mesh.Boundaries('interface') is a Region and a Region is NOT ITERABLE (TypeError, measured): iterate mesh.Boundaries('interface').Elements(), or take its .Mask() BitArray.\n7. A LinearForm MUST NOT CONTAIN THE TRIAL FUNCTION. Putting u * v * dx into one stops netgen with NgException: In MakeLinearFormIntegrator: must not have TrialFunction (measured) -- every term carrying u belongs in the BilinearForm, and the LinearForm carries only v.\n8. THE VECTORS ARE BaseVector, NOT ARRAYS AND NOT FORMS. A LinearForm's vector is f.vec and a BaseVector has no .vec of its own (AttributeError, measured -- a worker wrote f_vol.vec.vec). You cannot index one with a BitArray either (TypeError: __getitem__(): incompatible function arguments): take numbers out with v.FV().NumPy() or np.array(v). Assign THROUGH .data, never by rebinding: `v.data = <expression>`, with a fresh vector from v.CreateVector(). Matrix-vector products read a.mat * v, and a constrained inverse is a.mat.Inverse(<free dofs>, inverse='sparsecholesky'). All of these shapes measured on this install; what you assemble into a and f, and how you constrain the solve, are yours.\n9. `inverse` IS A KEYWORD OF Inverse, NOT AN IMPORT. The solve is a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky'); adding `inverse` to the `from ngsolve import (...)` list raises ImportError: cannot import name 'inverse' from 'ngsolve' (measured -- a worker edited it into the served import line).\n10. A PYTHON FUNCTION IS NOT A CoefficientFunction. CoefficientFunction(f) for a def/lambda is a TypeError ('incompatible constructor arguments', measured), and calling a NumPy-written source on ngsolve's symbolic x, y fails or -- np.zeros_like(x) -- silently returns a 0-d object array. Sample it at the mesh vertices instead (np.array([v.point for v in mesh.vertices])) into a P1 GridFunction on your space (gf.vec.FV().NumPy()[vertex_dofs] = f(vx, vy)); a GridFunction IS a CoefficientFunction and integrates as gf * v * dx (the P1 interpolant of the source, O(h^2) like the discretisation itself).",
+    "ngsolve": "1. NEVER EVALUATE A COMPOUND-SPACE GridFunction DIRECTLY. On a product space (H1*H1, mixed), gfu(mesh(x,y)) either raises 'CompoundFESpace does not have an evaluator for VOL!' or -- measured, worse -- silently returns 0.0 while the field is nonzero. Evaluate the component: gfu.components[i](mesh(x,y)) (measured 0.2524 at the same point where the direct call returned 0.0).\n2. FORMS DO NOT SUPPORT -= (TypeError: unsupported operand). Subtract by adding the negated term at definition: a += (-1) * u * v * dx. Same for LinearForm.\n3. grad()/Grad() WORKS ON PROXIES AND GridFunctions, NOT ON ASSEMBLED CoefficientFunctions -- 'Operator grad not overloaded for CF ngfem::VectorialCoefficientFunction' (measured). Take grad(gfu.components[i]) and assemble what you need from those, or differentiate the symbolic expression BEFORE wrapping it in CoefficientFunction.\n4. Verbosity for a captured log: ngsolve.ngsglobals.msg_level = 3, or solvers.CG(..., printrates=True); NGSolve is otherwise quiet on success.\n5. THE 2-D GEOMETRY IS BUILT WITH netgen's SplineGeometry, AND IT HAS NEITHER AddVertex NOR AddRect (AttributeError, measured). A rectangle is one call: geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(<bottom>, <right>, <top>, <left>)) -- FOUR BOUNDARY NAMES OF YOUR CHOOSING, IN THAT EDGE ORDER. ds('<name>') and H1(..., dirichlet='<name>') select by exactly those names, and a ds() over a name the mesh does not carry integrates over NOTHING with no error; several names are joined with |, as one regular expression, dirichlet='<a>|<b>': joined with commas they match no boundary and hold no dof, with no error (measured: 0 of 79 dofs held, against 24 with |); mesh with Mesh(geo.GenerateMesh(maxh=h)) and read the names back with mesh.GetBoundaries(). For a shape that is not a rectangle use AddPoint/AppendPoint plus Append/AddSegment -- and note both point calls take SEPARATE coordinates, AddPoint(x, y): handing them a tuple raises TypeError: AppendPoint(): incompatible function arguments (measured). Vertex coordinates come back as np.array([vert.point for vert in mesh.vertices]) -- a vertex of its own name: v is the test function.\n6. THE DOF OF A VERTEX COMES FROM THE SPACE, NOT FROM THE VERTEX. A MeshNode carries .nr (its number) and .point (its coordinates) and NOTHING ELSE you want here -- it has no .ndof and no .index (both AttributeErrors, measured), and the space has no fes.Dofs() either. So the two calls you need are vert.point for a vertex's coordinates and fes.GetDofNrs(NodeId(VERTEX, vert.nr))[0] for its dof; WHICH vertices are yours to choose. (For H1(order=1) that dof map is the identity on this install, measured over 87 vertices, but read it with GetDofNrs rather than assuming it for a higher order.) Mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges -- mesh.Faces() and mesh.Vertices() are both AttributeErrors -- and a vertex's coordinates are vert.point, not vert.x. Boundary names come back from mesh.GetBoundaries(); mesh.Boundaries('interface') is a Region and a Region is NOT ITERABLE (TypeError, measured): iterate mesh.Boundaries('interface').Elements(), or take its .Mask() BitArray. A BitArray counts its set bits with NumSet() and has no Count (AttributeError, measured).\n7. A LinearForm MUST NOT CONTAIN THE TRIAL FUNCTION. Putting u * v * dx into one stops netgen with NgException: In MakeLinearFormIntegrator: must not have TrialFunction (measured) -- every term carrying u belongs in the BilinearForm, and the LinearForm carries only v.\n8. THE VECTORS ARE BaseVector, NOT ARRAYS AND NOT FORMS. A LinearForm's vector is f.vec and a BaseVector has no .vec of its own (AttributeError, measured -- a worker wrote f_vol.vec.vec). You cannot index one with a BitArray either (TypeError: __getitem__(): incompatible function arguments): take numbers out with vec.FV().NumPy() or np.array(vec). Assign THROUGH .data, never by rebinding: `vec.data = <expression>`, with a fresh vector from vec.CreateVector(). It is lowercase: reading vec.Data is an AttributeError, and vec.Data = ... raises nothing and leaves the vector as it was (measured). Matrix-vector products read a.mat * vec, and a constrained inverse is a.mat.Inverse(<free dofs>, inverse='sparsecholesky'). All of these shapes measured on this install; what you assemble into a and f, and how you constrain the solve, are yours.\n9. `inverse` IS A KEYWORD OF Inverse, NOT AN IMPORT. The solve is a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky'); adding `inverse` to the `from ngsolve import (...)` list raises ImportError: cannot import name 'inverse' from 'ngsolve' (measured -- a worker edited it into the served import line).\n10. A PYTHON FUNCTION IS NOT A CoefficientFunction. CoefficientFunction(f) for a def/lambda is a TypeError ('incompatible constructor arguments', measured), and calling a NumPy-written source on ngsolve's symbolic x, y fails or -- np.zeros_like(x) -- silently returns a 0-d object array. Sample it at the mesh vertices instead (np.array([vert.point for vert in mesh.vertices])) into a P1 GridFunction on your space (gf.vec.FV().NumPy()[vertex_dofs] = f(vx, vy)); a GridFunction IS a CoefficientFunction and integrates as gf * v * dx, v the test function (the P1 interpolant of the source, O(h^2) like the discretisation itself).",
     # deal.II facts measured by execution on the coupled elasticity
-    # walk of 2026-09-07 (deal.II 9.8.0-pre, ~/dealii/build).
-    "dealii": '1. deal.II prints NOTHING by default: a run whose log must carry the code own output needs BOTH deallog.depth_console(2); AND a SolverControl ctl(max_it, tol, true, true); (log_history, log_result) -- depth_console alone prints nothing. Then the console carries DEAL:cg lines per iteration.\n2. Print the DOF count yourself, on whatever line your task asks for: std::cout << "DOF count = " << dof_handler.n_dofs() << std::endl; -- nothing else emits it.\n3. ASSEMBLE WITH FEValues, NOT FEEvaluation. FEValues<2> fe_values(fe, QGauss<2>(degree + 1), update_values | update_gradients | update_quadrature_points | update_JxW_values); then for (const auto &cell : dof_handler.active_cell_iterators()) { fe_values.reinit(cell); ... fe_values.shape_grad(i, q) * fe_values.shape_grad(j, q) * fe_values.JxW(q) ... }. FEEvaluation is the MATRIX-FREE class with a different contract entirely, and using it this way fails to COMPILE, deep inside the deal.II headers -- a run lost its build to "template argument deduction/substitution failed" in synchronous_iterator.h that way, which reads like a compiler problem and is not one (measured on this install). READ THE FIRST ERROR AND CHECK YOUR CONSTRUCTOR, NOT THE COMPILER: a second worker put the FEValues arguments in the wrong order and got a page of template errors ending in "request for member unsubscribe" inside observer_pointer.h, with nothing pointing at its own file.\n4. Evaluate the solution at arbitrary (off-node) points with VectorTools::point_value(dof_handler, solution, Point<2>(x, y)) -- nearest-vertex lookup is the export defect that turns a converged solve into a wrong answer.\n5. BUILD IT WITH CMAKE, AND THESE SIX LINES ARE THE WHOLE CMakeLists (re-measured 2026-09-14 on this install: configures and builds first try, ~20 s):\n       cmake_minimum_required(VERSION 3.13)\n       find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR})\n       deal_ii_initialize_cached_variables()\n       project(<name>)\n       add_executable(<name> <name>.cc)\n       deal_ii_setup_target(<name>)\n   then `cmake -S <dir> -B build -DDEAL_II_DIR=<the deal.II BUILD or INSTALL tree> -DCMAKE_BUILD_TYPE=Release && make -C build -j8`. Check the cmake line that reads "Using the deal.II-<version> directory found at": pointing DEAL_II_DIR at a SOURCE checkout silently falls back to a system deal.II and the build then fails on things like a missing mpi.h, which looks like a fault in the program you wrote and is not.',
+    # walk of 2026-09-07 (deal.II 9.8.0-pre, ~/dealii/build). Re-measured and
+    # extended 2026-09-29 on the same Release-only build: every right call below
+    # compiled and ran in one probe program, and every wrong one was compiled on
+    # its own, its first compiler error being the message quoted. They are the
+    # calls the compile logs of coupled deal.II sides died on most often. Two
+    # causes this entry used to give were NOT reproduced and are gone: swapping
+    # the FEValues arguments gives "no matching function for call to
+    # FEValues<2, 2>::FEValues(QGauss<2>, FE_Q<2>&, UpdateFlags)", not the
+    # "unsubscribe" error (PreconditionSSOR<double> gives that, fact 6), and
+    # FEEvaluation built like FEValues gives "no matching function" too.
+    "dealii": (
+        '1. deal.II prints NOTHING by default: a run whose log must carry the code own output needs BOTH deallog.depth_console(2); AND a SolverControl ctl(max_it, tol, true, true); (log_history, log_result) -- depth_console alone prints nothing. Then the console carries DEAL:cg lines per iteration. A direct solve prints none; the served program therefore opens its console with the library\'s own line, its version and git revision from its headers through deallog (DEAL::deal.II <version>, git revision <sha>).\n'
+        '2. Print the DOF count yourself, on whatever line your task asks for: std::cout << "DOF count = " << dof_handler.n_dofs() << std::endl; -- nothing else emits it.\n'
+        '3. FEValues AND THE FLAGS ITS LOOP READS. FEValues<2>(mapping, fe, quadrature, flags) evaluates the shape functions on one cell after its reinit(cell), and FEFaceValues<2> does the same on one face (fact 9). What a loop may read is what the flags asked for: shape_value(i, q) needs update_values, shape_grad(i, q) (a Tensor<1, 2>) update_gradients, quadrature_point(q) update_quadrature_points, JxW(q) update_JxW_values. A finite element vector\'s values at the quadrature points of the cell last given to reinit are get_function_values(vector, values), values a std::vector<double> of n_quadrature_points entries (it needs update_values), and its gradients are get_function_gradients(vector, gradients), gradients a std::vector<Tensor<1, 2>> (it needs update_gradients). THIS deal.II IS A RELEASE BUILD AND ASSERTS NOTHING: quadrature_point(q) without update_quadrature_points (or shape_value without update_values) exits with code 139, a segfault, and no message. To make it speak, add target_compile_definitions(<name> PRIVATE DEBUG) after deal_ii_setup_target and rebuild: the same run aborts with "An error occurred in line <2396> of file <.../fe_values_base.h>" and "requires the <update_quadrature_points> flag". A get_dof_indices vector left unsized segfaults with and without DEBUG: size it fe.n_dofs_per_cell(). FEEvaluation is the matrix-free class; built like FEValues it is "no matching function for call to".\n'
+        '4. Evaluate the solution at arbitrary (off-node) points with VectorTools::point_value(dof_handler, solution, Point<2>(x, y)) -- nearest-vertex lookup is the export defect that turns a converged solve into a wrong answer.\n'
+        '5. BUILD IT WITH CMAKE, AND THESE SIX LINES ARE THE WHOLE CMakeLists (re-measured 2026-09-14 on this install: configures and builds first try, ~20 s):\n'
+        '       cmake_minimum_required(VERSION 3.13)\n'
+        '       find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR})\n'
+        '       deal_ii_initialize_cached_variables()\n'
+        '       project(<name>)\n'
+        '       add_executable(<name> <name>.cc)\n'
+        '       deal_ii_setup_target(<name>)\n'
+        '   then `cmake -S <dir> -B build -DDEAL_II_DIR=<the tree discover names for deal.II> -DCMAKE_BUILD_TYPE=Release && make -C build`. A COMPILE THAT READS /usr/include/deal.II IS BUILDING AGAINST THE SYSTEM PACKAGE (9.1.1 on the install this was measured on), whatever cmake printed: without HINTS, find_package ignores -DDEAL_II_DIR and says "Using the deal.II-9.1.1 installation found at /usr"; and target_link_libraries(<name> dealii::dealii) in place of deal_ii_setup_target, with no CMAKE_BUILD_TYPE, prints "Using the deal.II-9.8.0-pre build directory" and then fails in "/usr/include/deal.II/base/config.h:439: fatal error: mpi.h". static_assert(DEAL_II_VERSION_GTE(9, 5, 0), "...") after #include <deal.II/base/config.h> stops that build at its first line.\n'
+        '6. READ A TENSOR WITH BRACKETS, MULTIPLY WITH vmult, AND GIVE THE SOLVERS THEIR TYPES. g[0] and K[i][j]: g(0) is "no match for call to \'(dealii::Tensor<1, 2>) (int)\'", and K = {{a, b}, {c, d}} "could not convert"; fill K[i][j] one entry at a time, or Tensor<2, 2> K(a) from const double a[2][2]. A.vmult(dst, src) multiplies a SparseMatrix: Vector has no vmult, and A * u is "no match for \'operator*\'". SolverCG takes the VECTOR type as its template argument, SolverCG<Vector<double>>, and is built from a SolverControl. PreconditionSSOR takes the MATRIX type, PreconditionSSOR<SparseMatrix<double>>, is built empty, and its initialize(matrix, relaxation) sets it up. SolverCG::solve takes (matrix, x, b, preconditioner). PreconditionSSOR<double> ends in "request for member \'unsubscribe\'" (its first error is "static assertion failed: This class can only be used if the first template argument is a class derived from \'EnableObserverPointer\'"), SolverCG<double> in "\'double\' is not a class, struct, or union type", ssor(A, 1.2) in "no matching function". The iteration count is control.last_step().\n'
+        '7. AN OVERRIDE OF Function<2>::value MUST RESTATE THE DEFAULT: double value(const Point<2> &p, const unsigned int component = 0) const override. Without "= 0", f.value(p) is "no matching function for call to". A lambda becomes a Function as ScalarFunctionFromFunctionObject<2>([&](const Point<2> &p) { return ...; }). Catch with catch (std::exception &exc): ExceptionHandler "does not name a type".\n'
+        '8. MESH, BOUNDARY IDS, DOFS. GridGenerator::subdivided_hyper_rectangle(tria, std::vector<unsigned int>{nx, ny}, Point<2>(x0, y0), Point<2>(x1, y1), colorize); nx and ny as two arguments is "no matching function". colorize = true (here and in hyper_rectangle) gives id 0 on x = x0, 1 on x = x1, 2 on y = y0, 3 on y = y1; false leaves every face at 0. for (const auto &face : cell->face_iterators()) if (face->at_boundary()) with face->boundary_id(), face->set_boundary_id(id), face->center() (boundary_indicator is not a member). A dof\'s position: DoFTools::map_dofs_to_support_points(mapping, dof_handler, points), the mapping required and points a std::vector<Point<2>> of n_dofs entries; a std::map keyed by Point<2> does not compile ("no match for \'operator<\'"). cell->vertex_index(v) is a VERTEX number, not a dof (they differed on 57 of 64 cell corners measured): the dof is cell->vertex_dof_index(v, 0). fe_values.dof_indices() runs 0..dofs_per_cell-1, LOCAL numbers: the global ones are cell->get_dof_indices(indices).\n'
+        '9. FACE INTEGRALS. FEFaceValues<2>(mapping, fe, face quadrature, flags), the face quadrature a QGauss<1>, takes the flags its loop reads (update_values, update_quadrature_points, update_normal_vectors, update_JxW_values): without the flags argument it is "no matching function". Its reinit takes the cell and a face number, reinit(cell, face_no), and a cell\'s face numbers are cell->face_indices(), while cell->face(face_no)->at_boundary() and ->boundary_id() say where that face is. shape_value(i, q), quadrature_point(q), normal_vector(q) and JxW(q) all take (q): quadrature_points and normal_vectors are not members, and fv[0] is "ambiguous overload for \'operator[]\'". A DoFHandler<2> is built on the triangulation and then given distribute_dofs(fe) (it has no initialize).\n'
+        '10. MatrixTools::apply_boundary_values(boundary_values, matrix, solution, right_hand_side) EMPTIES THE HELD ROWS of the matrix it is given down to the diagonal (measured: 2 off-diagonal entries in a held row before, 0 after), and AffineConstraints::distribute_local_to_global does the same to constrained rows. A consistent flux recovery r = A u - b reads exactly those rows, so keep A as assembled and hand such a call a copy: a SparseMatrix<double> built on the same SparsityPattern and filled by copy_from(A). A SparseMatrix copy-constructed from A does not copy it: deal.II leaves it EMPTY, and a library call that uses it (apply_boundary_values, condense, a direct solver\'s initialize) segfaults with no message, with DEBUG on and off (DEBUG in a program turns on the checks in deal.II\'s headers, not the ones compiled into its library, measured). SparseDirectUMFPACK (lac/sparse_direct.h) is a direct solver: its initialize(matrix) factorizes, and its vmult(x, b) writes the solution of matrix x = b into x. AffineConstraints<double> (ConstraintMatrix is gone): add_line(i) then set_inhomogeneity(i, v), or add_constraint(i, {}, v); VectorTools::interpolate_boundary_values(dof_handler, id, function, constraints); close() before use; after the solve, constraints.distribute(u), which takes the solution vector: handed a SparseMatrix it compiles and fails to LINK (undefined reference to ... distribute<dealii::SparseMatrix<double> >).\n'
+        '11. HEADERS THAT DO NOT EXIST in this deal.II ("No such file or directory"): deal.II/base/deallog.h (deallog is in base/logstream.h), deal.II/lac/precondition_relaxation.h (lac/precondition.h), deal.II/base/affine_constraints.h (lac/affine_constraints.h), deal.II/numerics/transpose_copy.h (none), deal.II/fe/fe_face_values.h (FEFaceValues is in fe/fe_values.h), deal.II/lac/sparse_direct_umfpack.h (lac/sparse_direct.h), deal.II/numerics/affine_constraints.h (lac/affine_constraints.h), deal.II/base/vector_tools.h and deal.II/lac/vector_tools.h (numerics/vector_tools.h), deal.II/grid/boundary_descriptor.h (none). DynamicSparsityPattern needs lac/dynamic_sparsity_pattern.h, QGauss base/quadrature_lib.h, MappingQ fe/mapping_q.h: without them, "incomplete type" or "was not declared".\n'
+        '12. A TWO-COMPONENT FIELD (a displacement) is FESystem<2> fe(FE_Q<2>(1), 2) (fe/fe_system.h). fe.n_dofs_per_cell() counts BOTH components, 8 on a degree-1 cell, and the component of local dof i is fe.system_to_component_index(i).first: a cell matrix is n_dofs_per_cell square, and an index i*2+d beyond it is written past the matrix without a word in this Release build (the heap is damaged and the run dies later, "malloc(): corrupted top size" or the like; with DEBUG on it stops at the write, "Index 8 is not in the half-open range [0,8)"). A class member FESystem is built in the constructor\'s initializer list, fe(FE_Q<2>(1), 2): left to its default constructor, or assigned afterwards, it is "use of deleted function". FEValuesExtractors::Vector disp(0) reads both components of shape function i: fe_values[disp].value(i, q) is a Tensor<1, 2>, fe_values[disp].symmetric_gradient(i, q) a SymmetricTensor<2, 2> (base/symmetric_tensor.h), fe_values[disp].divergence(i, q) a double, and scalar_product(s, e) contracts two SymmetricTensor<2, 2>; FEValues and FEFaceValues themselves have no value or gradient member ("has no member named"). A Function<2> of two components hands 2 to its base, Function<2>(2), and overrides value(p, component); interpolate_boundary_values(mapping, dof_handler, id, function, boundary_values) then holds both components, and fe.component_mask(FEValuesExtractors::Scalar(c)) as one more argument holds component c alone. A ComponentMask is ComponentMask(2, true) or that component_mask, and an entry changes through set(c, value): ComponentMask(2) is "no matching function", and mask[c] = true does not compile.'),
     # SPARTA facts measured by execution on this install (SPARTA 24 Sep 2025,
     # {SPARTA_BINARY}) on 2026-09-14, with
     # the two deck traps re-verified against the installed source. SPARTA also
@@ -2346,7 +3361,7 @@ _DECIDING_FACTS = {
     "sparta": "1. IT IS A TEXT-DECK BINARY: `spa_serial -in <deck>` run in the deck's directory. It prints its own banner (`SPARTA (24 Sep 2025)`), the grid/particle setup and the `Step CPU Np` stats table to STDOUT, and writes the same to `log.sparta` in the working directory. `-log none` suppresses the FILE, not the console; `stats N` sets how often the table prints (measured).\n"
               "2. A `fix ave/surf` WITH ONE VALUE IS A PER-SURF VECTOR, so the dump must reference it as `f_1`, NOT `f_1[1]`. The indexed form stops the run with `Dump surf fix does not compute per-surf array` (src/dump_surf.cpp, the `argindex[i] > 0 && size_per_surf_cols == 0` branch, read on this install).\n"
               "3. NO surf_collide STYLE TAKES A PRESCRIBED HEAT FLUX. The nine installed styles are adiabatic, cll, diffuse, impulsive, piston, specular, td, transparent and vanish; all four thermal ones prescribe a WALL TEMPERATURE. A flux can only be imposed indirectly, through `fix surf/temp`, which turns a per-surf energy flux into the wall temperature it implies -- and SPARTA's own doc for it states that it `does not check that the specified compute/fix calculates an energy flux`, so it will accept any per-surf quantity you hand it (doc/fix_surf_temp.html on this install).\n"
-              "4. couple() STAGES THE DATA FILES YOUR DECK NAMES. A deck in the participant's work_dir is scanned for species / collide vss / read_surf / read_grid / react references and each file is copied in, searching the participant's data_dir and data_files parents FIRST, then SPARTA_DATA_DIR, then the SPARTA distribution (measured on this install: in.gas naming ar.species, ar.vss and circle.surf staged all three, two from the distribution data dir and one from an examples dir). A STANDALONE run before you couple stages nothing -- put the files beside the deck yourself for that one.\n"
+              "4. couple() COPIES THE FILES A PARTICIPANT LISTS IN data_files (absolute paths) into its work_dir before the first iteration, and stops before any iteration when one is missing; it does not read the deck for file names (measured on this install: a deck naming a file the participant did not list was left without it). SPARTA opens every file a deck names in the directory it runs in, so a standalone run needs the files there: the served contract copies its SURF_FILE, SPECIES and VSS from DATA_DIR, or from the SPARTA distribution's data directory, when they are missing.\n"
               "5. THE OUTPUT IS A MONTE-CARLO ESTIMATE, BUT IT IS REPRODUCIBLE: with the same `seed` and the same deck, repeat runs give the identical particle history (measured: four runs, identical Np at every stats step). A fixed-point iteration against a DSMC side therefore converges on the sampling noise you chose, not on noise that moves under you -- lengthen the averaging window (`fix ave/surf` over more steps) rather than tightening the coupling tolerance.",
     # scikit-fem facts measured by execution on this install (skfem 12.0.1,
     # {VENV}) on 2026-09-14, after
@@ -2373,15 +3388,14 @@ _DECIDING_FACTS = {
         "2. CONDUCTIVITY, DENSITY, SPECIFIC_HEAT and HEAT_FLUX are read "
         "NODALLY through ConvectionDiffusionSettings, NOT from Properties. "
         "Setting conductivity only on Properties gives a singular system "
-        "(measured: nodal 999 + Properties 1 -> 999). THE SAME ROUTE IS THE ONE "
-        "THAT WORKS IN 3-D: with LaplacianElement3D4N, "
-        "settings.SetVolumeSourceVariable(KM.HEAT_FLUX) and HEAT_FLUX set on every NODE, a "
-        "constant source of 2 on an 8x8x8 box with every outer face pinned at 0 gives a "
-        "recovered interface flux of 0.22 to 0.44 and no warning (measured 2026-09-14, after a "
-        "run reported that the 3-D element ignores the source and zeroes the RHS). If you see "
-        "that, the source is not reaching the nodes: check HEAT_FLUX is in "
-        "AddNodalSolutionStepVariable BEFORE the mesh is built, and that you set it per node "
-        "rather than on Properties.\n"
+        "(measured: nodal 999 + Properties 1 -> 999). The same route works in 3-D with "
+        "LaplacianElement3D4N (measured 2026-09-14). 'ATTENTION! setting the RHS to zero!' means "
+        "the assembled right-hand side is exactly zero: Kratos skipped the solve and the field "
+        "keeps its start values. Measured: all-zero data prints it (no source on the nodes, every "
+        "held value zero); under a nonzero source, so does a hex split with flat tetrahedra (NaN "
+        "fluxes) or with mixed signs (a finite, wrong field). Test the mesh first (check_tets(mp) "
+        "in the served 3-D contract), then the source: HEAT_FLUX in AddNodalSolutionStepVariable "
+        "BEFORE the mesh is built, set per node.\n"
         "3. The reaction-carrying DOF overload is `AddDof(var, reaction, mp)`; "
         "there is no AddDofWithReaction. Omitting the reaction and then asking "
         "the strategy for reactions aborts in EVERY worker thread.\n"
@@ -2392,9 +3406,9 @@ _DECIDING_FACTS = {
         "           mp.CreateNewCondition(\"ThermalFace2D2N\", c + 1,\n"
         "                                 [iface[c] + 1, iface[c+1] + 1], "
         "prop)\n"
-        "   Measured on one mesh: zero flux -> max|T| 2.307291e-03; flux on "
-        "nodes with no condition -> 2.307291e-03, BIT-IDENTICAL; flux with "
-        "conditions -> 3.605675e-03. FluxCondition2D2N works too. Two real "
+        "   Measured on one mesh: flux on nodes with no condition gives the "
+        "zero-flux field BIT-IDENTICALLY; with the conditions the flux is "
+        "applied. FluxCondition2D2N works too. Two real "
         "runs died here, reporting the no-flux answer with their "
         "interface field matching to 0.000e+00, and a third quoted this very "
         "paragraph back in its give-up note without ever adding the line.\n"
@@ -2466,12 +3480,95 @@ _DECIDING_FACTS["scikitfem"] = _DECIDING_FACTS["skfem"]
 _DECIDING_FACTS["deal.ii"] = _DECIDING_FACTS["dealii"]
 _DECIDING_FACTS["4c"] = _DECIDING_FACTS["fourc"]
 
+# THE FACTS A FLUID-STRUCTURE SIDE NEEDS, served by the fluid-structure door (physics='fsi') after the
+# code's own. Measured on a fluid-structure round: every FEniCSx fluid side spent 14-22 minutes in
+# run-fix loops on dolfinx calls none of the served facts named -- tabulating a mixed space (5 crashes),
+# a zero right-hand side (8), ufl.Constant given a value (7), NonlinearProblem (about 10), a mesh moved
+# through dolfinx.mesh.move (2). They ride here, not in the code's general block, because that block is
+# served with every reply of the code and each character added there pushes the reply's own prose past
+# its cap (measured: 3k added there cut the per-side naming rule from the FEniCSx door's first reply).
+# Each fact was run in that code's own interpreter on this install.
+_FSI_FACTS = {
+    "fenics": (
+        "\nFOR A FLUID SIDE (measured on this install, dolfinx 0.10):"
+        "\n16. A BOUNDARY CONDITION ON ONE BLOCK OF A MIXED SPACE takes a Function AND the sub-space (measured on "
+        "a Taylor-Hood velocity block, where it held a parabolic profile to round-off): V0, _ = W.sub(0).collapse(); "
+        "g = fem.Function(V0) (left zero for no-slip, else interpolated); dofs = "
+        "fem.locate_dofs_topological((W.sub(0), V0), fdim, facets) -- a pair of arrays; bc = fem.dirichletbc(g, "
+        "dofs, W.sub(0)). A constant there raises 'Constant size is not equal to the block size', even a zero; "
+        "dofs located on V0 alone raise incompatible function arguments; and "
+        "fem.locate_dofs_topological(W.sub(0).collapse(), ...) hands the (space, dofs) pair over as a space and "
+        "raises 'numpy.ndarray' object has no attribute '_cpp_object'."
+        "\n17. A MIXED SPACE CANNOT TABULATE: W.tabulate_dof_coordinates() raises RuntimeError: Cannot tabulate "
+        "coordinates for a mixed FunctionSpace. Tabulate the collapsed space instead, V0.tabulate_dof_coordinates(), "
+        "one row per node of V0."
+        "\n18. A ZERO RIGHT-HAND SIDE IS BUILT FROM fem.Constant: 0 * v[0] * ufl.dx (0.0 times any expression) "
+        "folds to UFL's Zero and raises ValueError: This integral is missing an integration domain at once; "
+        "ufl.inner(fem.Constant(mesh, np.zeros(gdim)), v) * ufl.dx + fem.Constant(mesh, "
+        "default_scalar_type(0.0)) * q * ufl.dx compiles."
+        "\n19. A NONLINEAR SOLVE IS dolfinx.fem.petsc.NonlinearProblem(F, w, bcs=bcs, "
+        "petsc_options_prefix='<name>', petsc_options={'snes_type': 'newtonls', ...}); problem.solve() fills w. "
+        "Without petsc_options_prefix it is a TypeError, and solve() RETURNS when Newton did not converge too "
+        "(reason -5 at the iteration cap), so read problem.solver.getConvergedReason() (> 0 converged) and "
+        "problem.solver.getIterationNumber() (the Newton iteration count), or set "
+        "'snes_error_if_not_converged': True to make it raise. `from dolfinx.fem.petsc import NewtonSolver` is "
+        "an ImportError; NonlinearProblem needs none."
+        "\n20. THE MESH MOVES THROUGH ITS GEOMETRY: there is no dolfinx.mesh.move (AttributeError). "
+        "msh.geometry.x is the (n, 3) array of node coordinates, and forms assembled afterwards read it: for a "
+        "displacement d on the mesh's own P1 vector space, msh.geometry.x[:, :gdim] += d.x.array.reshape(-1, "
+        "gdim). Measured in serial on create_rectangle triangle meshes: that space's dof order equalled the node "
+        "order, and the area integral changed by exactly the stretch applied; compare "
+        "V1.tabulate_dof_coordinates()[:, :gdim] with msh.geometry.x[:, :gdim] before relying on it."
+        "\n21. assemble_scalar IS dolfinx.fem.assemble_scalar(fem.form(...)); dolfinx.fem.petsc has none "
+        "(AttributeError)."
+        "\n22. A VELOCITY-PRESSURE SYSTEM IS FACTORED WITH 'pc_type': 'lu' AND 'pc_factor_mat_solver_type': "
+        "'mumps'. PETSc's own LU (no solver package named) meets the zero diagonal of the pressure block: "
+        "NonlinearProblem.solve() then RETURNS after 0 Newton iterations with reason -3 and w unchanged, "
+        "LinearProblem.solve() returns inf, and with 'ksp_error_if_not_converged': True it raises Zero pivot "
+        "in LU factorization. Measured on a Taylor-Hood channel: with mumps the same solve converged in 3 "
+        "iterations. The residual takes u, p = ufl.split(w); w.split() there leaves the Jacobian empty on "
+        "those rows (Matrix is missing diagonal entry 0 with PETSc's LU; reason -3 after 0 iterations with "
+        "mumps)."),
+}
+_FSI_FACTS["fenicsx"] = _FSI_FACTS["dolfinx"] = _FSI_FACTS["fenics"]
+_FSI_FACTS["fourc"] = (
+    "\nFOR A STRUCTURE SIDE (each run as a small deck on this install):"
+    "\n16. A 2-D STRUCTURE IS MADE OF WALL ELEMENTS: `<id> WALL QUAD4 <n1> <n2> <n3> <n4> MAT 1 KINEM "
+    "linear EAS none THICK 1.0 STRESS_STRAIN plane_strain GP 2 2` in STRUCTURE ELEMENTS, corners "
+    "counter-clockwise (the binary's grammar, `4C -p`, also lists WALL QUAD8, QUAD9, TRI3, TRI6). SOLID "
+    "takes 3-D cells only: SOLID QUAD4 stops 4C with \"Element 'SOLID' does not seem to know cell type "
+    "'quad4'.\""
+    "\n17. LINEAR ELASTICITY IS MAT_Struct_StVenantKirchhoff (YOUNG, NUE, DENS) with KINEM linear on the "
+    "element: on a plane-strain block under an edge traction it reproduced the plane-strain Hooke solution "
+    "to 2e-16. There is no MAT_Struct_LinearElastic: 4C stops with 'Failed to match specification in "
+    "section MATERIALS'."
+    "\n18. A TRACTION ON AN EDGE OF A 2-D BODY IS DESIGN LINE NEUMANN CONDITIONS on that edge's DLINE "
+    "(NUMDOF 2, ONOFF, VAL, FUNCT, TYPE \"Live\"); with THICK 1.0 the load is VAL x FUNCT per unit length "
+    "of the edge. DESIGN SURF NEUMANN in 2-D loads the whole surface per unit area, a body force: the same "
+    "VAL there ran with no error and gave a different displacement."
+    "\n19. THE DISPLACEMENT COMES BACK IN A VTU ONLY WHEN ASKED FOR: `IO/RUNTIME VTK OUTPUT` "
+    "(INTERVAL_STEPS: 1, OUTPUT_DATA_FORMAT: \"ascii\") with `IO/RUNTIME VTK OUTPUT/STRUCTURE` "
+    "(OUTPUT_STRUCTURE: true, DISPLACEMENT: true) writes out-vtk-files/structure-<step>-<rank>.vtu with "
+    "the point array `displacement`, every node repeated once per element; step 00000 is the initial "
+    "state, the last step the solution. Without those two sections the run finishes normally and writes "
+    "no VTU. `node_gid` is written too only with NODE_GID: true."
+    "\n20. A FUNCTn NO CONDITION LISTS IS EVALUATED NOWHERE: a deck with an unused FUNCT1 ran normally and "
+    "gave the same displacement as one without it. The load a FUNCT builds reaches 4C only through the "
+    "condition's FUNCT: [..] entry for that component."
+    "\n21. A STATICS DECK WITHOUT ITS OWN TOLERANCES JUDGES THE RESIDUAL ABSOLUTE: with no TOLRES, NORM_RESF "
+    "and NORMCOMBI_RESFDISP in STRUCTURAL DYNAMIC, 4C asks the displacement update below 1e-10 AND the "
+    "residual below 1e-8, both absolute. Measured on a plane-strain wall: the coarse mesh converged; "
+    "refined, the same linear solve stalled at a residual of about 2e-8 (round-off) and 4C stopped with "
+    "'The nonlinear solver did not converge!'. TOLRES: 1e-08 with NORM_RESF: \"Rel\" and "
+    "NORMCOMBI_RESFDISP: \"Or\" converged every mesh.")
+_FSI_FACTS["4c"] = _FSI_FACTS["fourc"]
+
 _DECIDING_UNIVERSAL = (
     "* READ YOUR FIELD AT THE PROBE POINTS BY INTERPOLATION, NEVER BY NEAREST "
-    "NODE. Measured against an independent reference: one solve exported two ways gave "
-    "order 1.9796 by interpolation and 0.9815 by nearest-node sampling. Free self-check: nearest-node sampling can only return "
-    "(N-1)^2+1 distinct values, so 1936 probes collapse to 50/226/962 at "
-    "N=8/16/32.\n"
+    "NODE. Measured: one solve exported two ways converged at second order by interpolation "
+    "and at first order by nearest-node sampling. Free self-check: nearest-node sampling can only return "
+    "(N-1)^2+1 distinct values on N cells per side, however many probes: "
+    "count yours.\n"
     "* GATE BEFORE YOU HAND IN, at EVERY level: the solver REPORTED convergence "
     "(not merely that nothing raised), peak|u| > 0, and your load is not "
     "constant. Then compute log2(|L1-L2|/|L2-L3|) yourself.\n"
@@ -2481,20 +3578,28 @@ _DECIDING_UNIVERSAL = (
     "comes out identically zero.")
 
 
-def _deciding_block(solver: str, physics: str) -> str:
-    """The lead block: what decides this run, before the corpus."""
+# A DSMC SIDE GETS NO FINITE-ELEMENT RULE. Measured on a coupled round: SPARTA's deciding facts
+# ended with the probe-interpolation, "your load is not constant" and q = -(K u - b_volume)/h
+# rules, none of which a DSMC deck has, and the side that read them had no field to apply them to.
+_NO_FEM_RULES = frozenset({"sparta"})
+
+
+def _deciding_block(solver: str, physics: str, fsi: bool = False) -> str:
+    """The lead block: what decides this run, before the corpus. `fsi`: a fluid-structure side, which
+    gets the code's fluid-structure facts after its own (inside the block, so no cap cuts them)."""
     key = (solver or "").strip().lower()
-    facts = _DECIDING_FACTS.get(key, "")
-    if not facts and not _DECIDING_UNIVERSAL:
+    facts = _DECIDING_FACTS.get(key, "") + (_FSI_FACTS.get(key, "") if fsi else "")
+    universal = "" if key in _NO_FEM_RULES else _DECIDING_UNIVERSAL
+    if not facts and not universal:
         return ""
     head = (f"# WHAT DECIDES THIS RUN — {solver}/{physics}\n"
             f"# (read this before the corpus below; each line was measured by "
             f"execution)\n\n")
-    body = (facts + "\n\n" if facts else "") + _DECIDING_UNIVERSAL
+    body = "\n\n".join(x for x in (facts, universal) if x)
     return head + body + "\n\n" + "-" * 70 + "\n\n"
 
 
-# EVERY KNOWLEDGE REPLY IS BOUNDED. Measured on coupled development runs
+# EVERY KNOWLEDGE REPLY IS BOUNDED. Measured on coupled recorded runs
 # with a small model: single knowledge replies of 55-145k characters, ten of
 # them per run, 1-9 million input tokens per run, and the run gave up
 # citing the size of the job. The coupling door already caps its head at
@@ -2556,7 +3661,7 @@ def _probe_recipe_span(text: str) -> tuple:
     THE RECIPE EXISTS BECAUSE OF THE BIGGEST FAILURE BUCKET, AND THE CAP ATE IT.
     deal.II's backend adds a `probe_recipe` to every knowledge branch because a
     solve that worked and was never read back at the prescribed points is the
-    largest single way a run is lost -- 60 development runs, 12.9 %. The
+    largest single way a run is lost -- 60 recorded runs, 12.9 %. The
     backend comment says adding it to one branch would leave the other three
     silent. It was added to all four, and then the 48,000-character cap cut it
     off every one of them: measured on
@@ -2649,6 +3754,136 @@ def _cap_knowledge_reply(out: str, topic: str = "", solver: str = "",
             f"need to solve the problem.\n")
 
 
+# The levels a couple_levels call has still to run while it runs one of them: the files
+# of those levels on disk are a previous attempt's, which this call is about to replace,
+# and couple()'s reply for the level in hand does not lead with them (measured: a
+# ladder's level-1 reply led with "COUPLING HISTORY TOO SHORT" on the previous
+# ladder's residual_level2.csv, which the same call rewrote minutes later).
+import contextvars as _contextvars                                  # noqa: E402
+_LADDER_PENDING = _contextvars.ContextVar("openpaso_ladder_pending", default=())
+_LEVEL_IN_NAME = re.compile(r"level[_-]?(\d+)(?!\d)", re.I)
+
+
+def _audit_findings_hiding_levels(root: str, hidden) -> list:
+    """The audit's findings on `root`, with every file whose name carries one of the `hidden`
+    levels out of its sight; with nothing hidden, the audit of `root` as it is.
+
+    A LADDER'S LEVEL REPLY READS ONLY WHAT THE LADDER HAS WRITTEN. The files of the levels it has
+    still to run are a previous attempt's, and leaving out the findings whose sequence names such
+    a level was not enough: a finding read across every level on disk names none. Measured on two
+    re-run ladders: the level-1 replies led with "THE TWO FIELDS DO NOT CARRY OPPOSITE FLUXES" read
+    from the fresh level 1 and the previous ladder's levels 2 and 3, and the level-2 replies with
+    a free interface end read from the previous level-3 dump, beside fields that were right. The
+    audit runs on a view of the folder: a link to every file but those, in a temporary folder
+    that is removed when it returns. The audit writes nothing, and its paths are given back as
+    the folder's own."""
+    import shutil
+    import tempfile
+    from . import result_audit as _ra
+    hide = set()
+    for h in hidden or ():
+        try:
+            hide.add(int(h))
+        except (TypeError, ValueError):
+            pass
+    if not hide:
+        return list(_ra.audit(root).get("findings", []))
+    real = Path(root)
+    tmp = Path(tempfile.mkdtemp(prefix="openpaso_ladder_view_"))
+    view = tmp / (real.name or "run")
+    try:
+        n = 0
+        for dirpath, dirnames, filenames in os.walk(real):
+            here = view / Path(dirpath).relative_to(real)
+            here.mkdir(parents=True, exist_ok=True)
+            for nm in list(dirnames):
+                src = Path(dirpath) / nm
+                if any(int(m.group(1)) in hide for m in _LEVEL_IN_NAME.finditer(nm)):
+                    dirnames.remove(nm)                    # a folder of a hidden level, as its files
+                elif src.is_symlink():                     # kept as the link it is, not walked
+                    os.symlink(os.path.join(dirpath, os.readlink(src)), here / nm)
+                    dirnames.remove(nm)
+            for nm in filenames:
+                if any(int(m.group(1)) in hide for m in _LEVEL_IN_NAME.finditer(nm)):
+                    continue
+                os.symlink(Path(dirpath) / nm, here / nm)
+                n += 1
+            if n > 50000:
+                raise OSError("too many files for a view")
+        found = list(_ra.audit(str(view)).get("findings", []))
+    except OSError:
+        found = None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if found is None:                                      # no view could be built: as before
+        return [f for f in _ra.audit(root).get("findings", [])
+                if not any(int(m.group(1)) in hide
+                           for m in _LEVEL_IN_NAME.finditer(str(f.get("sequence", ""))))]
+    v, r = str(view), str(real)
+
+    def _back(o):
+        if isinstance(o, str):
+            return o.replace(v, r)
+        if isinstance(o, list):
+            return [_back(x) for x in o]
+        if isinstance(o, tuple):
+            return tuple(_back(x) for x in o)
+        if isinstance(o, dict):
+            return {k: _back(x) for k, x in o.items()}
+        return o
+    return [_back(f) for f in found]
+# True while couple_levels runs one of its levels: the ladder checks each side against
+# its own equation after its last level, so a level's reply does not say none was
+# checked (measured: level 3 of a verified ladder led with the note that no level had
+# been checked against its own equation, beside the ladder's own SATISFIES).
+_IN_LADDER = _contextvars.ContextVar("openpaso_in_ladder", default=False)
+
+
+# The interface files the healer wrote, by path, with the digest of what it wrote: a
+# later run of the same level refreshes a file that is still the healer's, and a file
+# the participant wrote or edited is never touched.
+_HEALED_FILES: dict = {}
+
+
+# HOW MUCH INTERFACE DATA ONE REPLY CARRIES INLINE. Measured: a transient side exported its
+# whole time history per interface point, couple() inlined it as CSV rows, one level's block
+# was 102,833 characters, and the couple_levels reply that carried it (249,047 characters in
+# the tool record) was the last thing the run received -- the harness session died one second
+# later. A block over the budget is named, never inlined: the numbers are the side's own
+# exports.json already.
+_IFACE_CSV_INLINE_MAX = 30_000           # characters of CSV rows in one couple() reply
+_LADDER_IFACE_CSV_INLINE_MAX = 40_000    # the same, summed over every level of one couple_levels reply
+
+
+def _iface_block_not_inlined(pname: str, block: dict, n_chars: int, n_points=None, n_cols=None,
+                             level=None) -> dict:
+    """The interface block that stays out of a reply: its file name and where its numbers are."""
+    what = (f"{n_points} points x {n_cols} columns, " if n_points and n_cols else "")
+    where = (f"{pname}'s own exports.json in its work_dir (overwritten by its next run)" if level is None else
+             f"{pname}'s own interface dump of level {level} (interface_level{level}.csv in its work_dir; "
+             f"openPASO writes it from the level's exports.json when the side does not, and says so under "
+             f"interface_dump_written_for_you) -- its exports.json now holds a later level")
+    return {"suggested_filename": block.get("suggested_filename"),
+            "not_inlined": (f"{what}{n_chars:,} characters: more than one reply carries. The same numbers are "
+                            f"{where}; write this file from there with a short script -- never by retyping "
+                            f"numbers.")}
+
+
+def _as_json_text(value):
+    """A tool argument documented as a JSON list or object, as its JSON text: a list or a dict
+    that arrives as such is serialised, a string is left as it is."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _level_fault_is_field(text: str) -> bool:
+    """True when a level's not-verified reason is a defect of its field -- not a caveat the next
+    level decides and not a missing critic review."""
+    if "critic review" in text or "critic has not reviewed" in text:
+        return False
+    return ("NOT VERIFIED --" in text or "NOT VERIFIED —" in text
+            or "IS NOT A COUPLED RESULT" in text)
+
+
 def _heal_missing_interface_dump(specs: list, k: int) -> dict:
     """Write the per-level interface file openPASO already holds the data for.
 
@@ -2680,8 +3915,14 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
     field and openPASO does not have it, only the participant does. It never
     overwrites a file the participant wrote. And it invents nothing -- every
     number transcribed here came out of the agent's own solver.
+
+    A FILE IT WROTE IS ITS OWN TO KEEP CURRENT. Measured: a level coupled again
+    after a fix kept the healer's file from the earlier, wrong run, and that
+    stale file was handed in. A file still holding exactly what the healer wrote
+    is rewritten from this run's exports; anything else is the participant's.
     """
     import csv as _csv
+    import hashlib as _hl
 
     healed: dict = {}
     for spec in specs or []:
@@ -2691,8 +3932,15 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
             continue
         work = Path(wd)
         target = work / f"interface_level{k}.csv"
-        if target.exists() or any(work.glob(f"interface_level{k}_*.csv")):
+        if any(work.glob(f"interface_level{k}_*.csv")):
             continue                       # the participant wrote its own
+        if target.exists():
+            try:
+                _mine = _HEALED_FILES.get(str(target.resolve())) == _hl.sha256(target.read_bytes()).hexdigest()
+            except OSError:
+                _mine = False
+            if not _mine:
+                continue                   # the participant wrote its own
         src = work / "exports.json"
         if not src.is_file():
             continue
@@ -2705,19 +3953,34 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
         flux = data.get("normal_fluxes") or []
         if not coords or len(vals) != len(coords):
             continue
+        # A VECTOR EXCHANGE IS WRITTEN WHOLE. This kept the first component of a
+        # displacement and a traction under the header x,y,u,qn: measured on an
+        # elastic coupling, the healed file of a side that exported (ux, uy) read
+        # as a scalar side, and the cell gave up on "that code exports scalars".
+        # The columns are the ones the served elastic contracts write.
+        ncomp = len(vals[0]) if isinstance(vals[0], (list, tuple)) else 0
+        if ncomp > 1 and (ncomp > 3 or any(not isinstance(v, (list, tuple)) or len(v) != ncomp
+                                           for v in vals)):
+            continue                       # no shape this file can state; leave the gap visible
+        comps = "xyz"[:ncomp] if ncomp > 1 else ""
         try:
             with target.open("w", newline="") as fh:
                 writer = _csv.writer(fh)
-                writer.writerow(["x", "y", "u", "qn"])
+                writer.writerow(["x", "y"] + ([f"u{c}" for c in comps] + [f"q{c}" for c in comps]
+                                              if comps else ["u", "qn"]))
                 for i, point in enumerate(coords):
                     xy = list(point) if isinstance(point, (list, tuple)) else [point]
                     u = vals[i]
-                    q = flux[i] if i < len(flux) else 0.0
+                    q = flux[i] if i < len(flux) else ([0.0] * ncomp if comps else 0.0)
+                    head = [f"{float(xy[0]):.11e}", f"{float(xy[1]):.11e}" if len(xy) > 1 else "0"]
+                    if comps:
+                        q = q if isinstance(q, (list, tuple)) and len(q) == ncomp else [0.0] * ncomp
+                        writer.writerow(head + [f"{float(c):.11e}" for c in u]
+                                        + [f"{float(c):.11e}" for c in q])
+                        continue
                     u = u[0] if isinstance(u, (list, tuple)) and u else u
                     q = q[0] if isinstance(q, (list, tuple)) and q else q
-                    writer.writerow([f"{float(xy[0]):.11e}",
-                                     f"{float(xy[1]):.11e}" if len(xy) > 1 else "0",
-                                     f"{float(u):.11e}", f"{float(q):.11e}"])
+                    writer.writerow(head + [f"{float(u):.11e}", f"{float(q):.11e}"])
         except (OSError, TypeError, ValueError, IndexError):
             # A PARTIAL FILE IS WORSE THAN NONE: it would look like a dump and
             # be read as one. Remove it and leave the gap visible.
@@ -2726,15 +3989,80 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
             except OSError:
                 pass
             continue
+        try:
+            _HEALED_FILES[str(target.resolve())] = _hl.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            pass
         healed[name] = target.name
     return healed
+
+
+def _unread_blocks(sides: list) -> set:
+    """The exported blocks no side of a stated Dirichlet-Neumann pair reads: the
+    Dirichlet side reads its partner's `values`, the Neumann side its partner's
+    `normal_fluxes`. Empty unless exactly two sides both state their role."""
+    out: set = set()
+    try:
+        from . import result_audit as _ra_role
+        roles = {name: _ra_role._stated_role(Path(str(wd))) for name, wd in sides}
+        if len(sides) == 2 and all(roles.values()):
+            (a, _), (b, _) = sides
+            for me, other in ((a, b), (b, a)):
+                out.add(f"{other}.{'normal_fluxes' if roles[me] == 'dirichlet' else 'values'}")
+    except Exception:                                    # noqa: BLE001
+        return set()
+    return out
+
+
+_NOT_OUTPUT = ("exports.json", "imports.json", "config.json")
+
+
+def _outputs_at_risk(wd: Path, level: int, since: float) -> list:
+    """Files this level's run wrote in `wd` (to two folders deep) whose path names no level:
+    the next level's run reuses those names. Scripts, the exchange files, config and the
+    driver's consoles are not outputs."""
+    out = []
+    try:
+        for q in list(wd.glob("*")) + list(wd.glob("*/*")) + list(wd.glob("*/*/*")):
+            if not q.is_file() or q.name in _NOT_OUTPUT or q.suffix in (".py", ".pyc"):
+                continue
+            if q.name.startswith("participant_output") or ".replaced-" in q.name:
+                continue
+            rel = str(q.relative_to(wd)).lower()
+            if re.search(r"level[_-]?\d+|lvl[_-]?\d+", rel):
+                continue
+            if q.stat().st_mtime >= since:
+                out.append(rel)
+            if len(out) >= 20:
+                break
+    except OSError:
+        return out
+    return out
+
+
+def _driver_measured(finding: str, driver_error: str) -> str:
+    """A finding that asks for a repeat run, told what the driver's own repeat run
+    in the same call found (measured: a reply asked a run to "MEASURE FIRST: run its
+    participant twice" beside the driver's text saying both sides repeated)."""
+    if "MEASURE FIRST, on each side" not in finding:
+        return finding
+    if "returned the same export when run again" in driver_error:
+        said = ("every side returned the same export when run again on its last imports, so "
+                "check the exchange:")
+    elif "IS NOT A FUNCTION OF ITS IMPORTS" in driver_error:
+        said = ("a side did not return the same export when run again on its last imports "
+                "(`error` names it) -- fix that side first; then check the exchange:")
+    else:
+        return finding
+    return re.sub(r"MEASURE FIRST, on each side:.*?If both repeat, check the exchange:",
+                  "THE DRIVER MEASURED THIS IN THIS CALL: " + said, finding, flags=re.S)
 
 
 def _level_not_a_coupled_result(rep: dict) -> str:
     """Why this level's own evidence is not a coupling, or "" when it is one.
 
     THE SUMMARY AND THE LEVEL SAID DIFFERENT THINGS, AND THE LOUDER ONE WAS
-    WRONG. Measured 2026-09-17 on a coupled development run: one couple_levels
+    WRONG. Measured 2026-09-17 on a coupled recorded run: one couple_levels
     call returned `"all_levels_converged": true` with `"iterations": 2`,
     `"residual": 0.0` and a history of ONE row at every level, and its
     next_step read "EVERY REQUESTED LEVEL CONVERGED ... write the task's
@@ -2754,6 +4082,14 @@ def _level_not_a_coupled_result(rep: dict) -> str:
     unresp = sorted(n for n, st in (rep.get("responsiveness") or {}).items()
                     if "unresponsive" in str(st).lower())
     if unresp:
+        try:
+            from core.quality_checks import unresponsive_clause as _uc
+            _parts = [_uc(n, rep.get("responsiveness_detail"), rep.get("interface_sensitivity"))
+                      for n in unresp]
+        except Exception:                                    # noqa: BLE001
+            _parts = []
+        if _parts and all(_parts):
+            return "; ".join(_parts) + ", so the coupling stood still"
         return (f"participant(s) {', '.join(unresp)} exported byte-identical "
                 f"data while their imports changed, so nothing was transmitted")
     rows = len(rep.get("history") or [])
@@ -2776,7 +4112,7 @@ def _level_field_peak(specs: list, k: int) -> dict:
     """How big is the field each side just wrote for this level?
 
     WHY THIS IS REPORTED RATHER THAN OFFERED. `couple_levels` already ended by
-    telling the agent to call audit_results. Measured over the campaign's graded
+    telling the agent to call audit_results. Measured over the graded
     coupled record, a self-check tool was called in 40 of 217 cells with files,
     and a live full-task run here wrote a field of LITERAL ZERO at all three
     levels, reported an interface residual of 6.8e-11 as evidence of success,
@@ -2881,7 +4217,7 @@ def _verify_elastic(solution_files: str, source_term: str, coefficient: str,
     if lam is None or mu is None:
         return _fail(
             "elasticity needs both Lame constants, as "
-            '\'{"lambda": 480, "mu": 1200}\'. They are stated in your task; '
+            '\'{"lambda": <lambda>, "mu": <mu>}\'. They are stated in your task; '
             "this check will not infer them from the field, because a wrong "
             "pair would make a right answer look wrong.")
 
@@ -2928,6 +4264,44 @@ def _verify_elastic(solution_files: str, source_term: str, coefficient: str,
     if problems:
         out["files_skipped"] = problems
     return _json.dumps(out, indent=2) + _UNIVERSAL_CORE
+
+
+_SOLVER_BINARIES = {"4C": "fourc", "febio4": "febio", "febio3": "febio", "febio": "febio",
+                    "spa_serial": "sparta", "spa_mpi": "sparta"}
+_LAUNCH_WRAPPERS = {"stdbuf", "mpirun", "mpiexec", "srun", "timeout", "nice", "env", "time"}
+
+
+def _solver_binary_as_participant(spec) -> str:
+    """'' unless a coupling participant's command runs a solver binary directly.
+
+    A coupling participant is a program that reads ./imports.json and writes
+    ./exports.json each iteration; a solver binary does neither, so nothing can
+    be exchanged. MEASURED: all four cells of one round that went on to complete
+    first passed the 4C binary itself as a participant, two to four minutes each,
+    while the served text said "Python wrapper + YAML".
+    """
+    try:
+        cmd = [str(c) for c in (spec.get("command") or [])]
+    except Exception:                                    # noqa: BLE001
+        return ""
+    exe = None
+    for tok in cmd:
+        base = Path(tok).name
+        if base in _LAUNCH_WRAPPERS or tok.startswith("-") or tok.isdigit():
+            continue
+        exe = base
+        break
+    if exe not in _SOLVER_BINARIES:
+        return ""
+    code = _SOLVER_BINARIES[exe]
+    return (f"participant {spec.get('name', '?')}: its command runs the solver binary {exe} directly. "
+            f"A coupling participant is a program that reads ./imports.json and writes ./exports.json "
+            f"every iteration, and a solver binary does neither, so nothing would be exchanged. Run the "
+            f"served participant contract instead -- a Python script that writes the input and runs "
+            f"{exe} itself: command [<python>, \"participant.py\"]. If that side's folder already holds "
+            f"a participant script that ran (an exports.json beside it), name THAT script in the command; "
+            f"otherwise write_participant_contract(solver='{code}', path=<a new file name>) writes one -- "
+            f"never over a script that already works.")
 
 
 def register_consolidated_tools(mcp: FastMCP):
@@ -2980,9 +4354,10 @@ def register_consolidated_tools(mcp: FastMCP):
                   `category=`; `index=True` maps what exists first. A
                   narrowed answer always states how many entries it held
                   back and how to get them.
-                - "postmortems" — formal post-mortem records under
-                  data/postmortems/*.json, filtered by solver +
-                  physics + optional signal pattern. These are the
+                - "postmortems" — openPASO's formal post-mortem records,
+                  filtered by solver + physics + optional signal pattern
+                  (read them here: they are inside openPASO, not files in
+                  your working directory). These are the
                   audit-trail entries that record WHY each pitfall
                   exists; the critic-gate should retrieve them when
                   the agent's plan touches the matching (solver,
@@ -3065,7 +4440,7 @@ def register_consolidated_tools(mcp: FastMCP):
             # FUZZY MATCH HERE TOO — the pairing was exactly inverted.
             # prepare_simulation has a seven-stage matcher and this had none,
             # so the tool WITH the matcher lacked the universal block and the
-            # tool WITH the block dead-ended. Measured over 98 development runs:
+            # tool WITH the block dead-ended. Measured over 98 recorded runs:
             # knowledge(topic='physics', solver='fenics', physics='nonlinear')
             # returned 38 characters, 16 times across 13 runs, while
             # 'nonlinear' matches nonlinear_pde — the generator that builds
@@ -3153,8 +4528,8 @@ def register_consolidated_tools(mcp: FastMCP):
 
         elif topic == "postmortems":
             if _ABLATE_PITFALLS:
-                return ("No post-mortems found. data/postmortems/*.json is "
-                        "the canonical store; absence here means the failure "
+                return ("No post-mortems found. openPASO's post-mortem store is "
+                        "the canonical one; absence here means the failure "
                         "mode has not yet been audited.")
             postmortems = _load_matching_postmortems(solver, physics, signal)
             if not postmortems:
@@ -3164,8 +4539,8 @@ def register_consolidated_tools(mcp: FastMCP):
                      "signal": signal}.items() if v)
                 return (f"No post-mortems found"
                         f"{' for ' + what if what else ''}. "
-                        f"data/postmortems/*.json is the canonical "
-                        f"store; absence here means the failure mode "
+                        f"openPASO's post-mortem store is the canonical "
+                        f"one; absence here means the failure mode "
                         f"has not yet been audited.")
             return json.dumps(postmortems, indent=2)
 
@@ -3910,6 +5285,18 @@ def register_consolidated_tools(mcp: FastMCP):
                      for b in all_backends()}
             lines += ["", "Availability on THIS install:"]
             lines += [f"- {n}: {s}" for n, s in sorted(avail.items())]
+            # THE deal.II TREE TO BUILD AGAINST, NAMED. A deal.II side is a program the
+            # agent compiles, and this line used to drop the tree check_availability
+            # found: measured, two coupled sides compiled against a system /usr deal.II
+            # 9.1.1 and never built (one lost 20 min).
+            if avail.get("dealii") == "available":
+                try:
+                    from backends.dealii.backend import build_tree_note
+                    _note = build_tree_note()
+                except Exception:                              # noqa: BLE001
+                    _note = ""
+                if _note:
+                    lines = [ln + f" -- {_note}" if ln.startswith("- dealii: ") else ln for ln in lines]
             return "\n".join(lines)
 
         elif query == "recommend":
@@ -3964,7 +5351,7 @@ def register_consolidated_tools(mcp: FastMCP):
     # ═══════════════════════════════════════════════════════════
 
     @mcp.tool()
-    def examples(keyword: str, solver: str = "fourc", action: str = "search",
+    def examples(keyword: str = "", solver: str = "fourc", action: str = "search",
                  max_results: int = 3, variant: str = "") -> str:
         """Find and retrieve example input files from solver test suites.
 
@@ -3979,6 +5366,10 @@ def register_consolidated_tools(mcp: FastMCP):
                 - "template" — get a generated template for this physics
                 - "tutorials" — list available tutorials
             max_results: Maximum results (default 3)
+            variant: For action="template": which of the physics' template
+                variants to generate (e.g. '2d', '3d'). action="tutorials"
+                lists them. With a variant and no keyword, the physics that
+                has that variant is used.
         """
         if action == "search":
             # Empty / whitespace-only keyword matches every
@@ -4134,13 +5525,29 @@ def register_consolidated_tools(mcp: FastMCP):
             return body
 
         elif action == "template":
-            if not keyword or not keyword.strip():
-                return ("Empty keyword. Provide a physics name "
-                        "(or substring), e.g. 'poisson', 'fluid', "
-                        "'contact'.")
             backend = get_backend(solver)
             if not backend:
                 return f"Unknown solver: {solver}"
+            if not keyword or not keyword.strip():
+                # A VARIANT NAMES ITS PHYSICS. Measured 2026-09-28: a run asked for
+                # examples(action="template", solver="fenics", variant=...) with no
+                # keyword; the keyword was a required argument, so the call died in
+                # argument validation with "Field required" and the run lost a step.
+                owners = [p.name for p in backend.supported_physics()
+                          if variant and variant in p.template_variants]
+                if len(owners) == 1:
+                    keyword = owners[0]
+                else:
+                    listing = "; ".join(
+                        f"{p.name} ({', '.join(p.template_variants) or 'no variants'})"
+                        for p in backend.supported_physics())
+                    head = (f"Variant `{variant}` belongs to several physics in {solver}: "
+                            f"{', '.join(owners)}. Name one as keyword."
+                            if len(owners) > 1 else
+                            f"No physics in {solver} has a variant `{variant}`."
+                            if variant else
+                            "Empty keyword. Name the physics as keyword, e.g. keyword='navier_stokes'.")
+                    return f"{head} Physics and their variants in {solver}: {listing}"
             # Route the keyword through the canonical fuzzy
             # resolver so short shorthands ('ns' -> navier_stokes,
             # 'em' -> maxwell, ...) route via the synonym map
@@ -4179,7 +5586,8 @@ def register_consolidated_tools(mcp: FastMCP):
                 lines.append(f"- **{p.name}**: {', '.join(p.template_variants)} — {p.description}")
             return "\n".join(lines)
 
-        return "Usage: examples(keyword, solver, action='search'|'template'|'tutorials')"
+        return ("Usage: examples(keyword, solver, action='search'|'template'|'tutorials', "
+                "variant='...' for a template)")
 
     # ═══════════════════════════════════════════════════════════
     # 4. SIMULATE (replaces run_simulation + run_with_generator)
@@ -4198,7 +5606,7 @@ def register_consolidated_tools(mcp: FastMCP):
         JSON object for `couple` / `couple_precice` / `coupled_solve`. Passing
         neither — or both — is refused, and the refusal comes AFTER you have
         written the review, so the review is wasted. Measured over the
-        development runs, half of all reviews handed in were rejected this way.
+        recorded runs, half of all reviews handed in were rejected this way.
 
         openPASO's critic requirement is enforced, not requested. The run and
         coupling tools do not take your word for it: they look up whether THIS
@@ -4206,10 +5614,14 @@ def register_consolidated_tools(mcp: FastMCP):
         critic_approved=True without a matching review here leaves the result
         NOT VERIFIED, whatever else the run does.
 
-        The workflow is: spawn a sub-agent as an independent critic; have it
-        challenge the parameters, units, discretisation, problem statement and
-        boundary conditions, and cross-check against literature and benchmarks;
-        then submit what it actually found here; then run.
+        The workflow is: the agent doing the work spawns a sub-agent as an
+        independent critic and gives it the file to review; the critic
+        challenges the parameters, units, discretisation, problem statement and
+        boundary conditions, cross-checks against literature and benchmarks,
+        and CALLS THIS TOOL ITSELF with its verdict; the working agent then runs
+        exactly the reviewed file. A review filed by the agent whose work it
+        reviews is not a review, and an interface that can see who filed it
+        refuses one.
 
         The review is bound to the setup by digest, so a setup edited after
         review no longer matches and must be reviewed again. That is deliberate:
@@ -4229,13 +5641,19 @@ def register_consolidated_tools(mcp: FastMCP):
                 is required; an empty approval is indistinguishable from no
                 review and is refused.
             setup: for run_simulation / run_with_generator /
-                verify_mesh_independence — the EXACT deck text you will run
-                (input_content, generator_script, or input_template).
+                verify_mesh_independence — the EXACT deck text that will run
+                (input_content, generator_script, or input_template), or the
+                NAME of the file in the run folder that holds it: the review is
+                then bound to that file's text as it is now, and a run of that
+                file (input_path / generator_path) matches it.
             coupling_args: for the coupling tools instead of `setup` — a JSON
                 object of the arguments you will pass. Keys per tool:
                 coupled_solve: problem, solver_a, solver_b, nx, ny, max_iter,
-                tol, relaxation, params; couple: participants, max_iter, tol,
-                accelerator, theta, monolithic, probe; couple_precice:
+                tol, relaxation, params; couple AND couple_levels: participants,
+                max_iter, tol, accelerator, theta, monolithic, probe -- the SAME
+                seven for both, and for `couple_levels` you pass the values you
+                will give it, NOT the per-level meshes, because one review
+                covers the whole ladder; couple_precice:
                 participants, data, exchanges, scheme, dimensions, max_time,
                 time_window, max_iterations, convergence_tol, relaxation,
                 mapping. Pass EVERY key for the tool you will call, with the
@@ -4250,6 +5668,7 @@ def register_consolidated_tools(mcp: FastMCP):
             run_with_generator makes the review single-use and binds it to that
             job; omitting it still works, since the deck is matched by digest.
         """
+        _named_file = ""
         if bool(setup) == bool(coupling_args):
             # Say which mistake was made and what to send instead. The old
             # message stated the rule without saying which side was wrong, so
@@ -4271,10 +5690,15 @@ def register_consolidated_tools(mcp: FastMCP):
                     "verify_mesh_independence; or coupling_args=<a JSON "
                     "object of the arguments you will pass> for couple, "
                     "couple_precice or coupled_solve."),
+                # THIS EXAMPLE USED TO PRODUCE A DIGEST NOTHING COULD MATCH
+                # (`monolithic: false` against couple_levels' `""`, and a LIST
+                # where the tool takes the JSON string). The setup text is
+                # canonicalised now, so all of those spellings hash alike --
+                # the example is written the way the tool is actually called.
                 "coupling_args_example": (
-                    '{"participants": [...], "max_iter": 50, "tol": 1e-8, '
-                    '"accelerator": "auto", "theta": 0.5, '
-                    '"monolithic": false, "probe": null}'),
+                    '{"participants": "[{\"name\": \"A\", ...}]", '
+                    '"max_iter": 50, "tol": 1e-8, "accelerator": "auto", '
+                    '"theta": 0.5, "monolithic": "", "probe": false}'),
                 "findings_were_not_lost": True},
                 indent=2)
         if coupling_args:
@@ -4289,23 +5713,120 @@ def register_consolidated_tools(mcp: FastMCP):
                     "accepted": False,
                     "error": "coupling_args must be a JSON OBJECT of the "
                              "arguments you will pass."}, indent=2)
+            # A REVIEW OF A SETUP THAT CANNOT RUN IS WORSE THAN NO REVIEW.
+            #
+            # `couple` refuses a participant whose work_dir is outside this
+            # task's tree. This door did not, so a review could be bound by
+            # digest to a setup with an invented path -- and then the run the
+            # agent actually makes, with the real path, is a DIFFERENT setup
+            # whose digest matches nothing, so it comes back NOT VERIFIED with
+            # a perfectly good review on record for a run nobody made.
+            #
+            # MEASURED on the five coupled runs of 2026-09-19: three of them
+            # submitted a review whose participants sat in a sibling of the
+            # served interpreter's own directory (.../open-fem-agent/side_A) --
+            # a path the model can only have taken from the absolute
+            # interpreter path openPASO itself serves. Two of those three then
+            # handed in a result with no review matching it at all, and both
+            # were correct, which is how "only verified output is handed in"
+            # stops being true of the runs while staying true of the design.
+            #
+            # The same rule, at the earlier door, costs one call instead of the
+            # whole verification chain.
+            _bad = _coupling_work_dir_faults(parsed)
+            _n_dir = len(_bad)
+            # A SOLVER BINARY IS NOT A PARTICIPANT HERE EITHER: couple and couple_levels
+            # refuse it, and this door accepted a review of it (measured).
+            try:
+                _specs_rv = json.loads(parsed.get("participants") or "[]") \
+                    if isinstance(parsed.get("participants"), str) else (parsed.get("participants") or [])
+                _bad += [t for t in (_solver_binary_as_participant(sp) for sp in _specs_rv
+                                     if isinstance(sp, dict)) if t]
+            except (TypeError, ValueError):
+                pass
+            if _bad:
+                # NAME WHAT WAS REFUSED. Measured: every refusal said "fix the participants'
+                # work_dir values first" when the refusal was a solver binary run as a
+                # participant (five cells of one round).
+                _what = " and ".join(w for w, on in (
+                    ("the participants' work_dir values", _n_dir > 0),
+                    ("each participant's command (your participant script, run by its "
+                     "interpreter -- never the solver binary itself)", len(_bad) > _n_dir)) if on)
+                return json.dumps({
+                    "accepted": False,
+                    "error": "; ".join(_bad),
+                    "what_to_do": (
+                        f"fix {_what} first, then "
+                        "resubmit the SAME findings text. A review is bound to "
+                        "the EXACT setup you pass here: reviewing one setup and "
+                        "running another leaves the run unverified, whatever the "
+                        "review said."),
+                    "findings_were_not_lost": True}, indent=2)
             # Through the same single definition the run tools use, so the
             # participant-script fingerprints are part of both digests.
             setup_text = _coupling_setup_text(**parsed)
         else:
-            setup_text = setup
+            _named_text, _named_err = _text_of_named_file(setup)
+            if _named_err:
+                return json.dumps({"accepted": False, "error": _named_err,
+                                   "findings_were_not_lost": True}, indent=2)
+            setup_text = setup if _named_text is None else _named_text
+            if _named_text is not None:
+                _named_file = setup.strip()
+        # A REVIEW THAT REJECTS THE SETUP IS NOT A REVIEW OF RECORD FOR IT. Measured
+        # on one set of coupled runs: two orchestrators filed their critics' verdicts
+        # "REJECTED" and "NOT APPROVED", both were accepted, and both runs used the
+        # token to verify what their own critics had turned down. The last verdict
+        # stated in the text decides, so a review that approves after fixes passes.
+        _verdicts = list(re.finditer(
+            r"\b(?:VERDICT|DECISION|CONCLUSION|RESULT)\b[^\n\w]{0,6}\**\s*"
+            r"(NOT[\s_-]+APPROVED|REJECTED|REJECT|DO[\s_-]+NOT[\s_-]+(?:RUN|PROCEED)|APPROVED)",
+            str(findings), re.I))
+        if _verdicts and not _verdicts[-1].group(1).upper().startswith("APPROVED"):
+            # ...and it is KEPT: a rejection that left no trace let the working agent ask one
+            # critic after another until one approved the same text (named by both peer
+            # sessions, 2026-10-01). It issues no token and blocks that exact text.
+            try:
+                _CRITIC_REGISTRY.submit_review(
+                    solver=solver, findings=findings,
+                    digest=review_digest(solver, setup_text), ttl_s=ttl_s,
+                    setup_text=setup_text, rejected=True, source_name=_named_file)
+            except CriticGateError as exc:
+                return json.dumps({"accepted": False, "error": str(exc),
+                                   "findings_were_not_lost": True}, indent=2)
+            return json.dumps({
+                "accepted": False,
+                "recorded": "rejection",
+                "error": (f"THE REVIEW YOU FILED SAYS \"{_verdicts[-1].group(0).strip()}\": a setup its "
+                          f"own critic turned down is not a reviewed setup, and no token is issued "
+                          f"for it. Fix what the critic named, have it review the fixed setup, "
+                          f"and file that review."),
+                "note": ("The rejection is on record for this exact text: a run of it stays NOT "
+                         "VERIFIED until the text changes and a critic approves the changed "
+                         "text. Asking another critic about the same text does not undo it."),
+                "findings_were_not_lost": True}, indent=2)
         try:
             rec = _CRITIC_REGISTRY.submit_review(
                 solver=solver, findings=findings,
                 digest=review_digest(solver, setup_text),
-                ttl_s=ttl_s)
+                ttl_s=ttl_s, setup_text=setup_text, source_name=_named_file)
         except CriticGateError as exc:
             return json.dumps({"accepted": False, "error": str(exc)}, indent=2)
         _get_journal().record("critic_review", "submit_critic_review",
                               solver=solver,
                               input_snapshot=_make_input_snapshot(
                                   setup_text, solver, {"type": "critic_review"}))
-        return json.dumps({
+        # A SETUP WHOSE NAMED FILES DO NOT EXIST IS ON RECORD AS WRITTEN, AND SAID.
+        # Measured: a review naming work_dir "$(pwd)/side_A" was accepted as "on
+        # record for this exact setup" while it had found none of its scripts.
+        _missing = []
+        try:
+            _fp = json.loads(setup_text).get("__participant_files__") or {}
+            _missing = sorted(f"{_n}/{_f}" for _n, _files in _fp.items()
+                              for _f, _h in (_files or {}).items() if _h == "absent")
+        except (ValueError, TypeError, AttributeError):
+            _missing = []
+        reply = {
             "accepted": True,
             "critic_token": rec.token,
             "solver": solver,
@@ -4313,11 +5834,28 @@ def register_consolidated_tools(mcp: FastMCP):
             "note": ("This review is on record for this exact setup. Editing "
                      "the setup invalidates it. Pass critic_token to the run "
                      "tool to make the review single-use and bound to that "
-                     "job."),
-        }, indent=2)
+                     "job."
+                     + (f" NO FILE EXISTS AT {', '.join(_missing[:3])} as this setup names "
+                        f"it: the review is of a setup whose scripts it never saw, and a "
+                        f"run with the real paths is a different setup. A shell "
+                        f"expression such as $(pwd) is not expanded here; name the "
+                        f"absolute path." if _missing else "")),
+        }
+        if _named_file:
+            reply["bound_to"] = {"file": _named_file, "characters": len(setup_text),
+                                 "lines": len(setup_text.splitlines())}
+            reply["note"] = (f"This review is on record for the text of {_named_file} as it is "
+                             f"now ({len(setup_text):,} characters). Run that file unchanged -- "
+                             f"run_simulation(solver=..., input_path='{_named_file}') or "
+                             f"run_with_generator(solver=..., generator_path='{_named_file}') -- "
+                             f"and the run matches it. Editing the file voids the review. Only "
+                             f"this file's text is covered: files it reads when it runs (a mesh, a "
+                             f"module it imports) are not.")
+        return json.dumps(reply, indent=2)
 
     @mcp.tool()
-    async def run_with_generator(solver: str, generator_script: str,
+    async def run_with_generator(solver: str, generator_script: str = "",
+                                  generator_path: str = "",
                                   job_name: str = "", np: int = 1,
                                   critic_approved: bool = False,
                                   critic_token: str = "",
@@ -4343,6 +5881,9 @@ def register_consolidated_tools(mcp: FastMCP):
         Args:
             solver: Backend name (fourc, dealii, kratos)
             generator_script: Python script that creates the input file
+            generator_path: instead of generator_script, the name of a file in
+                the run folder holding it. Use it to run a generator the critic
+                reviewed: what runs is then exactly the reviewed text.
             job_name: Optional job directory name
             np: MPI processes (default 1)
             critic_approved: recorded, not trusted. The result is verified only
@@ -4365,6 +5906,11 @@ def register_consolidated_tools(mcp: FastMCP):
         import subprocess
         import sys
 
+        generator_script, _in_err = _run_text(generator_script, generator_path,
+                                              "generator_script", "generator_path")
+        if _in_err:
+            return json.dumps({"status": "failed", "phase": "input", "error": _in_err,
+                               "trustworthy_result": False}, indent=2)
         _journal = _get_journal()
         _snap = _make_input_snapshot(generator_script, solver, {"type": "generator"})
         _journal.record("tool_call", "run_with_generator", solver=solver,
@@ -4381,6 +5927,26 @@ def register_consolidated_tools(mcp: FastMCP):
                             input_snapshot=_snap)
             return f"Solver {solver} not available: {_short_reason(msg)}"
 
+        # A PYTHON SOLVER'S SCRIPT IS ITS OWN INPUT. Measured 2026-09-29 in the web interface:
+        # a model passed a complete FEniCSx script here. It ran in openPASO's own Python, which
+        # has no dolfinx, the reply said "No module named 'dolfinx'", and the model concluded
+        # FEniCSx was not installed and left a working script for another solver. Such a
+        # script is refused before it runs, with the call that runs it.
+        from core.backend import InputFormat
+        _own = sorted(m for m, b in _solver_modules_in(generator_script).items() if b == solver)
+        if backend.input_format() == InputFormat.PYTHON and _own:
+            _msg = (f"This script imports {', '.join(_own)}: it is the {solver} input itself, not "
+                    f"a generator. run_with_generator runs its script in openPASO's own Python, "
+                    f"which is not {solver}'s, so it stops with \"No module named '{_own[0]}'\" "
+                    f"although {solver} is installed. Pass the same script to "
+                    f"run_simulation(solver='{solver}', input_content=<this script>): that runs "
+                    f"it in {solver}'s own interpreter.")
+            _journal.record("tool_error", "run_with_generator", solver=solver,
+                            error_message=_msg[:300], input_snapshot=_snap)
+            return json.dumps({"status": "failed", "phase": "routing", "error": _msg,
+                               "next_step": f"run_simulation(solver='{solver}', "
+                                            f"input_content=<this script>)"}, indent=2)
+
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         name = job_name or f"{solver}_gen_{ts}"
@@ -4395,17 +5961,32 @@ def register_consolidated_tools(mcp: FastMCP):
             [python, str(gen_path)],
             capture_output=True, text=True,
             cwd=str(work_dir),
+            stdin=subprocess.DEVNULL,
         )
 
         if gen_result.returncode != 0:
             _journal.record("tool_error", "run_with_generator", solver=solver,
                             error_message=f"Generator failed: {gen_result.stderr[-200:]}",
                             input_snapshot=_snap)
-            return json.dumps({
+            _failed = {
                 "status": "failed", "phase": "generator",
                 "error": gen_result.stderr[-500:],
                 "work_dir": str(work_dir),
-            }, indent=2)
+            }
+            _missing = __import__("re").search(r"No module named '([A-Za-z_]\w*)",
+                                               gen_result.stderr or "")
+            if _missing and _missing.group(1) in _solver_module_owners():
+                # the generator, not the solver, stopped: it ran in openPASO's own Python
+                _failed["what_the_error_is"] = (
+                    f"the GENERATOR stopped, in openPASO's own Python ({python}), which does not "
+                    f"have {_missing.group(1)}; the solver never ran. A generator only writes the "
+                    f"input files and needs no solver import. A script that is itself a solve in "
+                    f"Python goes to run_simulation, which runs it in that solver's interpreter.")
+            else:
+                _named = _what_the_error_is(gen_result.stderr, solver)
+                if _named:
+                    _failed["what_the_error_is"] = _named
+            return json.dumps(_failed, indent=2)
 
         from core.backend import find_generated_input
         input_file = find_generated_input(work_dir, backend)
@@ -4448,9 +6029,28 @@ def register_consolidated_tools(mcp: FastMCP):
             "input_file": input_file.name,
         }
         out_files = []
+        # THE PROGRAM'S RETURN CODE, ALWAYS, AND A SIGNAL BY NAME. Measured: a run gave up
+        # 0.4 min after a bare "status: failed" from a program a segfault had killed with
+        # an empty stderr (a Release deal.II asserts nothing) -- a crash in its own code,
+        # read as an install fault.
+        if job.return_code is not None:
+            result["return_code"] = job.return_code
+            _sig = -job.return_code if job.return_code < 0 else (
+                job.return_code - 128 if 128 < job.return_code < 160 else 0)
+            if _sig:
+                import signal as _signal_mod
+                try:
+                    result["killed_by"] = (f"{_signal_mod.Signals(_sig).name}: a crash inside your "
+                                           f"program, not an install fault")
+                except ValueError:
+                    pass
         if job.error:
             result["error"] = error_excerpt(job.error)
+            _named = _what_the_error_is(job.error, solver)
+            if _named:
+                result["what_the_error_is"] = _named
         nonfinite = []
+        _empty = []
         _stdout_text = ""
         if job.status == "completed":
             out_files = backend.get_result_files(job)
@@ -4476,6 +6076,18 @@ def register_consolidated_tools(mcp: FastMCP):
             nonfinite += inspect_result_artefacts(out_files)
             if nonfinite:
                 result.setdefault("validation", []).extend(nonfinite)
+            # WHAT THE RESULT HOLDS. A result that is exactly zero everywhere is not a result;
+            # a field that never changed in time, and the mesh the result lives on (cells,
+            # extent, area), are stated beside it. Measured 2026-09-29: a run on a 95-cell mesh
+            # of the obstacle's disc wrote zero velocity and pressure, and the gate said "the
+            # automated checks passed" (core/fabrication_gate.result_content_findings).
+            _empty, _notes, _mesh = result_content_findings(out_files)
+            if _mesh:
+                result["result_mesh"] = _mesh
+            if _notes:
+                result["result_notes"] = _notes
+            if _empty:
+                result.setdefault("validation", []).extend(_empty)
             # The 'finiteness not asserted' honesty note is a coverage gap,
             # not evidence of a bad number — it must not flip the verdict to
             # 'non-finite values' (FEBio .xplt / .bp-without-adios2 runs).
@@ -4505,6 +6117,8 @@ def register_consolidated_tools(mcp: FastMCP):
                       if any("non-finite" in x for x in nonfinite)
                       else "a result file is unreadable/corrupt, so the gate "
                            "could not assert the output's integrity")
+        elif _empty:
+            reason = _empty[0]
         elif _residual_blocks_verification(result):
             reason = ("the field this run produced does NOT satisfy the "
                       "equations it declared: "
@@ -4513,7 +6127,7 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = ""
         _stamp_verification(result,
                             evidence_ok=(bool(out_files) and not job.error
-                                         and not nonfinite
+                                         and not nonfinite and not _empty
                                          and not _residual_blocks_verification(result)),
                             reason=reason, critic_approved=critic_approved,
                             solver=solver, setup_text=generator_script,
@@ -4547,10 +6161,18 @@ def register_consolidated_tools(mcp: FastMCP):
             return f"Unknown solver: {solver}"
         text = input_content or ""
         if input_path:
+            # A RELATIVE PATH IS THE CALLER'S, as at the other doors (resolve_under_cell). Measured:
+            # "No such file" for ./side_B/participant_B.py, which existed -- it was resolved
+            # against this server's own working directory.
+            from .result_audit import resolve_under_cell
+            _in = resolve_under_cell(input_path)
+            if not _in.is_absolute():
+                return ("check_input: a relative path cannot be resolved: this server does not know your "
+                        "working directory. Pass the ABSOLUTE path of the file inside your working directory.")
             try:
-                text = Path(input_path).read_text(errors="ignore")
+                text = _in.read_text(errors="ignore")
             except OSError as e:
-                return f"check_input: cannot read {input_path}: {e}"
+                return f"check_input: cannot read {_in}: {e}"
         if not text.strip():
             return "check_input: no input text (pass input_path or input_content)"
         findings = []
@@ -4568,7 +6190,8 @@ def register_consolidated_tools(mcp: FastMCP):
         return head + f"{len(findings)} finding(s), fix every one before running:\n" + "\n".join(f"- {f}" for f in findings)
 
     @mcp.tool()
-    async def run_simulation(solver: str, input_content: str,
+    async def run_simulation(solver: str, input_content: str = "",
+                             input_path: str = "",
                              job_name: str = "", np: int = 1,
                              critic_approved: bool = False,
                              critic_token: str = "",
@@ -4586,6 +6209,9 @@ def register_consolidated_tools(mcp: FastMCP):
         Args:
             solver: Backend name (best for: fenics, ngsolve, skfem, dune)
             input_content: The input content (Python script / YAML / C++ / XML)
+            input_path: instead of input_content, the name of a file in the run
+                folder whose text is the input. Use it to run a file the critic
+                reviewed: what runs is then exactly the reviewed text.
             job_name: Optional job name
             np: MPI processes
             critic_approved: recorded, not trusted. The result is verified only
@@ -4605,6 +6231,11 @@ def register_consolidated_tools(mcp: FastMCP):
                 diffusion on simplex meshes; anything else is reported as not
                 checked, never as passed.
         """
+        input_content, _in_err = _run_text(input_content, input_path,
+                                           "input_content", "input_path")
+        if _in_err:
+            return json.dumps({"status": "failed", "phase": "input", "error": _in_err,
+                               "trustworthy_result": False}, indent=2)
         _journal = _get_journal()
         _snap = _make_input_snapshot(input_content, solver)
         _journal.record("tool_call", "run_simulation", solver=solver,
@@ -4657,9 +6288,13 @@ def register_consolidated_tools(mcp: FastMCP):
         out_files = []
         if job.error:
             result["error"] = error_excerpt(job.error)
+            _named = _what_the_error_is(job.error, solver)
+            if _named:
+                result["what_the_error_is"] = _named
         if _input_warnings:
             result["input_validation_warnings"] = _input_warnings
         nonfinite = []
+        _empty = []
         _stdout_text = ""
         if job.status == "completed":
             out_files = backend.get_result_files(job)
@@ -4675,6 +6310,15 @@ def register_consolidated_tools(mcp: FastMCP):
                 result["status"] = "completed_unverified"
                 result["warning"] = ("Process exited cleanly but produced NO output files "
                                      "— this is NOT a verified solve. Do not treat as a result.")
+                # WHERE THE FILES WENT, when the script says so. Measured 2026-09-29: a
+                # 36-minute run changed directory with os.chdir, wrote every result there,
+                # and was reported as having produced nothing; the reason was one line up.
+                if re.search(r"\bos\.chdir\s*\(", input_content or ""):
+                    result["warning"] += (
+                        " The script changes its working directory (os.chdir), so its files "
+                        "were written there, outside this job's folder, which is the only "
+                        "place openPASO checks. Remove the chdir and write the results into "
+                        "the current directory.")
             else:
                 # ... and output full of NaN/Inf is a fabricated-looking result.
                 nonfinite = check_result_files_finite(out_files)
@@ -4688,6 +6332,18 @@ def register_consolidated_tools(mcp: FastMCP):
             nonfinite += inspect_result_artefacts(out_files)
             if nonfinite:
                 result.setdefault("validation", []).extend(nonfinite)
+            # WHAT THE RESULT HOLDS. A result that is exactly zero everywhere is not a result;
+            # a field that never changed in time, and the mesh the result lives on (cells,
+            # extent, area), are stated beside it. Measured 2026-09-29: a run on a 95-cell mesh
+            # of the obstacle's disc wrote zero velocity and pressure, and the gate said "the
+            # automated checks passed" (core/fabrication_gate.result_content_findings).
+            _empty, _notes, _mesh = result_content_findings(out_files)
+            if _mesh:
+                result["result_mesh"] = _mesh
+            if _notes:
+                result["result_notes"] = _notes
+            if _empty:
+                result.setdefault("validation", []).extend(_empty)
             # The 'finiteness not asserted' honesty note is a coverage gap,
             # not evidence of a bad number — it must not flip the verdict to
             # 'non-finite values' (FEBio .xplt / .bp-without-adios2 runs).
@@ -4717,6 +6373,8 @@ def register_consolidated_tools(mcp: FastMCP):
                       if any("non-finite" in x for x in nonfinite)
                       else "a result file is unreadable/corrupt, so the gate "
                            "could not assert the output's integrity")
+        elif _empty:
+            reason = _empty[0]
         elif _residual_blocks_verification(result):
             reason = ("the field this run produced does NOT satisfy the "
                       "equations it declared: "
@@ -4725,7 +6383,7 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = ""
         _stamp_verification(result,
                             evidence_ok=(bool(out_files) and not job.error
-                                         and not nonfinite
+                                         and not nonfinite and not _empty
                                          and not _residual_blocks_verification(result)),
                             reason=reason, critic_approved=critic_approved,
                             solver=solver, setup_text=input_content,
@@ -4735,6 +6393,14 @@ def register_consolidated_tools(mcp: FastMCP):
 
 
 
+    # write_participant_contract (below, by the knowledge tool) is the replacement
+    # that does NOT walk through Option B: it writes the SAME elided text the
+    # knowledge reply serves in parts -- one door, `_serve_participant`, which
+    # fails closed -- and nothing else. Measured on a coupled round: two runs
+    # spent 17 and 35 of their 45 minutes re-typing a 33k-character served
+    # contract back into a file, one of them six times, and one reply of it hit
+    # the harness's output cap. The text on disk is the text on the wire.
+    #
     # materialize_participant WAS HERE, AND IT WALKED THROUGH OPTION B.
     #
     # It shutil-copied the COMPLETE participant file — solve included — into
@@ -4749,8 +6415,9 @@ def register_consolidated_tools(mcp: FastMCP):
     # agent's workspace. Reverting the automatic delivery and leaving the
     # manual one standing fixed the door and not the room.
     #
-    # There is no replacement. An agent that wants the participant reads it in
-    # the coupling knowledge, minus the solve, and writes its own.
+    # That tool has no replacement. An agent that wants the participant reads it in
+    # the coupling knowledge, minus the solve, or has that same elided text
+    # written by write_participant_contract, and writes the solve itself.
 
     def _pde_consistency_body(solution_files: str, source_term: str,
                                coefficient: str = "1.0",
@@ -4888,8 +6555,8 @@ def register_consolidated_tools(mcp: FastMCP):
         # manufactured case the exact field falls 64.8x while a 3 % error in
         # ONE component stays flat.
         #
-        # This matters beyond tidiness. The campaign family this refusal
-        # covered, C9, is the one with the only recent CORRECT cell -- so the
+        # This matters beyond tidiness. The problem family this refusal
+        # covered, coupled elasticity, is the one with the only recent correct run -- so the
         # single coupled problem that had started working was the one nothing
         # could check.
         _ELASTIC = _re.compile(
@@ -5016,7 +6683,7 @@ def register_consolidated_tools(mcp: FastMCP):
 
         THIS EXISTED ONLY INSIDE AN INDEPENDENT CHECK UNTIL NOW, which is why
         it is here. The check below is the one that decided one coupled
-        development run: a result set whose two codes both genuinely ran,
+        recorded run: a result set whose two codes both genuinely ran,
         whose coupling genuinely iterated over three mesh levels, and whose
         interface FIELD matched to 0.000e+00 across the seam, was still
         complete but unphysical — because one side reported its flux with the
@@ -5031,11 +6698,15 @@ def register_consolidated_tools(mcp: FastMCP):
 
                q_n(x) / (-du/dn)(x)  ==  k   at every interface point,
 
-           so the ratio is CONSTANT along the interface whatever k is — and
-           POSITIVE. A constant NEGATIVE ratio means your normal points the
+           so the flux is a CONSTANT multiple of -du/dn whatever k is — and
+           POSITIVE. That holds for one number k only: where a side's
+           config.json (or, where it states no k, its program) sets K as a
+           matrix, the flux takes in the derivative along the interface too,
+           and that side reads NOT_APPLICABLE. A NEGATIVE multiple means your normal points the
            wrong way: the task defines q_n = -(K grad u) . n_out with n_out
-           pointing OUT of the subdomain. A ratio that is not constant means
-           the profile did not come from the field you delivered.
+           pointing OUT of the subdomain. A flux far from every constant
+           multiple, level after level, does not follow from the field you
+           delivered; one that comes closer at every level is discretisation.
 
            The trap this catches most often: on the NEUMANN side the flux you
            IMPORT and the flux you REPORT have OPPOSITE signs. Kratos's
@@ -5059,15 +6730,31 @@ def register_consolidated_tools(mcp: FastMCP):
             solution_files: comma-separated per-level field files, one per
                 side, `x, y, u`, named the same way. Needed for check 1 —
                 without them the sign cannot be tested, only the jump.
-            interface_axis: 0 if the interface is a line of constant x, 1 if
-                constant y.
+            interface_axis: a fallback only. The normal is read from the files:
+                the coordinate a straight interface holds constant, and on a bent
+                interface each leg's own.
 
-        Returns: per-side sign verdicts, per-level jumps, the refinement trend,
-            and NOT_ASSESSED wherever a check could not look at anything — a
-            check that could not run never reports success.
+        Returns: per-side sign verdicts (leg by leg on a bent interface), per-level
+            jumps, the refinement trend of each, and NOT_ASSESSED wherever a check
+            could not look at anything — a check that could not run never reports
+            success.
         """
         import re as _re
-        from pathlib import Path as _P
+        from pathlib import Path as _RawPath
+        from tools.result_audit import resolve_under_cell as _under_cell
+
+        def _P(f):
+            """Same resolution the audit uses: a relative path is the CALLER's.
+
+            This door took `Path(f)` on whatever string it was handed. The MCP
+            server is a separate process with its own working directory, so a
+            relative name resolved against OURS and the tool then reported that
+            the caller's file did not exist. Measured on two runs of
+            2026-09-19, one of which spent its last three calls checking
+            whether it had lost its own results.
+            """
+            return _RawPath(str(_under_cell(f)))
+
 
         try:
             from blind_eval import interface as _IF
@@ -5076,6 +6763,52 @@ def register_consolidated_tools(mcp: FastMCP):
 
         def _split(spec):
             return [t.strip() for t in str(spec).split(",") if t.strip()]
+
+        # A WIDE FILE IS READ BY ITS HEADER, NEVER BY POSITION. This read every
+        # file as `x, y, u, qn`; a thermo-elastic interface file is `x, y, T, ux,
+        # uy, qn, tx, ty`, so it took ux for the heat flux and served a false
+        # SIGN_CONVENTION with a jump of 2.0 at every level -- which a correct
+        # run copied into its hand-in (measured). A file of exactly the scalar
+        # shape reads as before; a wider one is read by name for its one scalar
+        # pair (T and qn, or u and qn); a file with no such pair is refused.
+        def _read(path, want_flux):
+            import csv as _csv
+            with open(path, newline="", errors="ignore") as fh:
+                rows = [r for r in _csv.reader(fh) if r and any(c.strip() for c in r)]
+            if not rows:
+                return None, "empty file"
+            try:
+                float(rows[0][0])
+                has_head = False
+            except (ValueError, IndexError):
+                has_head = True
+            narrow = 4 if want_flux else 3
+            if not has_head or len(rows[0]) <= narrow:
+                return _IF.read_interface_csv(path, 2, 1, 1 if want_flux else 0)
+            head = [c.strip().strip('"').lower() for c in rows[0]]
+
+            def _idx(*names):
+                for n in names:
+                    if n in head:
+                        return head.index(n)
+                return None
+            ix, iy = _idx("x"), _idx("y")
+            iu = _idx("t", "temperature", "u", "phi", "c")
+            iq = _idx("qn", "q", "q_n", "flux") if want_flux else None
+            if ix is None or iy is None or iu is None or (want_flux and iq is None):
+                return None, (f"{len(head)} columns ({', '.join(head)}): this check reads ONE scalar "
+                              f"field and its normal flux (T and qn, or u and qn) and there is no such "
+                              f"pair here; a vector exchange is judged per channel in the couple_levels "
+                              f"reply and by audit_results")
+            pts, vals, flux = [], [], []
+            for r in rows[1:]:
+                try:
+                    pts.append((float(r[ix]), float(r[iy])))
+                    vals.append((float(r[iu]),))
+                    flux.append((float(r[iq]),) if want_flux else ())
+                except (ValueError, IndexError):
+                    return None, "unparsable numeric value"
+            return (pts, vals, flux), "ok"
 
         def _key(name):
             m = _re.search(r"level(\d+)_([AB])", name)
@@ -5092,7 +6825,7 @@ def register_consolidated_tools(mcp: FastMCP):
                 # TRIPLE (points, values, fluxes) -- unpacking it wrong is
                 # what made the first version of this tool abstain on every
                 # side with "type tuple doesn't define __round__".
-                parsed, why = _IF.read_interface_csv(_P(f), 2, 1, 1)
+                parsed, why = _read(_P(f), True)
                 if parsed is None:
                     refused.append(f"{f}: {why}")
                 else:
@@ -5105,7 +6838,7 @@ def register_consolidated_tools(mcp: FastMCP):
             if k is None:
                 continue
             try:
-                parsed, why = _IF.read_interface_csv(_P(f), 2, 1, 0)
+                parsed, why = _read(_P(f), False)
                 if parsed is None:
                     refused.append(f"{f}: {why}")
                 else:
@@ -5119,18 +6852,56 @@ def register_consolidated_tools(mcp: FastMCP):
                 "detail": ("no interface file could be read; give the "
                            "per-level interface file paths, one per side, "
                            "named with level<k>_<side>, in the shape "
-                           "`x, y, u, qn`"),
+                           "`x, y, u, qn` (a wider file is read by its header: "
+                           "T and qn)"),
                 "files_refused": refused}, indent=2) + _UNIVERSAL_CORE
 
         levels = sorted({k for k, _ in iface})
         out = {"levels_seen": levels, "per_side": [], "per_level": [],
                "files_refused": refused}
 
+        # THE WORK DIR THE FILES CAME FROM: the sides' folders and their config.json sit below it
+        # (a file inside a side's own folder is one level deeper).
+        try:
+            _kwork = _RawPath(str(_under_cell(_split(interface_files)[0]))).parent
+            if (_kwork / "config.json").is_file() and not any(_kwork.glob("*/config.json")):
+                _kwork = _kwork.parent
+        except Exception:                                    # noqa: BLE001
+            _kwork = None
+        # A SIDE WHOSE CONDUCTIVITY IS A TENSOR IS NOT JUDGED BY THE CONSTANT-MULTIPLE TEST. With a
+        # full tensor K the outward flux -(K grad u) . n takes in the derivative along the interface
+        # as well, so q_n / (-du/dn) is not one constant there even for an exact flux. Measured on a
+        # coupled round: this check called both sides of right tensor results INCONSISTENT at every
+        # level while the audit of the same files abstained. Both now read one answer
+        # (result_audit._conductivity_forms: the side's config.json, and where that states no k, its
+        # program); a side whose conductivity no file states is judged as before.
+        try:
+            from tools.result_audit import _conductivity_forms as _kforms
+            _tensor_k = _kforms(_kwork)[0] if _kwork is not None else {}
+        except Exception:                                    # noqa: BLE001
+            _tensor_k = {}
+        _na = sorted({s for (_l, s) in iface if s in _tensor_k})
+        if _na:
+            out["flux_from_field_not_checked"] = (
+                f"THE SIGN AND FLUX-FROM-FIELD CHECKS DO NOT JUDGE {' AND '.join('SIDE ' + s for s in _na)} "
+                f"(NOT_APPLICABLE): " + "; ".join(f"{_tensor_k[s][0]}'s config.json {_tensor_k[s][1]}" for s in _na)
+                + ". With a full tensor K the outward flux -(K grad u) . n takes in the derivative along the "
+                "interface as well, so q_n / (-du/dn) is not one constant there even for a right flux, and "
+                "this check's constant-multiple test does not apply. The two-sided jump below still judges "
+                "the files.")
+
         # ---- check 1: sign and self-consistency, per side and level
         for lvl in levels:
             for side in ("A", "B"):
                 got = iface.get((lvl, side))
                 if got is None:
+                    continue
+                if side in _tensor_k:
+                    out["per_side"].append({
+                        "level": lvl, "side": side, "verdict": "NOT_APPLICABLE",
+                        "detail": (f"{_tensor_k[side][0]}'s config.json {_tensor_k[side][1]}: q_n / (-du/dn) "
+                                   f"is not one constant along the interface with a tensor K, so this "
+                                   f"side's flux sign and its ratio to the field are not judged")})
                     continue
                 ipts, _iv, iq = got
                 fld = fields.get((lvl, side))
@@ -5148,31 +6919,43 @@ def register_consolidated_tools(mcp: FastMCP):
                 # interface result set (obeying it corrupted the data). The
                 # axis is the coordinate constant across the interface
                 # probes; the plane its value; the outward sign follows
-                # from which side of the plane this side's own field lies.
-                import numpy as _np
-                _ipa = _np.asarray(ipts, float)
-                if _ipa.ndim == 2 and _ipa.shape[0] >= 2:
-                    _ax = int(_np.argmin(_ipa.var(axis=0)))
-                    _plane = float(_ipa[:, _ax].mean())
-                else:
-                    _ax, _plane = interface_axis, (
-                        ipts[0][interface_axis] if len(ipts) else 0.0)
+                # from which side of the plane this side's own field lies --
+                # and on a BENT interface each leg has its own (measured: one
+                # axis for two legs told a correct side SIGN_CONVENTION and
+                # INCONSISTENT by 98670 %, and the hand-in gave that as its cause).
                 try:
-                    _sp = _np.asarray(fld[0], float)
-                    sign = (1.0 if float(_sp[:, _ax].mean()) < _plane
-                            else -1.0)
-                except Exception:                       # noqa: BLE001
-                    sign = 1.0 if side == "A" else -1.0
-                try:
-                    dudn = _IF.recover_normal_derivative(
-                        fld[0], fld[1], ipts, _ax, _plane,
-                        sign)
-                    res = _IF.flux_ratio_consistency(iq, dudn)
+                    from tools.result_audit import side_flux_ratio as _sfr
+                    res = _sfr(ipts, iq, fld[0], fld[1], _IF, interface_axis)
                 except Exception as exc:
                     res = {"verdict": "NOT_ASSESSED",
                            "detail": f"{type(exc).__name__}: {exc}"}
                 res.update({"level": lvl, "side": side})
+                # A CONSTANT RATIO IS NOT THE STATED COEFFICIENT. The ratio was
+                # judged for spread and sign only, and a side whose implied
+                # coefficient was 8.742 against a stated k of 1 read CONSISTENT
+                # (measured, on a side that had never solved its interior).
                 out["per_side"].append(res)
+        # THE TREND DECIDES WHAT A COARSE MISFIT WAS. Measured on a right field: the
+        # implied coefficient varied by 31 % along the interface at level 1, 12 % at
+        # level 2 and 8 % at level 3, and level 1 alone read "the two were not
+        # computed from each other".
+        out["misfit_trend"] = _ratio_misfit_trend(out["per_side"])
+        if not out["misfit_trend"]:
+            del out["misfit_trend"]
+        try:
+            from tools.result_audit import _side_operators as _sops
+            _wk = _RawPath(str(_under_cell(_split(interface_files)[0]))).parent
+            _ops = _sops(_wk)
+        except Exception:                                    # noqa: BLE001
+            _ops = {}
+        for res in out["per_side"]:
+            try:
+                _op = next((o for n, o in _ops.items()
+                            if n.replace("side_", "").upper() == str(res.get("side")).upper()), None)
+                _ks = float(_op["k"]) if _op and isinstance(_op.get("k"), (int, float)) else None
+                _res_coefficient_check(res, _ks)
+            except Exception:                                # noqa: BLE001
+                pass
 
         # ---- check 2: the two-sided jump and its trend
         per_level = []
@@ -5191,6 +6974,14 @@ def register_consolidated_tools(mcp: FastMCP):
                 # silently absent from every reply, with nothing in its place
                 # saying so. A report section that exists only in the healthy
                 # case, whose absence reads as a pass.
+                # THE SAME POINTS, WHEREVER EACH SIDE LISTS THEM: where the two files hold
+                # different numbers of rows, the jump is taken on the points both hold.
+                if len(a[0]) != len(b[0]):
+                    from core.quality_checks import pair_interface_points as _pair
+                    _pr = _pair(a[0], b[0])
+                    if _pr is not None and len(_pr["ia"]) >= 2 and not (_pr["only_a"] and _pr["only_b"]):
+                        a = tuple([t[i] for i in _pr["ia"]] for t in a)
+                        b = tuple([t[j] for j in _pr["ib"]] for t in b)
                 jumps, why = _IF.two_sided_jumps(a, b)
                 if jumps is None:
                     per_level.append({"level": lvl, "verdict": "NOT_ASSESSED",
@@ -5204,7 +6995,13 @@ def register_consolidated_tools(mcp: FastMCP):
         out["per_level"] = per_level
         jq = [p.get("jump_q_rel") for p in per_level
               if isinstance(p.get("jump_q_rel"), (int, float))]
-        if len(jq) >= 2:
+        if len(jq) >= 2 and max(jq) < 1e-6:
+            # the audit's floor (result_audit._JUMP_ROUND_OFF): no trend at round-off
+            out["flux_jump_trend"] = {
+                "values": jq, "shrinking": None,
+                "detail": ("the flux jump is at round-off at every level: the two fluxes "
+                           "agree to solver precision, and there is no trend to read")}
+        elif len(jq) >= 2:
             shrinking = all(jq[i + 1] < jq[i] for i in range(len(jq) - 1))
             out["flux_jump_trend"] = {
                 "values": jq,
@@ -5212,11 +7009,17 @@ def register_consolidated_tools(mcp: FastMCP):
                 "detail": ("the flux jump falls under refinement, which is "
                            "what a satisfied transmission condition looks like"
                            if shrinking else
-                           "THE FLUX JUMP DOES NOT SHRINK under refinement. "
-                           "Your iteration converged to a fixed point of the "
-                           "wrong transmission condition. Check the SIGN "
-                           "first: on the Neumann side the flux you import and "
-                           "the flux you report are opposite.")}
+                           "THE FLUX JUMP DOES NOT SHRINK under refinement, so "
+                           "it is not discretisation error. This measures the "
+                           "jump, not its cause. Causes on record: a wrong sign "
+                           "or scaling of an exchanged flux (on the Neumann side "
+                           "the flux you import and the flux you report are "
+                           "opposite), the partner's data applied by row index "
+                           "instead of by position (row i of the partner's list is "
+                           "not point i of this side's interface when the two list "
+                           "their points in different orders), a boundary not held "
+                           "where the problem holds it, and a linear system that "
+                           "was not solved.")}
         return json.dumps(out, indent=2) + _UNIVERSAL_CORE
 
     @mcp.tool()
@@ -5233,9 +7036,9 @@ def register_consolidated_tools(mcp: FastMCP):
         claimed convergence order, which the order check needs):
 
           * NEAR-ZERO FIELD - your finest solution peaks below 1e-8. On a
-            driven problem that almost always means the source/load was never
-            wired in (a defined function no condition references, a load curve
-            never activated), not that the answer is small.
+            driven problem check that the source/load reaches the solve (a
+            defined function no condition references, a load curve never
+            activated, boundary values all zero) before reading it as small.
           * FLOOR - successive refinement levels within 5% of each other:
             whatever limits your number, it is not the mesh. Usual cause is a
             solver tolerance (nonlinear/iterative defaults stop near 1e-6).
@@ -5392,7 +7195,7 @@ def register_consolidated_tools(mcp: FastMCP):
                 gen_path.write_text(content)
                 gen = subprocess.run([sys.executable, str(gen_path)],
                                      capture_output=True, text=True,
-                                     cwd=str(work_dir))
+                                     cwd=str(work_dir), stdin=subprocess.DEVNULL)
                 if gen.returncode != 0:
                     return _fail(f"level {lvl} (resolution "
                                  f"{mi.format_resolution(res_val)}): generator "
@@ -5596,7 +7399,7 @@ def register_consolidated_tools(mcp: FastMCP):
         return (out + note) if isinstance(out, str) else out
 
     @mcp.tool()
-    async def couple(participants: str, max_iter: int = 50, tol: float = 1e-6,
+    async def couple(participants: str | list, max_iter: int = 50, tol: float = 1e-6,
                      accelerator: str = "auto", theta: float = 0.5,
                      monolithic: str = "", probe: bool = True,
                      critic_approved: bool = False, noise_replicates: int = 0,
@@ -5709,7 +7512,7 @@ def register_consolidated_tools(mcp: FastMCP):
 
         iface_level: optional level number stamped into the suggested_filename of the interface_csv blocks the reply carries on convergence (each participant's own final interface data, ready to save verbatim).
 
-        pde_check: THE ONE CHECK THAT SEPARATES A RIGHT ANSWER FROM A CONVERGED WRONG ONE, run for you on every converged level. JSON keyed by participant name: {"A": {"solution_files": "<this side's per-level field files, comma-separated, in level order>", "equation": "<your task's EQUATION line, verbatim>", "source": "<that side's source, as your task wrote it>", "coefficient": "<that side's coefficient>", "domain": "[[x0,x1],[y0,y1]]"}, "B": {...}}. The files must be on the PROBE GRID your task prescribes, not your mesh nodes: the test is a midpoint quadrature and on a scatter it reports nothing rather than a misleading number. You name them; openPASO guesses no filename and opens no task file. Give it once and openPASO puts each side's own field back into that side's own equation at every level from the second on, and reports CONSISTENT or INCONSISTENT in `pde_consistency`. A refinement study cannot do this: a field that converges cleanly to the WRONG function is indistinguishable in one -- measured on three development cells whose every self-consistency measure reported a converging run while the answer was wrong. Nothing here is read from any task file; these are YOUR strings, and openPASO neither stores nor supplies them. A side whose operator this check does not model is refused by name and the rest still run.
+        pde_check: THE ONE CHECK THAT SEPARATES A RIGHT ANSWER FROM A CONVERGED WRONG ONE, run for you on every converged level. JSON keyed by participant name: {"A": {"solution_files": "<this side's per-level field files, comma-separated, in level order>", "equation": "<your task's EQUATION line, verbatim>", "source": "<that side's source, as your task wrote it>", "coefficient": "<that side's coefficient>", "domain": "[[x0,x1],[y0,y1]]"}, "B": {...}}. The files must be on the PROBE GRID your task prescribes, not your mesh nodes: the test is a midpoint quadrature and on a scatter it reports nothing rather than a misleading number. You name them; openPASO guesses no filename and opens no task file. Give it once and openPASO puts each side's own field back into that side's own equation at every level from the second on, and reports CONSISTENT or INCONSISTENT in `pde_consistency`. A refinement study cannot do this: a field that converges cleanly to the WRONG function is indistinguishable in one -- measured on three recorded coupled runs whose every self-consistency measure reported a converging run while the answer was wrong. Nothing here is read from any task file; these are YOUR strings, and openPASO neither stores nor supplies them. A side whose operator this check does not model is refused by name and the rest still run.
 
         pde_sources: OPTIONAL, public-only. JSON {"A": {"source": "<the forcing/coefficient you actually implemented>", "task_source": "<the task's stated source, verbatim>"}, "B": {...}}. When supplied, openPASO compares the two PUBLIC strings and flags a mismatch — a silent wrong forcing (right shape, wrong function) converges cleanly to a different answer and no self-consistency check can see it. Never required; openPASO reads no reference solution and never supplies the equation for you.
 
@@ -5727,6 +7530,7 @@ def register_consolidated_tools(mcp: FastMCP):
         from core.coupling_driver import Participant, run_coupling
         from core.quality_checks import (
             check_interface_balance, check_finite, check_convergence,
+            ENDS_ONLY_MARK as _ENDS_ONLY_MARK,
             check_coupling_directionality, check_participant_responsiveness,
             check_interface_meshes, check_residual_blocks, check_returncodes,
             check_interface_flux_profile, check_interfaces_are_the_same_surface,
@@ -5741,6 +7545,7 @@ def register_consolidated_tools(mcp: FastMCP):
         # on the tool and hand-rolled its own driver.
         _pde_verdicts: dict = {}
         _pde_notes: list = []
+        participants = _as_json_text(participants)
         try:
             specs = json.loads(participants)
         except json.JSONDecodeError as e:
@@ -5753,14 +7558,36 @@ def register_consolidated_tools(mcp: FastMCP):
         for s in specs:
             try:
                 wd = Path(s["work_dir"])
-                # A relative work_dir is resolved against the SERVER process's
-                # cwd, which the agent can neither see nor control, so the run
-                # lands somewhere unpredictable and looks like it worked.
+                # A RELATIVE work_dir IS THE CALLER'S, AND WE CAN RESOLVE IT
+                # WHEN WE KNOW WHERE THEY ARE.
+                #
+                # This refused outright, because a relative path would
+                # otherwise resolve against the SERVER process's cwd -- which
+                # the caller can neither see nor control -- and the run would
+                # land somewhere unpredictable while looking like it worked.
+                # That reason still holds when nobody has told us the caller's
+                # directory, and the refusal stays for that case.
+                #
+                # When the caller's directory IS declared, refusing costs a
+                # call for no reason and pushes them towards writing an
+                # absolute path from scratch. Measured 2026-09-19: the only
+                # concrete absolute path anywhere in the served text is the
+                # interpreter openPASO itself hands out, and SIX OF TEN coupled
+                # runs built a work_dir out of its directory -- ".../
+                # open-fem-agent/side_A" -- then had to be refused for being
+                # outside the task tree, and the correction changed the setup
+                # so their critic review no longer bound. We showed them the
+                # only absolute path they had.
                 if not wd.is_absolute():
-                    return json.dumps({"error":
-                        f"participant {s.get('name','?')}: work_dir must be an "
-                        f"ABSOLUTE path, got {s['work_dir']!r} (a relative path "
-                        f"is resolved against the server's own directory)."})
+                    if cell_root is None:
+                        return json.dumps({"error":
+                            f"participant {s.get('name','?')}: work_dir must be "
+                            f"an ABSOLUTE path, got {s['work_dir']!r} — nothing "
+                            f"has told this server which directory a relative "
+                            f"path would be relative TO, and resolving it "
+                            f"against the server's own would put your run "
+                            f"somewhere you cannot see."})
+                    wd = cell_root / wd
                 wd = wd.resolve()
                 if cell_root is not None and not wd.is_relative_to(cell_root):
                     return json.dumps({"error":
@@ -5769,7 +7596,38 @@ def register_consolidated_tools(mcp: FastMCP):
                         f"Put every participant under the current task tree; "
                         f"private /tmp is disposable and sibling paths are "
                         f"isolated."})
-                wd.mkdir(parents=True, exist_ok=True)
+                # DO NOT CREATE A PARTICIPANT'S DIRECTORY. It used to be
+                # `wd.mkdir(parents=True, exist_ok=True)`, which turns a WRONG
+                # PATH into a MISSING SCRIPT: the directory appears, empty, the
+                # participant is launched in it, and the failure the caller
+                # reads is "can't open file 'part.py'" -- which sends them to
+                # look at their script, not at the path they passed. Measured
+                # 2026-09-19: a work_dir of /testbed escaped as a raw
+                # PermissionError traceback out of the tool, and an invented
+                # sibling directory was silently created instead.
+                #
+                # A participant runs where its script already is. The contrast
+                # with the participants whose directories DO exist is the whole
+                # diagnosis, so it is printed.
+                if not wd.is_dir():
+                    _present = sorted(
+                        {str(Path(str(o.get("work_dir", ""))).expanduser())
+                         for o in specs if isinstance(o, dict)
+                         and str(o.get("work_dir", ""))
+                         and Path(str(o["work_dir"])).expanduser().is_dir()})
+                    return json.dumps({"error":
+                        f"participant {s.get('name','?')}: work_dir {wd} does "
+                        f"not exist. A participant runs in a directory that "
+                        f"ALREADY holds its script; this call does not create "
+                        f"one, because an empty directory turns a wrong path "
+                        f"into a missing script."
+                        + (f" These participant directories DO exist: "
+                           f"{_present}." if _present else
+                           " None of this call's participant directories "
+                           "exist.")})
+                _bin = _solver_binary_as_participant(s)
+                if _bin:
+                    return json.dumps({"error": _bin})
                 parts.append(Participant(name=s["name"], command=list(s["command"]),
                                          work_dir=wd, imports_from=s.get("imports_from", []),
                                          timeout=int(s.get("timeout", 3600)),
@@ -5777,6 +7635,12 @@ def register_consolidated_tools(mcp: FastMCP):
                                          env=(dict(s["env"]) if isinstance(s.get("env"), dict) else None)))
             except (KeyError, TypeError) as e:
                 return json.dumps({"error": f"bad participant spec {s!r}: {e}"})
+            except OSError as e:
+                # `/testbed` raised PermissionError straight out of the tool.
+                return json.dumps({"error":
+                    f"participant {s.get('name','?')}: work_dir "
+                    f"{s.get('work_dir','?')!r} cannot be used: "
+                    f"{type(e).__name__}: {e}"})
         if not (0.0 < theta <= 1.0):
             return json.dumps({"error": f"theta must be in (0, 1], got {theta}"})
         # The driver compares this string with ==, so "Aitken" or a typo used to
@@ -5847,6 +7711,7 @@ def register_consolidated_tools(mcp: FastMCP):
         try:
             _level_secs = None
             _t_level = __import__('time').perf_counter()
+            _t_level_wall = __import__('time').time()      # the dumps this call writes are newer
             r = run_coupling(parts, max_iter=max_iter, tol=tol,
                              accelerator=accelerator, theta0=theta, probe=probe,
                              noise_replicates=int(noise_replicates),
@@ -5891,6 +7756,18 @@ def register_consolidated_tools(mcp: FastMCP):
                             for iteration, value in enumerate(r.history, 1)
                             if _math.isfinite(float(value))]
                     destination.parent.mkdir(parents=True, exist_ok=True)
+                    # A RUN THAT PRODUCED NO RESIDUAL DOES NOT ERASE ONE THAT DID.
+                    # A coupling that died at iteration 1 wrote a header-only file
+                    # over the previous run's history (measured: 30 rows lost). The
+                    # earlier file is kept beside it before an empty one replaces it.
+                    if not rows and destination.is_file():
+                        try:
+                            _old_rows = len(destination.read_text().splitlines()) - 1
+                        except OSError:
+                            _old_rows = 0
+                        if _old_rows > 0:
+                            destination.replace(destination.with_name(
+                                destination.stem + ".previous" + destination.suffix))
                     tmp = destination.with_suffix(destination.suffix + ".tmp")
                     tmp.write_text(
                         "iteration,interface_residual\n" +
@@ -5913,7 +7790,7 @@ def register_consolidated_tools(mcp: FastMCP):
                         "error": f"{type(exc).__name__}: {exc}"}
 
         # YOUR OWN VALIDATED INTERFACE DATA, RETURNED READY TO SAVE.
-        # Twelve development iterations measured the same terminal failure:
+        # Twelve rounds of recorded runs measured the same terminal failure:
         # the coupling converges (proven to have run at every level) and the
         # agent then RE-DERIVES its interface files by hand -- first-order
         # recoveries, self-chosen probe coordinates, negated echoes -- and the
@@ -5963,13 +7840,27 @@ def register_consolidated_tools(mcp: FastMCP):
                     pass
             if len(_lvls) == 1:            # both sides agree; ambiguity is not a level
                 _lvl_for_log = _lvls.pop()
+        # ONLY A CONSOLE THIS CALL'S RUNS WROTE IS THIS LEVEL'S. Measured: side A stopped at
+        # iteration 1, side B never ran, and B's console -- still the previous level's -- was
+        # kept as this level's and read as "MESH UNCHANGED FROM LEVEL k on B". The driver's
+        # exit codes name every side that ran in this call.
+        _ran_here = set()
+        for _p in parts:
+            try:
+                _src = Path(_p.work_dir) / "participant_output.log"
+                if (_p.name in (getattr(r, "returncodes", None) or {}) and _src.is_file()
+                        and _src.stat().st_mtime >= _t_level_wall - 1.0):
+                    _ran_here.add(_p.name)
+            except OSError:
+                pass
         if _lvl_for_log:
             for _p in parts:
+                if _p.name not in _ran_here:
+                    continue
                 try:
                     _src = Path(_p.work_dir) / "participant_output.log"
-                    if _src.is_file():
-                        (Path(_p.work_dir) / f"participant_output_level{_lvl_for_log}.log").write_text(
-                            _src.read_text(errors="replace"))
+                    (Path(_p.work_dir) / f"participant_output_level{_lvl_for_log}.log").write_text(
+                        _src.read_text(errors="replace"))
                 except OSError:
                     pass
         # THE MESH MUST CHANGE BETWEEN LEVELS. Measured (round 27, a cell with time for three
@@ -5981,9 +7872,11 @@ def register_consolidated_tools(mcp: FastMCP):
         if _lvl_for_log and _lvl_for_log >= 2:
             try:
                 # any "NDOF = n" on a console line (the run-log contract's bare line is the audit's business)
-                _dof_any = re.compile(r"^\s*NDOF\s*=\s*(\d+)\s*$", re.M)   # the grader's canonical line, FIRST match
+                _dof_any = re.compile(r"^\s*NDOF\s*=\s*(\d+)\s*$", re.M)   # the canonical contract line, FIRST match
                 _same = []
                 for _p in parts:
+                    if _p.name not in _ran_here:
+                        continue           # a side that did not run here has no console of this level
                     _cur = Path(_p.work_dir) / f"participant_output_level{_lvl_for_log}.log"
                     _prev = Path(_p.work_dir) / f"participant_output_level{_lvl_for_log - 1}.log"
                     if _cur.is_file() and _prev.is_file():
@@ -5994,8 +7887,10 @@ def register_consolidated_tools(mcp: FastMCP):
                 if _same:
                     _mesh_note = ("MESH UNCHANGED FROM LEVEL " + str(_lvl_for_log - 1) + " on " + ", ".join(_same)
                                   + ": this level is NOT a refinement and counts as not run. Halve h -- double nx "
-                                  "and ny in that side's config (or hand couple_levels the levels, which does it) -- "
-                                  "and couple level " + str(_lvl_for_log) + " again before anything else.")
+                                  "and ny in that side's config; under couple_levels they arrive in the environment "
+                                  "variable OPENPASO_CONFIG_JSON, which the script must merge over its ./config.json and "
+                                  "build its mesh from -- and couple level " + str(_lvl_for_log)
+                                  + " again before anything else.")
             except Exception:                                # noqa: BLE001
                 _mesh_note = ""
         iface_csv = None
@@ -6004,6 +7899,7 @@ def register_consolidated_tools(mcp: FastMCP):
             iface_csv = {}           # a converged reply (reviewer finding)
             lvl = int(iface_level) if iface_level else 0
             suffix = f"_level{lvl}" if lvl else ""
+            _inline_left = _IFACE_CSV_INLINE_MAX
             for pname, data in sorted((r.exports or {}).items()):
                 co = data.get("coordinates") or []
                 vals = data.get("values") or []
@@ -6027,10 +7923,14 @@ def register_consolidated_tools(mcp: FastMCP):
                 hdr = ", ".join(list("xyz"[:ncoord])
                                 + (["u"] if vals else [])
                                 + (["qn"] if qs else []))
-                iface_csv[pname] = {
-                    "suggested_filename": f"interface{suffix}_{pname}.csv",
-                    "csv": hdr + chr(10) + chr(10).join(rows) + chr(10),
-                }
+                _text = hdr + chr(10) + chr(10).join(rows) + chr(10)
+                _block = {"suggested_filename": f"interface{suffix}_{pname}.csv"}
+                if len(_text) > _inline_left:
+                    iface_csv[pname] = _iface_block_not_inlined(
+                        pname, _block, len(_text), n, rows[0].count(",") + 1 if rows else None)
+                    continue
+                _inline_left -= len(_text)
+                iface_csv[pname] = {**_block, "csv": _text}
             if iface_csv:
                 iface_csv["_how_to_use"] = (
                     "Each block is that participant OWN interface data at "
@@ -6082,7 +7982,9 @@ def register_consolidated_tools(mcp: FastMCP):
             val += check_finite(ex.get("coordinates", []), label=f"{nm}.coordinates")
         f, n = check_returncodes(r.returncodes); val += f; not_run += n
         f, n = check_coupling_directionality(r.graph, max_iter); val += f; not_run += n
-        f, n = check_participant_responsiveness(r.responsiveness); val += f; not_run += n
+        f, n = check_participant_responsiveness(r.responsiveness,
+                                                getattr(r, "responsiveness_detail", None),
+                                                getattr(r, "sensitivity", None)); val += f; not_run += n
         if probe:
             # The measured floor is handed over, so the one branch that cannot
             # tell "stochastic" from "hidden state" reports coverage instead of
@@ -6090,7 +7992,8 @@ def register_consolidated_tools(mcp: FastMCP):
             # catches a participant ignoring its imports outright (S below the
             # response floor) is unaffected and stays a finding either way.
             f, n = check_interface_sensitivity(r.sensitivity,
-                                               noise_floor=r.noise_floor)
+                                               noise_floor=r.noise_floor,
+                                               exports=r.exports, graph=r.graph)
             val += f; not_run += n
         else:
             not_run.append(
@@ -6138,15 +8041,47 @@ def register_consolidated_tools(mcp: FastMCP):
                 + ", ".join(f"{k}={v:.2e}" for k, v in
                             sorted(r.block_residuals.items()) if v == v))
         elif r.converged:
-            f, n = check_residual_blocks(r.block_residuals, tol)
+            # A BLOCK NO SIDE READS DOES NOT DECIDE THE FIXED POINT. On a Dirichlet-
+            # Neumann pair the Dirichlet side reads its partner's trace and the Neumann
+            # side its partner's flux; the Dirichlet side's own exported trace is read by
+            # no one and lags the iteration by one step. Measured: a right ladder was
+            # denied by a caveat on exactly that block. Judged only where both sides
+            # state their roles.
+            _unread = _unread_blocks([(p.name, p.work_dir) for p in parts])
+            # (a block of one column per point is named "<side>.<array>[<column>]": the column
+            # belongs to its array -- measured, "B.normal_fluxes[k]" never matched and was judged)
+            _unread_key = lambda _k: re.sub(r"\[\d+\]$", "", _k) in _unread      # noqa: E731
+            _blocks = {k: v for k, v in (r.block_residuals or {}).items() if not _unread_key(k)}
+            f, n = check_residual_blocks(_blocks or r.block_residuals, tol,
+                                         fixed_point=getattr(r, "block_fixed_point", None),
+                                         distance=getattr(r, "block_distance", None),
+                                         scale_change=getattr(r, "block_scale_change", None),
+                                         tiny_change=getattr(r, "block_tiny_change", None))
             val += f; not_run += n
+            _skipped = {}
+            for _k in (r.block_residuals or {}):
+                if _unread_key(_k):
+                    _a = re.sub(r"\[\d+\]$", "", _k)
+                    _skipped[_a] = _skipped.get(_a, 0) + 1
+            _skipped = [a + (f" ({n} columns)" if n > 1 else "") for a, n in sorted(_skipped.items())]
+            if _skipped and _blocks:
+                not_run.append("per-block convergence: " + ", ".join(_skipped) + " not judged -- read by no "
+                               "side (a Dirichlet side reads its partner's trace, a Neumann side its partner's "
+                               "flux), so their last step does not decide the fixed point")
         names = list(r.exports)
+        _bal_numbers: dict = {}
+        _prof_numbers: dict = {}
         if len(names) == 2:
             a, b = r.exports[names[0]], r.exports[names[1]]
             f, n = check_interfaces_are_the_same_surface(a, b, names[0], names[1])
             val += f; not_run += n
             f, n = check_interface_meshes(a, b, names[0], names[1]); val += f; not_run += n
-            f, n = check_interface_flux_profile(a, b, names[0], names[1])
+            f, n = check_interface_flux_profile(a, b, names[0], names[1],
+                                                numbers=_prof_numbers,
+                                                ends=_straight_interface_ends(
+                                                    [Path(str(p.work_dir)) for p in parts],
+                                                    a.get("coordinates"), _lvl_for_log,
+                                                    _t_level_wall - 1.0))
             val += f; not_run += n
             if a.get("normal_fluxes") is None or b.get("normal_fluxes") is None:
                 not_run.append(
@@ -6156,7 +8091,18 @@ def register_consolidated_tools(mcp: FastMCP):
                     "its own outward normal) to enable the only conservation "
                     "evidence available here.")
             else:
-                val += check_interface_balance(a, b, names[0], names[1])
+                # A CHECK THAT CANNOT SPEAK IS COVERAGE, NOT A FINDING. On a
+                # Dirichlet-Neumann pair the two exported fluxes are exact
+                # opposites by construction (the Neumann side's consistent
+                # recovery returns the flux it was given), and the check says
+                # so instead of passing them. That sentence names a gap in
+                # what THIS reply can verify, so it goes where the other
+                # coverage gaps go; it must not make a level unverifiable for
+                # a comparison no pair of this kind can ever offer.
+                for _m in check_interface_balance(a, b, names[0], names[1],
+                                                  numbers=_bal_numbers):
+                    (not_run if ("cannot disagree" in _m or _m.startswith(_ENDS_ONLY_MARK)
+                                 or "(the exchange is at round-off)" in _m) else val).append(_m)
         elif len(names) > 2:
             not_run.append(
                 f"interface flux balance: {len(names)} participants — the pairwise "
@@ -6264,12 +8210,17 @@ def register_consolidated_tools(mcp: FastMCP):
 
         result = {"verification": None,          # filled by _stamp_verification
                   "validation": val, "checks_not_run": not_run,
+                  # the balance numbers travel so a ladder can state their trend
+                  "interface_balance": _bal_numbers or None,
+                  "interface_profile": _prof_numbers or None,
                   "error": r.error,
                   "converged": r.converged, "iterations": r.iterations,
                   "residual": r.residual, "history": r.history,
                   "block_residuals": r.block_residuals,
                   "returncodes": r.returncodes,
                   "responsiveness": r.responsiveness,
+                  **({"responsiveness_detail": r.responsiveness_detail}
+                     if getattr(r, "responsiveness_detail", None) else {}),
                   "graph": r.graph, "relaxation": r.theta,
                   "interface_sensitivity": r.sensitivity,
                   "participant_output_logs": {
@@ -6357,8 +8308,91 @@ def register_consolidated_tools(mcp: FastMCP):
         # away in a different payload from this message. So the operative
         # sentence is repeated here, where the agent is actually reading.
         reason = _couple_failure_reason(r, checks_ok)
+        # A SIDE WHOSE OWN FIELD IS NOT FINITE IS NOT A RESULT, whatever its exports
+        # say. Measured: a side whose form assembled to zero exported finite
+        # placeholders over a NaN field, and this reply called the level "CONVERGED --
+        # THIS IS A RESULT, SAVE IT NOW".
+        try:
+            from . import result_audit as _ra_nf
+            _nf = _ra_nf.nonfinite_field_findings(
+                Path(str(parts[0].work_dir)).parent, dirs=[Path(str(p.work_dir)) for p in parts],
+                since=_t_level_wall - 1.0, scan=False)
+        except Exception:                                    # noqa: BLE001
+            _nf = []
+        if _nf:
+            checks_ok = False
+            reason = _at_sentence(str(_nf[0].get("finding", "")), 400)
+            val = list(val) + [str(f.get("finding", "")) for f in _nf]
+            result["validation"] = val
+        # NOR IS A SIDE THAT NEVER SOLVED ITS INTERIOR. Measured: every level of a
+        # ladder whose side held exactly 0.0 at every interior node read
+        # trustworthy_result true, under a ladder verdict that named the side.
+        try:
+            _us = _ra_nf.unsolved_field_findings(
+                Path(str(parts[0].work_dir)).parent, dirs=[Path(str(p.work_dir)) for p in parts],
+                since=_t_level_wall - 1.0, scan=False)
+        except Exception:                                    # noqa: BLE001
+            _us = []
+        if _us:
+            checks_ok = False
+            reason = reason if _nf else _at_sentence(str(_us[0].get("finding", "")), 400)
+            val = list(val) + [str(f.get("finding", "")) for f in _us]
+            result["validation"] = val
+        # NOR A SIDE WHOSE HELD BOUNDARY IS NOT WHAT ITS OWN CONFIG STATES, A LEVEL
+        # RUN ON THE PREVIOUS LEVEL'S MESH, OR A LEVEL WHOSE SIDES EXCHANGED NOTHING.
+        # Measured: a level whose side left 11 of 33 nodes of a held edge free, and
+        # one whose interface corners were free, read trustworthy_result true while
+        # the same reply's audit named them; a level whose sides exchanged nothing
+        # was told to save itself as a result.
+        _lvl_here = int(iface_level) if iface_level else (_lvl_for_log or None)
+        _bf = []
+        try:
+            _root_here = Path(str(parts[0].work_dir)).parent
+            _dirs_here = [Path(str(p.work_dir)) for p in parts]
+            _bf += [f for f in _ra_nf.outer_boundary_findings(
+                        _root_here, levels=[_lvl_here] if _lvl_here else None, dirs=_dirs_here)
+                    if not f.get("informational")]
+            _bf += [f for f in _ra_nf.free_interface_end_findings(
+                        _root_here, dirs=_dirs_here, levels=[_lvl_here] if _lvl_here else None)
+                    if not f.get("informational") and int(f.get("priority", 99)) <= 10]
+        except Exception:                                    # noqa: BLE001
+            _bf = []
+        # NOR A SIDE WHOSE OWN DISCRETE SYSTEM CONDEMNS THIS LEVEL'S FIELD: A u one factor other than
+        # one times the load of the source its config states. Measured: a side whose load left out its
+        # test function read A u = 3.87 times the load at level 1, and this level read "VERIFIED ...
+        # SETTLED" because the equation check waited for more levels.
+        try:
+            _bf += _ra_nf.level_equation_findings(
+                Path(str(parts[0].work_dir)).parent, dirs=[Path(str(p.work_dir)) for p in parts],
+                since=_t_level_wall - 1.0)
+        except Exception:                                    # noqa: BLE001
+            pass
+        if _mesh_note:
+            _bf.append({"finding": _mesh_note})
+        _nc = _level_not_a_coupled_result(result) if r.converged else ""
+        # (an exactly zero last residual is judged by the ladder and the audit, not here: a
+        # deterministic pair whose accelerated step lands on its fixed point reproduces its
+        # data bit for bit, and a single call cannot tell that from an exchange of nothing)
+        if _nc.startswith("the reported interface residual is exactly zero"):
+            _nc = ""
+        if _nc:
+            _bf.append({"finding": f"THIS LEVEL IS NOT A COUPLED RESULT YET: {_nc}"})
+        if _bf:
+            checks_ok = False
+            reason = reason if (_nf or _us) else _at_sentence(str(_bf[0].get("finding", "")), 400)
+            val = list(val) + [str(f.get("finding", "")) for f in _bf]
+            result["validation"] = val
+        # A LEVEL WHOSE ONLY FINDINGS ARE PER-BLOCK CAVEATS carries an iteration caveat, named
+        # by the caveat itself (the generic converged-with-a-caveat reason frames it as
+        # discretisation).
+        _iter_caveat = (bool(r.converged) and bool(val) and not (_nf or _us or _bf)
+                        and all(_BLOCK_CAVEAT in str(v) for v in val))
+        if _iter_caveat:
+            reason = _at_sentence(str(val[0]), 400)
         _stamp_verification(result, evidence_ok=checks_ok, reason=reason,
                             critic_approved=critic_approved,
+                            field_defect=bool(_nf or _us or _bf),
+                            iteration_caveat=_iter_caveat,
                             solver="couple",
                             setup_text=_coupling_setup_text(
                                 participants=participants, max_iter=max_iter,
@@ -6372,7 +8406,7 @@ def register_consolidated_tools(mcp: FastMCP):
         # THE EXCHANGE POINTS ARE NOT THE REPORT POINTS, SAID WHERE THE AGENT
         # IS HOLDING THEM.
         #
-        # MEASURED across every coupled development run: 11 result sets held an
+        # MEASURED across every coupled recorded run: 11 result sets held an
         # interface file containing a point the task explicitly excludes, and 10
         # of the 11 were runs with these tools — 13.7% of coupled runs with the
         # tools against 1.2% of runs without them. Nine of them wrote exactly 9
@@ -6399,11 +8433,9 @@ def register_consolidated_tools(mcp: FastMCP):
             "deliberately not nodes: interpolate each side's converged "
             "solution onto the listed points, with that side's own material "
             "and its own outward normal. Copying exports.json into a "
-            "per-level interface file is the single most common way an "
-            "otherwise working coupled run is made unverifiable — measured at "
-            "13.7% of coupled runs with these tools against 1.2% of runs "
-            "without them, because only a run with these tools has the file. "
-            "A task that lists interior "
+            "per-level interface file is a common way an otherwise working "
+            "coupled run is made unverifiable: the file is at the nodes, and "
+            "the list is not. A task that lists interior "
             "points only has excluded the interface ENDS on purpose; do not "
             "complete the list with them.")
 
@@ -6453,6 +8485,19 @@ def register_consolidated_tools(mcp: FastMCP):
                     _f = _fn(_ea, _eb, _names[0], _names[1])
                     if _f:
                         presub.append(_f)
+            # A CONVERGED HISTORY THAT FELL LESS THAN 10-FOLD is read as not coupled when it is
+            # handed in, so it is said here, while the level can still be run again. Measured on a
+            # coupled round: a history fell at every step to 1.14 times the noise floor its DSMC
+            # side set, this reply said CONVERGED -- SAVE IT NOW, and the hand-in audit said the
+            # residual barely moved, with most of the run's time left.
+            _fin = [float(_v) for _v in (r.history or [])
+                    if isinstance(_v, (int, float)) and _v == _v and abs(_v) != float("inf")]
+            if (r.converged and len(_fin) >= 2 and _fin[-1] > 0
+                    and _fin[0] / _fin[-1] < 10.0
+                    and all(_b <= _a for _a, _b in zip(_fin, _fin[1:]))):
+                presub.append({"sequence": "residual history", "finding": _ra._fell_too_little(
+                    _fin[0], _fin[-1], len(_fin) - 1, floor=getattr(r, "noise_floor", None),
+                    tol=getattr(r, "tol_effective", None) or tol)})
             # per-level files already written (this or an earlier couple call)
             _root = str(cell_root) if cell_root is not None else None
             if _root is None:
@@ -6470,9 +8515,29 @@ def register_consolidated_tools(mcp: FastMCP):
                 _submit_only = ("level count", "level sequence",
                                 "levels claimed", "deliverable completeness",
                                 "summary file")
-                for _f in _ra.audit(_root).get("findings", []):
+                _pending = set(_LADDER_PENDING.get())
+                # INSIDE A LADDER the files of the levels still to run are out of the audit's
+                # sight, so what the summary claims of them is not judged here either; the
+                # hand-in audit judges the summary against every level. Measured, replaying the
+                # recorded ladders' 143 level replies: with those files out of sight, "summary
+                # names" and "interface residual" read the previous attempt's summary against
+                # them and would have been added to 106 and 14 of them.
+                if _pending:
+                    _submit_only += ("summary names", "summary consistency", "interface residual",
+                                     "duplicate deliverables")
+                for _f in _audit_findings_hiding_levels(_root, _pending):
                     if any(s in str(_f.get("sequence", "")) for s in _submit_only):
                         continue
+                    if str(_f.get("sequence", "")) == "no coupling history on disk":
+                        continue           # this call IS the coupling; its own reply says what it wrote
+                    _ml = re.search(r"level[_-]?(\d+)", str(_f.get("sequence", "")))
+                    if _pending and _ml and int(_ml.group(1)) in _pending:
+                        continue           # a file this ladder is about to rewrite
+                    # A MEASUREMENT THE DRIVER MADE IN THIS CALL IS NOT ASKED FOR AGAIN.
+                    _ft = str(_f.get("finding", ""))
+                    _fm = _driver_measured(_ft, str(getattr(r, "error", "") or ""))
+                    if _fm != _ft:
+                        _f = dict(_f, finding=_fm)
                     presub.append(_f)
             if pde_sources:
                 presub.extend(_ra.pde_source_findings(pde_sources))
@@ -6489,8 +8554,9 @@ def register_consolidated_tools(mcp: FastMCP):
             if _bad or "wrote no exports.json" in _err:
                 _m = re.search(r"participant (\S+) wrote no exports\.json", _err)
                 _who = ", ".join(_bad) if _bad else (_m.group(1) if _m else "a participant")
-                _tail = (_err.split("stderr tail:", 1)[1].strip()[-400:]
-                         if "stderr tail:" in _err else _err[-400:])
+                from core.coupling_driver import _stderr_tail   # noqa: PLC0415
+                _tail = _stderr_tail(_err.split("stderr tail:", 1)[1].strip()
+                                     if "stderr tail:" in _err else _err, 400)
                 # WHAT THE FAILED SIDE LEFT ON DISK LEADS, NOT AN EMPTY STDERR TAIL.
                 # Measured (e2e, 2026-09-12): a participant that wrote a deck, ran 4C
                 # with its console redirected to a file and exited 1 got the lead
@@ -6506,18 +8572,42 @@ def register_consolidated_tools(mcp: FastMCP):
                             _st = _fourc_deck_state(_wd, _wd.parent)
                             if _st:
                                 _disk += f" ON DISK IN {_wd.name}: {_st['what']} {_st['brief']}"
+                            # 4C'S OWN CONSOLE, READ FOR A STOP WHOSE CAUSE IS MEASURED. Measured on a
+                            # fluid-structure round: the finest level's 4C run stopped with "did not
+                            # converge" on an absolute residual test; this lead quoted the stderr tail
+                            # alone and the level was given up.
+                            from tools.fourc_deck_lint import fourc_stop_answer   # noqa: PLC0415
+                            _con = _wd / "participant_output.log"
+                            _ans = (fourc_stop_answer(_con.read_text(errors="ignore")[-200000:])
+                                    if _con.is_file() else "")
+                            if _ans:
+                                _disk += f" 4C'S CONSOLE IN {_wd.name}: {_ans}."
                 except Exception:                               # noqa: BLE001
                     _disk = ""
+                # A STOP ON WHAT THE PARTNER EXPORTED NAMES THE PARTNER. Measured: side A's
+                # trace-length guard said "partner 'B' exported a trace with 1 time levels"
+                # and this lead told A to fix itself.
+                _failed = set(_bad or [_who])
+                _named = [_p.name for _p in parts if _p.name not in _failed
+                          and re.search(r"partner\W{0,3}" + re.escape(_p.name) + r"\b", _tail)]
+                _it = int(getattr(r, "iterations", 0) or 0)
+                _head = (f"PARTICIPANT {_who} EXITED NON-ZERO AT ITERATION {_it} (exit codes {_rcs}): "
+                         f"the coupling stopped there, so every other finding below is a consequence "
+                         f"of this one." if _it > 1 else
+                         f"PARTICIPANT {_who} EXITED NON-ZERO AND WAS NEVER RUN TO "
+                         f"AN EXPORT (exit codes {_rcs}): nothing iterated, so every "
+                         f"other finding below is a consequence of this one.")
                 presub.insert(0, {"sequence": f"participant {_who}",
                                   "priority": 10, "finding": (
-                    f"PARTICIPANT {_who} EXITED NON-ZERO AND WAS NEVER RUN TO "
-                    f"AN EXPORT (exit codes {_rcs}): nothing iterated, so every "
-                    f"other finding below is a consequence of this one. Its "
-                    f"own stderr tail: {_tail!r}.{_disk} "
-                    + ("Fix the deck as named, then run that script once "
-                       if _disk else "Fix that script, run it once ")
-                    + "standalone until it writes exports.json, then call "
-                    f"couple() again.")})
+                    f"{_head} Its own stderr tail: {_tail!r}.{_disk} "
+                    + (f"That stderr names partner {_named[0]}: {_who} stopped on what {_named[0]} "
+                       f"exported. Read {_named[0]}'s exports.json and the part of its script that "
+                       f"writes it before you edit {_who}, then call couple() again."
+                       if _named and not _disk else
+                       ("Fix the deck as named, then run that script once "
+                        if _disk else "Fix that script, run it once ")
+                       + "standalone until it writes exports.json, then call "
+                       f"couple() again."))})
             # de-duplicate the same defect found twice (live vs file audit)
             _seen = set()
             for _f in presub:
@@ -6525,8 +8615,11 @@ def register_consolidated_tools(mcp: FastMCP):
                 if _k in _seen:
                     continue
                 _seen.add(_k)
-                _compact.append({"sequence": _f.get("sequence"),
-                                 "finding": _f.get("finding")})
+                # WITH ITS RANK: copied as sequence and text alone, a priority-3 unsolved
+                # field went last behind two informational notes, and a VERIFIED ladder's
+                # "SATISFIES ITS OWN EQUATION" was shown as what to fix next (measured).
+                _compact.append({k: _f.get(k) for k in ("sequence", "finding", "priority",
+                                                        "informational") if k in _f})
             # WHEN THE LEVEL CONVERGED AND THE FUNNEL IS CLEAN, the lead names
             # the three writes that turn a converged coupling into a result.
             # Measured: a run coupled three real levels (9 iterations to 1e-8
@@ -6540,10 +8633,15 @@ def register_consolidated_tools(mcp: FastMCP):
             # participant keeps (field_level<k>.csv, interface_level<k>.csv,
             # participant_output_level<k>.log) make it safe to couple every
             # remaining level first and write the deliverables afterwards.
+            # "SELF-CONSISTENT" ONLY WHERE THE FILE CHECKS RAN: inside a ladder they run in the
+            # ladder's own verdict, after its last level (measured: a level reply called files
+            # self-consistent beside a finding of ours about their field).
             _lead = _ra.what_to_fix_next(
                 _compact, converged=bool(r.converged), clean_msg=(
-                    "this level's iteration CONVERGED and your files are "
-                    "self-consistent. Only files on disk count, so for EACH level: "
+                    (_CLEAN_HEAD if not _IN_LADDER.get() else
+                     "this level's iteration CONVERGED; its files are judged by the ladder's verdict "
+                     "after the last level. ")
+                    + "Only files on disk count, so for EACH level: "
                     "(1) evaluate EACH side's converged field at "
                     "the probe points your task prescribes and write that "
                     "side's per-level field file; (2) write each side's "
@@ -6561,7 +8659,7 @@ def register_consolidated_tools(mcp: FastMCP):
             # THIS LEVEL'S RUN LOGS FIRST, FROM THE NAMED FILES. Measured (round 29): four cells
             # coupled three refined levels and handed in run logs that were all copies of the
             # level-1 console (NDOF 54 on every level while the consoles read 54, 187, 693); the
-            # grader read them as an unchanged mesh. The copy is named here with its full path,
+            # an audit reads them as an unchanged mesh. The copy is named here with its full path,
             # per side, and it comes BEFORE the next level, not after all of them.
             _logs = ""
             if _lvl_for_log:
@@ -6587,14 +8685,26 @@ def register_consolidated_tools(mcp: FastMCP):
             except Exception:                                # noqa: BLE001
                 _pjson = ""
             _plist = f"participants='{_pjson}'" if _pjson else "participants=<the same list you passed here>"
+            try:
+                from core.quality_checks import unresponsive_clause as _uc
+            except Exception:                                # noqa: BLE001
+                _uc = lambda _n, _d, _s=None: ""                      # noqa: E731
+            _rdet = getattr(r, "responsiveness_detail", None)
+            _unresp_txt = "; ".join(_uc(_n, _rdet, getattr(r, "sensitivity", None)) or f"participant {_n} exported byte-identical data while its imports changed"
+                                    for _n in _unresp)
             _not_yet = (f"{_lvl_txt} IS NOT A COUPLED RESULT YET: the iteration stopped after {_n_hist} step(s)"
-                        + (f"; participant(s) {', '.join(_unresp)} exported byte-identical data while their imports changed" if _unresp else "")
-                        + (f"; {_probe_hits[0][:220]}" if _probe_hits else "")
-                        + ". A fixed point reached at once means the exchanged data never changed between iterations: each "
-                          "participant must read ./imports.json on EVERY run and its export must depend on it, and a stale "
-                          "exports.json left by a standalone test run is re-read as this iteration's answer -- delete it "
-                          "before coupling. Then couple() again. Do not write this level's deliverables from this run: a "
-                          "history under 3 rows shows no coupling to anyone who reads it.")
+                        + (f"; {_unresp_txt}" if _unresp else "")
+                        # the probe's finding, unless it says what the clause above already said
+                        + (f"; {_at_sentence(_probe_hits[0], 300)}" if _probe_hits and not (
+                            _unresp and _probe_hits[0][:60] in _unresp_txt) and not (
+                            _unresp and _unresp_txt[:60] in _probe_hits[0]) else "")
+                        + ". A fixed point reached at once means the exchanged data never changed between iterations. "
+                          "Two ways are on record: a participant that does not read ./imports.json on every run, and one "
+                          "that reads it but never lets the values reach its solve -- written into a vector the solve then "
+                          "replaces, or onto dofs the solve is free to move -- so it exports the same answer whatever it "
+                          "is sent. (The driver deletes exports.json before every run, so no old file stands in for this "
+                          "one.) Fix that side, then couple() again. Do not write this level's deliverables from this run: "
+                          "a history under 3 rows shows no coupling to anyone who reads it.")
             # LEVELS FIRST, DELIVERABLES ONCE. Measured (round 40, C3 6041): after level 1 the
             # parent spent ~30 calls on that level's deliverables (a worker, eleven read_file
             # calls into the dumps, six write-and-run scripts), coupled level 2 with couple()
@@ -6604,8 +8714,8 @@ def register_consolidated_tools(mcp: FastMCP):
             # (the write check) and here (the deliverable findings), so the order that lost
             # rounds 29-33 is safe again: every remaining level in ONE couple_levels call, then
             # one script that writes every level's files from the per-level dumps.
-            # THE PER-LEVEL DUMPS MUST EXIST BEFORE ANY DELIVERABLE IS WRITTEN FROM THEM. Measured (round 41,
-            # C2 7123): level 1 ran with a script version that wrote no interface_level1.csv; the parent
+            # THE PER-LEVEL DUMPS MUST EXIST BEFORE ANY DELIVERABLE IS WRITTEN FROM THEM. Measured on a
+            # recorded run: level 1 ran with a script version that wrote no interface_level1.csv; the parent
             # edited the scripts, coupled levels 2 and 3, and the deliverables script skipped level 1's
             # interface files with a warning -- three second-order levels graded as no result for one
             # missing pair. The dumps are checked here, the moment the level converged.
@@ -6620,15 +8730,17 @@ def register_consolidated_tools(mcp: FastMCP):
                     except OSError:
                         _carries, _tagged = False, ["?"]
                     if _carries:
-                        # the served dump block, or the agent's suffixed variant (round 44 C2 7163: field_level1_A.csv)
+                        # the served dump block, or the agent's suffixed variant (a recorded run: field_level1_A.csv)
                         for _stem in (f"field_level{_lvl_for_log}", f"interface_level{_lvl_for_log}"):
                             if not any(_wd.glob(f"{_stem}*.csv")):
                                 _dump_gap.append(f"side {_p.name}: {_stem}*.csv")
-                    elif not _tagged:
-                        # A HAND-WRITTEN SIDE THAT KEEPS NO LEVEL-TAGGED OUTPUT. Measured (round 46, C1 7191): side A's
+                    elif not _tagged and _outputs_at_risk(_wd, _lvl_for_log, _t_level_wall - 1.0):
+                        # A HAND-WRITTEN SIDE THAT KEEPS NO LEVEL-TAGGED OUTPUT. Measured on a recorded run: side A's
                         # 4C runs reused one output prefix, level 2 overwrote level 1's VTUs, side A's three solution
                         # files came out identical and no interface file could be written for it -- on the first C1
-                        # cell whose fields were right. Named here, while this level's outputs are still on disk.
+                        # cell whose fields were right. Named here, while this level's outputs are still on disk --
+                        # and only where this level wrote output files the next level would reuse: a side that
+                        # writes nothing but exports.json has nothing to lose.
                         _no_tag.append(_p.name)
             _dump_txt = ("" if not _dump_gap else
                          f"LEVEL {_lvl_for_log}'S PER-LEVEL DUMPS ARE MISSING ({'; '.join(_dump_gap)}): the served contract writes "
@@ -6639,6 +8751,7 @@ def register_consolidated_tools(mcp: FastMCP):
                          f"dump is missing, and a level set with one level missing is no result. ")
             _tag_txt = ""
             if _no_tag:
+                result["untagged_sides"] = list(_no_tag)      # couple_levels stops on it before overwriting
                 _tag_txt = (f" SIDE {' AND '.join(_no_tag)} KEEPS NO LEVEL-TAGGED OUTPUT (no file named with 'level{_lvl_for_log}' beside its "
                               f"exports.json other than the driver's console copy): the next level's run reuses the same names and OVERWRITES this "
                               f"level's field, VTUs and interface data -- measured, a side whose runs shared one output prefix handed in three "
@@ -6649,9 +8762,9 @@ def register_consolidated_tools(mcp: FastMCP):
             #
             # Asking politely has been measured and does not work. This lead
             # was moved to the FRONT of the converged reply precisely because
-            # hundreds of recorded runs had produced zero calls to the check; over every
-            # recorded cell since, the lead was served 14 times in 10 cells and
-            # the tool was called twice, in one cell. So after the first
+            # the recorded runs had produced zero calls to the check; over every
+            # recorded run since, the lead was served 14 times across 10 runs and
+            # the tool was called twice, in one run. So after the first
             # unchecked level the sentence stops being an invitation and starts
             # being a count, which is what the rest of this reply already does
             # for every other defect.
@@ -6746,35 +8859,67 @@ def register_consolidated_tools(mcp: FastMCP):
             elif _pde_notes and pde_check:
                 _pde_said = ("YOUR EQUATION CHECK DID NOT RUN: " + "; ".join(_pde_notes[:3]) + ". ")
             _unchecked = ""
-            if not pde_check:
+            # A 3-D PAIR IS NOT ASKED FOR A 2-D BOX. Measured on a coupled 3-D round: this reminder
+            # told both sides to state "the box x0, x1, y0, y1" so the equation check could judge
+            # them, while that check reads a field on a 2-D box and says NOT JUDGED IN 3-D whatever
+            # the config holds.
+            try:
+                _3d_sides = [p.name for p in parts if _ra._dumps_are_3d(Path(str(p.work_dir)))]
+            except Exception:                            # noqa: BLE001
+                _3d_sides = []
+            if not pde_check and not _IN_LADDER.get() and _3d_sides:
+                _unchecked = ("THE EQUATION CHECK DOES NOT JUDGE A 3-D SIDE: " + " and ".join(_3d_sides)
+                              + " carry a z coordinate in their dumps, and that check reads a field on a "
+                                "2-D box, so no level of theirs is checked against its own equation; no key "
+                                "in a config.json changes that. ")
+            elif not pde_check and not _IN_LADDER.get():
+                # NO LONGER "UNTIL YOU HAND OVER THE FOUR STRINGS": couple_levels and the
+                # hand-in audit judge each side from its own config.json and dumps. The weak
+                # identity needs three levels; one level's own discrete system decides only a
+                # load or stiffness off by one factor (result_audit.level_equation_findings).
                 _unchecked = (
-                    "NO LEVEL HAS BEEN CHECKED AGAINST ITS OWN EQUATION, and this reply cannot do it "
-                    "for you until you hand over the four strings you already have. Pass "
-                    "pde_check={\"<side>\": {\"solution_files\": \"<this side's per-level "
-                    "field files, comma-separated, in level order, on the probe grid your task "
-                    "prescribes>\", \"equation\": \"<your task's EQUATION line>\", "
-                    "\"source\": \"<that side's source>\", \"coefficient\": \"<that side's "
-                    "coefficient>\", \"domain\": \"[[x0,x1],[y0,y1]]\"}, ...} on your next couple "
-                    "call and every level from the second on is checked automatically. This is the "
-                    "only check that separates a right answer from one that converged cleanly to the "
-                    "WRONG function -- measured on three development cells whose every "
-                    "self-consistency measure reported a converging run while the answer was wrong, "
-                    "one of them with a true error ninety times its own field magnitude. It needs no "
-                    "reference answer, and openPASO neither stores your strings nor reads any task "
-                    "file. ")
-            _one_call = (_not_yet if _trivial else
+                    "NO LEVEL HAS BEEN CHECKED AGAINST ITS OWN EQUATION IN FULL YET: that takes three levels "
+                    "of the same side. At this level each side whose config.json states its equation was "
+                    "checked only for a load or a stiffness off by one factor, in its own discrete system "
+                    "rebuilt from this level's dump. couple_levels and the hand-in audit check each side from its own "
+                    "config.json (k, reaction, source_expr and the box x0, x1, y0, y1) and its "
+                    "field_level<k>.csv dumps; a side whose config.json lacks those keys is reported NOT "
+                    "CHECKED. It is the check that tells a field solving the stated problem from one "
+                    "that converged cleanly to the wrong function, and it needs no reference answer. It "
+                    "judges the field inside its subdomain only; the values the field holds on its "
+                    "interface and outer boundary are judged by the checks that read it against what "
+                    "the side exports. ")
+            # A LEVEL WHOSE OWN FIELD IS DEFECTIVE IS NOT TOLD TO SAVE ITS LOGS AND MOVE ON.
+            # Measured: a located outer-boundary finding sat at character 3254 of a
+            # 4000-character lead, behind this preamble, and the parent dismissed it.
+            _field_items = [str(_f.get("finding", "")) for _f in list(_nf) + list(_us) + [
+                _x for _x in _bf if not str(_x.get("finding", "")).startswith(
+                    ("MESH UNCHANGED", "THIS LEVEL IS NOT A COUPLED RESULT"))]]
+            _defect_txt = ("" if not _field_items else
+                           f"{_lvl_txt} CONVERGED, BUT ITS FIELD IS NOT A RESULT: "
+                           + " | ".join(_at_sentence(_x, 700) for _x in _field_items[:2])
+                           + " Fix that side and couple this level again before any deliverable or further "
+                             "level; everything built on this level inherits the defect. ")
+            # INSIDE couple_levels THE LADDER RUNS THE NEXT LEVEL ITSELF. Measured: every level of a
+            # finished ladder still told the run to write this level's logs before the next level
+            # and to raise the level and call couple again (two reviews of one round).
+            _in_ladder_txt = ("The ladder runs its next level itself. This level's console and dumps stay "
+                              "beside each exports.json (participant_output_level<k>.log, field_level<k>.csv, "
+                              "interface_level<k>.csv); the deliverables of every level are written from them "
+                              "after the last level. ")
+            _one_call = (_not_yet if _trivial else _defect_txt if _defect_txt else
                          (f"LEVEL {_lvl_for_log} CONVERGED. " if _lvl_for_log else "LEVEL CONVERGED. ")
                          + _unchecked
                          + _pde_said
-                         + "FIRST, WRITE THIS LEVEL'S RUN LOGS -- BEFORE THE NEXT LEVEL, NOT AT THE END. "
+                         + (_in_ladder_txt if _IN_LADDER.get() else
+                         "FIRST, WRITE THIS LEVEL'S RUN LOGS -- BEFORE THE NEXT LEVEL, NOT AT THE END. "
                            "They are a copy, "
                            "one per side, of the console this level just produced"
                          + (f" (this level: {_logs})" if _logs else " (participant_output_level<k>.log)")
                          + " -- into the per-level run log name your task gives for that side. It costs one action "
-                           "now and is the step that is measured to vanish when it is left to the end: across four "
-                           "recent rounds, every level that ran left its captured console on disk and only 2 to 4 "
-                           "cells in 9 ever turned them into the logs the task asked for, so those runs handed in "
-                           "coupling that was PROVEN and were read as not run. Then write the remaining "
+                           "now and is the step most often lost when it is left to the end: the consoles stay on "
+                           "disk, the logs the task asks for are never written, and a coupling that was proven is "
+                           "read as not run. Then write the remaining "
                            "deliverables -- the field and interface files per side from each level's dumps -- in "
                            "ONE pass at the end. A run log copied from another level's console reads as "
                            "an unchanged mesh and sinks the whole sequence, and the write check names it the "
@@ -6788,12 +8933,17 @@ def register_consolidated_tools(mcp: FastMCP):
                            f"couple_levels({_plist}, levels=[<next level>, ...every further level], "
                            "history_pattern='<the task's per-level history file name with {k} in place of the level "
                            "number>') does the whole remaining sequence in one call, warm-starting each level from "
-                           "the last. "
-                         + (f" MEASURED COST: this level's iteration took {_level_secs:.0f} s of solver wall time; the next two "
-                            f"levels have 4x and 16x the cells, so their iterations cost roughly {4 * _level_secs:.0f} s and "
-                            f"{16 * _level_secs:.0f} s inside that one call (measured: parents stopped at 26-27 min left calling "
-                            f"the remaining levels a 'time constraint')." if _level_secs is not None else ""))
-            _lead = _dump_txt + _one_call + (_tag_txt if not _trivial else "") + ("\n" + _lead if _lead else "")
+                           "the last. ")
+                         + (f" MEASURED COST: this level's coupling took {_level_secs:.0f} s of solver wall time in "
+                            f"all, over {r.iterations} iteration(s). A finer level's cost is measured when it runs; "
+                            "none is projected here." if _level_secs is not None else ""))
+            # WHAT THE FUNNEL FOUND LEADS WHEN IT IS A DEFECT; the converged recipe follows it.
+            _top = min((int(_f.get("priority", 99)) for _f in (_compact or [])
+                        if isinstance(_f, dict) and not _f.get("informational")), default=99)
+            if _lead and _top <= 10:
+                _lead = _lead + "\n" + _dump_txt + _one_call + (_tag_txt if not _trivial else "")
+            else:
+                _lead = _dump_txt + _one_call + (_tag_txt if not _trivial else "") + ("\n" + _lead if _lead else "")
         if _mesh_note:
             _lead = _mesh_note + ("\n" + _lead if _lead else "")
         # THE LADDER RIDES ON EVERY couple() REPLY: the next unmet step, from
@@ -6802,7 +8952,7 @@ def register_consolidated_tools(mcp: FastMCP):
         _next = None
         try:
             if _root:
-                _next = (_ra.coupled_ladder(Path(_root)) or {}).get("text")
+                _next = (_ra.coupled_ladder(Path(_root), converged_now=bool(r.converged)) or {}).get("text")
                 if _next and _pjson:
                     # the ladder reads files and cannot know the list; this reply does
                     _next = _next.replace("participants=<the same list passed to couple>", f"participants='{_pjson}'") \
@@ -6814,6 +8964,7 @@ def register_consolidated_tools(mcp: FastMCP):
         # from another level and the field files written at the nodes instead of the prescribed
         # probe points were named by the audit nobody called. Reads the agent's own files.
         _deliv = []
+        _fq: list = []                     # of those, the findings about what the field holds
         try:
             if _root:
                 for _fn in (_ra.wrong_level_run_log_findings, _ra.solution_rows_grow_findings,
@@ -6836,30 +8987,67 @@ def register_consolidated_tools(mcp: FastMCP):
                 # logs only for levels it never coupled, and it speaks on 0 of
                 # the 32 correct cells.
                 try:
+                    # A LEVEL THIS CALL FAILED, OR WHOSE HISTORY HOLDS NO ROW, WAS NOT COUPLED: its
+                    # deliverables are not owed yet (measured: a level that failed at iteration 1
+                    # left a header-only history and was asked for its interface files).
                     _done = sorted({_k for _q, _kind, _k, _sd
                                     in _ra._level_files(Path(_root), "csv")
-                                    if str(_kind).startswith("residual")})
-                    if _done:
+                                    if str(_kind).startswith("residual") and _ra._line_count(_q) > 1
+                                    and not (not r.converged and _k == _lvl_for_log)})
+                    if _done and not _IN_LADDER.get():
+                        # (inside a couple_levels call nothing can be written between its levels:
+                        # the proof owed is named by the ladder's own reply, after the last level)
                         _deliv += list(_ra.deliverable_proof_due(Path(_root), _done) or [])
                         # AND WHAT THE FILES ALREADY SAY ABOUT THE ANSWER.
                         # The proof above asks whether the run can be shown to
                         # have happened; this asks whether what it produced is
                         # worth building on, and it is the family that decides
-                        # a correct run against a completed but unphysical one. Measured on a
-                        # live cell that coupled three levels, wrote every
-                        # deliverable and graded unphysical: NEAR-ZERO FIELD
+                        # a correct run against a completed but unphysical
+                        # one. Measured on a live run that coupled three levels,
+                        # wrote every deliverable and came out unphysical: NEAR-ZERO FIELD
                         # and FLOOR appear ZERO times in its trajectory because
                         # they live only in the hand-in audit, which ran with
                         # two tool calls left.
-                        _deliv += list(_ra.field_quality_due(Path(_root), _done) or [])
+                        _fq_all = list(_ra.field_quality_due(Path(_root), _done, converged=bool(r.converged)) or [])
+                        _fq = [f for f in _fq_all if not f.get("informational")]
+                        _deliv += _fq_all
                 except Exception:                        # noqa: BLE001
                     pass
         except Exception:                                # noqa: BLE001
             _deliv = []
+        # A CHECK THAT DID NOT RUN IS COVERAGE, NOT A DEFECT ON DISK.
+        _deliv_notes = [_f for _f in _deliv if _f.get("informational")]
+        _deliv = [_f for _f in _deliv if not _f.get("informational")]
+        if _deliv_notes and isinstance(result.get("checks_not_run"), list):
+            result["checks_not_run"].extend(_at_sentence(str(_f.get("finding", "")), 500)
+                                            for _f in _deliv_notes)
+        # A FINDING OF OURS ABOUT THE FIELD SINKS A VERDICT THAT CALLED THE LEVEL GOOD, and the
+        # clean words go. Measured: one reply said "CONVERGED -- THIS IS A RESULT, SAVE IT NOW",
+        # "your files are self-consistent" and "... ITS FIELD DOES NOT HOLD IT" together.
+        _v_now = str(result.get("verification", ""))
+        if _fq and r.converged and (result.get("trustworthy_result") or "SAVE IT NOW" in _v_now
+                                    or "automated checks passed" in _v_now or "CAVEAT" in _v_now):
+            result["trustworthy_result"] = False
+            result["verification"] = (
+                "NOT VERIFIED -- the check of your files in this reply reports: "
+                + _at_sentence(str(sorted(_fq, key=_ra._rank)[0].get("finding", "")), 400)
+                + " A level that a check of its own files speaks against is not saved as a result "
+                  "until that is settled.")
+        if _deliv and _lead:
+            _lead = _lead.replace(_CLEAN_HEAD, "this level's iteration CONVERGED. ")
         if _deliv:
+            # THE WORST FIRST, AND EACH CUT AT A SENTENCE. Three findings are shown, in
+            # the order they were found; a finding cut mid-sentence ran on into the next
+            # line of the reply (measured: "Measured across recorded runs, LEVEL 1 ...").
+            try:
+                _deliv = sorted(_deliv, key=_ra._rank)
+            except Exception:                            # noqa: BLE001
+                pass
             _dtxt = ("YOUR DELIVERABLES ON DISK HAVE DEFECTS ANY READER OF THE RESULT WILL SEE -- fix them before the next level: "
-                     + " | ".join(str(_f.get("finding", ""))[:600] for _f in _deliv[:3]))
-            _lead = _dtxt + ("\n" + _lead if _lead else "")
+                     + " | ".join(_at_sentence(str(_f.get("finding", "")), 700) for _f in _deliv[:3]))
+            # A FAILED CALL LEADS WITH ITS FAILURE; the deliverables follow it.
+            _lead = (_dtxt + ("\n" + _lead if _lead else "")) if r.converged else (
+                (_lead + "\n" if _lead else "") + _dtxt)
         if _next:
             _lead = (_lead + "\n" + _next) if _lead else _next
             result = {"next_step": _next, **result}
@@ -6874,9 +9062,9 @@ def register_consolidated_tools(mcp: FastMCP):
                     if isinstance(v, dict) and str(v.get("verdict", "")).upper() == "INCONSISTENT"]
             if _bad:
                 # REPORTED WITH ITS ERROR RATE, NOT AS A VERDICT ON THE RUN.
-                # Calibrated against the recorded runs on the problems this
-                # check accepts: 15 of the wrong cells land here, and so does
-                # 1 of the 14 correct ones. That one cannot be tuned away --
+                # Calibrated on the recorded runs this check accepts: most of
+                # the wrong runs land here, and so does one of the correct ones.
+                # That one cannot be tuned away --
                 # its residual sequence (0.0132, 0.0058, 0.0106) has the same
                 # shape as genuinely wrong cells, and a non-monotonicity guard
                 # that silences it also silences 8 of the 15 true catches. So
@@ -6887,46 +9075,60 @@ def register_consolidated_tools(mcp: FastMCP):
                          + ", ".join(_bad)
                          + ": the weak residual does not fall as the mesh refines, which is what a "
                          "field solving the stated problem does and what a field solving a different "
-                         "one does not. Fix that side -- its source first, then its coefficient, "
-                         "then which boundary carries which condition -- BEFORE spending budget on "
+                         "one does not. Fix that side -- its source first, then its coefficient "
+                         "(the identity cannot see boundary conditions) -- BEFORE spending budget on "
                          "further levels, because everything built on this one inherits it. "
-                         "Measured on recorded runs: this verdict lands on 28 sides that are "
-                         "wrong and on NONE that are right. The reverse is not true -- a CONSISTENT "
-                         "side is not a clean bill of health, because 62 wrong sides also read "
-                         "CONSISTENT; this identity cannot see a wrong condition on a face.\n"
+                         "Measured on the recorded coupled runs: this verdict lands on 25 sides "
+                         "of runs whose answer was wrong and on none of the 118 judged sides of "
+                         "runs whose answer was right. The reverse is not true -- a CONSISTENT "
+                         "side is not a clean bill of health: 113 sides of wrong runs also read "
+                         "CONSISTENT, because this identity cannot see a wrong condition on a "
+                         "face and the wrong side of a run can be its partner.\n"
                          + (_lead or ""))
+        # BETWEEN LADDER LEVELS THE DELIVERABLES ARE NOT DUE. Measured: levels 2 and 3 of a
+        # running ladder led with "LEVEL k'S DELIVERABLES ARE NOT WRITTEN" before the ladder had
+        # run its last level.
+        if _lead and _IN_LADDER.get() and _LADDER_PENDING.get():
+            _lead = "\n".join(_ln for _ln in str(_lead).split("\n")
+                               if "DELIVERABLES ARE NOT WRITTEN" not in _ln[:120]) or None
         if _lead:
             result = {"what_to_fix_next": _lead,
                       "presubmission_findings": _compact[:12], **result}
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    async def couple_levels(participants: str, levels: str, critic_approved: bool = False,
+    async def couple_levels(participants: str | list, levels: str | list, critic_approved: bool = False,
                             max_iter: int = 150, tol: float = 1e-6, accelerator: str = "auto",
                             theta: float = 0.5, probe: bool = True, history_dir: str = "",
                             history_pattern: str = "coupling_history_level{k}.csv") -> str:
         """EVERY PRESCRIBED MESH LEVEL IN ONE CALL -- the same partitioned coupling as
         `couple`, run once per level of a task's mesh sequence.
 
-        Measured over three development rounds: six couplings that were proven at
+        Measured over three rounds of recorded runs: six couplings that were proven at
         level 1 (both codes ran, the iteration converged) never reached level 3,
         because every level cost the agent ten more tool calls -- edit both
         config.json files, call couple, save the history, write the deliverables --
         and the wall clock ran out. This call does the per-level plumbing itself:
 
-          * `levels` is a JSON list, one entry per level, e.g.
-                [{"level": 1, "A": {"nx": 5, "ny": 8},  "B": {"nx": 7, "ny": 8}},
-                 {"level": 2, "A": {"nx": 10, "ny": 16}, "B": {"nx": 14, "ny": 16}},
-                 {"level": 3, "A": {"nx": 20, "ny": 32}, "B": {"nx": 28, "ny": 32}}]
+          * `levels` is a JSON list, one entry per level, with each side's mesh
+            keys under that side's NAME, e.g. (your task's own numbers go here)
+                [{"level": 1, "A": {"nx": <nA>, "ny": <mA>},  "B": {"nx": <nB>, "ny": <mB>}},
+                 {"level": 2, "A": {"nx": <2*nA>, "ny": <2*mA>}, "B": {"nx": <2*nB>, "ny": <2*mB>}},
+                 {"level": 3, "A": {"nx": <4*nA>, "ny": <4*mA>}, "B": {"nx": <4*nB>, "ny": <4*mB>}}]
             where the keys under each participant's NAME, plus "level", are
             handed to that participant's PROCESS in the environment variable
             OPENPASO_CONFIG_JSON (a JSON object; OPENPASO_LEVEL carries the level
-            alone). openPASO writes NO file into your directories: the served
+            alone). openPASO writes NO file into your directories: most served
             contracts merge OPENPASO_CONFIG_JSON over their own ./config.json, and
-            a participant you wrote yourself must read it the same way
+            any script must read it the same way
             (json.loads(os.environ.get("OPENPASO_CONFIG_JSON", "{}")) merged over
-            its config) or use one couple() call per level instead. Halve h per
-            level as the task prescribes, i.e. double every cell count;
+            its config) or be run with one couple() call per level instead; a
+            level that hands keys to a script that never reads them is refused
+            before anything runs. Halve h per
+            level as the task prescribes, i.e. double every cell count; a
+            transient side's step count travels the same way ("n_steps", which
+            the served transient contracts read), so both sides change it
+            together;
           * each level starts from the previous level's converged interface
             state (the driver's warm start), which is why the levels must run in
             the same work directories;
@@ -6948,6 +9150,11 @@ def register_consolidated_tools(mcp: FastMCP):
         "accelerator": ..., "theta": ..., "probe": ...} exactly as passed here>),
         then critic_approved=True; openPASO looks that review up for every level.
         """
+        import time as _t_ladder
+        _ladder_t0 = _t_ladder.time()   # the deliverables judged below must be newer than this
+        # A LIST IS TAKEN AS IT IS, not refused. Measured: one run sent `levels` as a list 16
+        # times and lost 13.5 minutes to schema refusals, while this docstring calls it a list.
+        participants, levels = _as_json_text(participants), _as_json_text(levels)
         try:
             lv = json.loads(levels)
         except json.JSONDecodeError as e:
@@ -6961,6 +9168,10 @@ def register_consolidated_tools(mcp: FastMCP):
             return json.dumps({"error": f"invalid participants JSON: {e}"})
         if not isinstance(specs, list) or len(specs) < 2:
             return json.dumps({"error": "need a JSON list of >=2 participants"})
+        for _s in specs:
+            _bin = _solver_binary_as_participant(_s) if isinstance(_s, dict) else ""
+            if _bin:
+                return json.dumps({"error": _bin})
         names = {s.get("name"): s for s in specs if isinstance(s, dict) and s.get("name")}
         cell_work = os.environ.get("OPENPASO_CELL_WORKDIR")
         _history_base = cell_work or str(Path(specs[0].get("work_dir", ".")).resolve().parent)
@@ -6983,12 +9194,78 @@ def register_consolidated_tools(mcp: FastMCP):
                                            probe=probe))
         for nm, spec in names.items():
             wd = Path(str(spec.get("work_dir", "")))
+            # THE SAME RULE AS `couple`, WHICH THIS TOOL CALLS. It refused a
+            # relative work_dir outright while `couple` had just learned to
+            # resolve one against the declared task directory -- so the form
+            # the served example shows would have been accepted by one door
+            # and refused by the other. A rule that differs between two doors
+            # of the same tool is worse than either rule.
             if not wd.is_absolute():
-                return json.dumps({"error": f"participant {nm}: work_dir must be an ABSOLUTE path"})
+                if not cell_work:
+                    return json.dumps({"error":
+                        f"participant {nm}: work_dir must be an ABSOLUTE path "
+                        f"— nothing has told this server which directory a "
+                        f"relative path would be relative TO."})
+                wd = Path(cell_work) / wd
+                spec["work_dir"] = str(wd)
             if cell_work and not wd.resolve().is_relative_to(Path(cell_work).resolve()):
                 return json.dumps({"error": f"participant {nm}: work_dir {wd} is outside this task's "
                                             f"working directory {cell_work}"})
+        # A SCRIPT THAT NEVER READS OPENPASO_CONFIG_JSON RUNS EVERY LEVEL ON ONE MESH.
+        # Measured: a three-level ladder ran one side on a single mesh for 13 minutes,
+        # because the file on disk read only its own ./config.json and the keys this
+        # call hands each process never reached it. Refused here, before anything
+        # runs, when a level hands keys to a participant whose Python script -- and
+        # every module of its own directory that script imports -- never names
+        # OPENPASO_CONFIG_JSON. A command that names no Python script is not judged.
+        _unread = []
+        for nm, spec in names.items():
+            if not any(isinstance(e.get(nm), dict) and any(kk != "level" for kk in e.get(nm)) for e in lv):
+                continue
+            _cmd = spec.get("command")
+            try:
+                _args = (__import__("shlex").split(_cmd) if isinstance(_cmd, str)
+                         else [str(a) for a in (_cmd or [])])
+            except ValueError:
+                continue
+            _wd = Path(str(spec.get("work_dir", "")))
+            _pys = []
+            for _a in _args[1:]:
+                if _a.endswith(".py"):
+                    _c = Path(_a) if Path(_a).is_absolute() else _wd / _a
+                    if _c.is_file():
+                        _pys.append(_c)
+            if not _pys:
+                continue
+            _texts, _seen = [], set()
+            _todo = list(_pys)
+            while _todo and len(_seen) < 20:
+                _q = _todo.pop()
+                if _q in _seen:
+                    continue
+                _seen.add(_q)
+                try:
+                    _src = _q.read_text(errors="replace")
+                except OSError:
+                    continue
+                _texts.append(_src)
+                for _mod in re.findall(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", _src, re.M):
+                    _m = _q.parent / f"{_mod}.py"
+                    if _m.is_file():
+                        _todo.append(_m)
+            if _texts and not any("OPENPASO_CONFIG_JSON" in _x for _x in _texts):
+                _keys = sorted({kk for e in lv if isinstance(e.get(nm), dict) for kk in e.get(nm) if kk != "level"})
+                _unread.append(f"{nm} ({_pys[0]}; keys {', '.join(_keys[:6])})")
+        if _unread:
+            return json.dumps({"error": (
+                "NOTHING RAN: the script of " + "; ".join(_unread) + " never reads OPENPASO_CONFIG_JSON, so the keys "
+                "this call hands it at each level would never reach it and every level would run on the mesh its "
+                "own ./config.json states. Add, right after the line that reads ./config.json, "
+                "cfg.update(json.loads(os.environ.get(\"OPENPASO_CONFIG_JSON\", \"{}\"))) (with the name your script "
+                "gives that dict), and use the merged values for the mesh; or run one couple() call per level and "
+                "edit that side's ./config.json between the calls.")})
         out_levels = []
+        _blocks_by_level: dict = {}          # each level's per-block residuals, for the caveat's trend
         for entry in lv:
             try:
                 k = int(entry.get("level", len(out_levels) + 1))
@@ -7009,10 +9286,22 @@ def register_consolidated_tools(mcp: FastMCP):
                 env["OPENPASO_CONFIG_JSON"] = json.dumps(cfg)
                 sp["env"] = env
                 level_specs.append(sp)
-            reply = await couple(json.dumps(level_specs), max_iter=max_iter, tol=tol, accelerator=accelerator,
-                                 theta=theta, probe=probe, critic_approved=critic_approved,
-                                 history_path=str(Path(history_dir) / history_pattern.replace("{k}", str(k))),
-                                 iface_level=k)
+            _later = []
+            for _e in lv[len(out_levels) + 1:]:
+                try:
+                    _later.append(int(_e.get("level")))
+                except (TypeError, ValueError):
+                    pass
+            _pend_tok = _LADDER_PENDING.set(tuple(_later))
+            _in_tok = _IN_LADDER.set(True)
+            try:
+                reply = await couple(json.dumps(level_specs), max_iter=max_iter, tol=tol, accelerator=accelerator,
+                                     theta=theta, probe=probe, critic_approved=critic_approved,
+                                     history_path=str(Path(history_dir) / history_pattern.replace("{k}", str(k))),
+                                     iface_level=k)
+            finally:
+                _LADDER_PENDING.reset(_pend_tok)
+                _IN_LADDER.reset(_in_tok)
             try:
                 rep = json.loads(reply)
             except Exception:                                   # noqa: BLE001
@@ -7020,9 +9309,15 @@ def register_consolidated_tools(mcp: FastMCP):
             compact = {"level": k}
             for key in ("converged", "iterations", "residual", "error", "history_file",
                         "interface_csv", "captured_solver_logs", "validation", "relaxation",
-                        "responsiveness"):
-                if key in rep:
+                        "responsiveness", "interface_balance", "interface_profile"):
+                if key in rep and rep[key] is not None:
                     compact[key] = rep[key]
+            _blocks_by_level[k] = dict(rep.get("block_residuals") or {})
+            # A LEVEL THAT STARTED COLD BECAUSE THE LAST LEVEL'S EXPORT DID NOT FIT IT, in one line.
+            _cold = [str(_n) for _n in (rep.get("noise_notes") or [])
+                     if "does not fit this level's window" in str(_n)]
+            if _cold:
+                compact["warm_start"] = _cold[0]
             # THE VERDICT TRAVELLED NOWHERE. couple() stamps the gate's verdict on
             # its own reply; this copy list did not carry it, and the aggregate had
             # none of its own, so a ladder whose every level was verified reached
@@ -7033,7 +9328,7 @@ def register_consolidated_tools(mcp: FastMCP):
             # The BOOLEAN on every level; the PROSE only where it does work. The
             # verification text is 700-1500 characters, and three copies of it
             # would add ~4.5k to a reply the parent reads in full -- the same
-            # budget that has twice cut material this campaign needed.
+            # budget that has twice cut material the runs needed.
             #
             # THE LEVEL ANSWERS FOR ITS NUMBERS; THE REVIEW IS THE LADDER'S. A
             # level's own couple() reply can never say `trustworthy_result: true`
@@ -7048,6 +9343,19 @@ def register_consolidated_tools(mcp: FastMCP):
             # What belongs to the level is its own numerical evidence, read from
             # its own reply: it converged, it exchanged something, and no
             # downstream check spoke against it.
+            # (the level's own not-a-coupling evidence is read FIRST: it used to be
+            # set below this line, so a level that exchanged nothing read trustworthy)
+            _not_coupled = _level_not_a_coupled_result(rep) if rep.get("converged") else ""
+            if _not_coupled:
+                compact["coupled_evidence"] = (
+                    f"LEVEL {k} IS NOT A COUPLED RESULT YET: {_not_coupled}. Two ways "
+                    f"are on record: a participant that does not read ./imports.json on "
+                    f"every run, and one that reads it but never lets the values reach "
+                    f"its solve (written into a vector the solve replaces, or onto dofs "
+                    f"it is free to move). The driver deletes exports.json before each "
+                    f"run, so what it reads is that run's own. Do not write this level's "
+                    f"deliverables from this run: a "
+                    f"history under 3 rows shows no coupling to anyone who reads it.")
             _numbers_ok = (bool(rep.get("converged"))
                            and not compact.get("coupled_evidence")
                            and not (rep.get("validation") or []))
@@ -7064,18 +9372,11 @@ def register_consolidated_tools(mcp: FastMCP):
             if rep.get("what_to_fix_next"):
                 # 4000, not 2000: a failed 4C side's lead now carries the deck's defects and
                 # 4C's own stop line, which the old cap cut off mid-list
-                compact["what_to_fix_next"] = str(rep["what_to_fix_next"])[:4000]
-            # THE SUMMARY MAY NOT SAY MORE THAN THE LEVEL'S OWN EVIDENCE.
-            _not_coupled = _level_not_a_coupled_result(rep) if rep.get("converged") else ""
-            if _not_coupled:
-                compact["coupled_evidence"] = (
-                    f"LEVEL {k} IS NOT A COUPLED RESULT YET: {_not_coupled}. Each "
-                    f"participant must read ./imports.json on EVERY run and its export "
-                    f"must depend on it; a stale exports.json left by a standalone test "
-                    f"run is re-read as this iteration's answer, so delete it before "
-                    f"coupling. Do not write this level's deliverables from this run: a "
-                    f"history under 3 rows shows no coupling to anyone who reads it.")
-            _healed = _heal_missing_interface_dump(level_specs, k)
+                compact["what_to_fix_next"] = _cut_outside_commands(str(rep["what_to_fix_next"]), 4000)
+            # THE SUMMARY MAY NOT SAY MORE THAN THE LEVEL'S OWN EVIDENCE (coupled_evidence, above).
+            # only a level that is a coupled result gets its interface file written for it
+            _healed = (_heal_missing_interface_dump(level_specs, k)
+                       if rep.get("converged") and not compact.get("coupled_evidence") else {})
             if _healed:
                 compact["interface_dump_written_for_you"] = _healed
                 compact["interface_dump_note"] = (
@@ -7084,9 +9385,10 @@ def register_consolidated_tools(mcp: FastMCP):
                     "holding at the only moment those numbers are correct -- "
                     "exports.json is overwritten by the next level. Nothing was "
                     "invented: every number came out of your solver. The VOLUME "
-                    "field (field_level%d.csv) is still yours to write, and it "
-                    "cannot be recovered afterwards, so add the dump block to "
-                    "the participant before the next level." % k)
+                    "field (field_level%d.csv) is still yours to write: add the "
+                    "dump block to the participant and couple this level again "
+                    "-- a standalone run of the participant reads an empty "
+                    "imports.json, so its field is not the coupled one." % k)
             peaks = _level_field_peak(level_specs, k)
             if peaks:
                 compact["field_peak"] = peaks
@@ -7096,18 +9398,43 @@ def register_consolidated_tools(mcp: FastMCP):
                     compact["field_finding"] = (
                         "NEAR-ZERO FIELD on side(s) " + ", ".join(sorted(flat))
                         + f": the level-{k} field this side just exported peaks "
-                        "below 1e-8. On a driven problem that almost always "
-                        "means the load never arrived -- check that the source "
-                        "term is actually in the deck and active -- not that "
-                        "the answer is a very small number. A coupling whose "
+                        "below 1e-8. This measures the field, not why: check "
+                        "that the source reaches that side's solve (its form, "
+                        "load vector or deck) and that its boundary values are "
+                        "not all zero, before reading it as a small answer. A coupling whose "
                         "fields are zero converges immediately and tells you "
                         "nothing: two sides exchanging nothing cannot disagree.")
+            # A LEVEL RUN ON THE PREVIOUS LEVEL'S MESH STOPS THE LADDER. Measured: a
+            # ladder ran its third level for 4.1 minutes after couple() had said its
+            # second "counts as not run".
+            if any(str(_v).startswith("MESH UNCHANGED FROM LEVEL") for _v in (rep.get("validation") or [])):
+                compact["mesh_unchanged"] = True
+            # A SIDE THAT KEEPS NO LEVEL-TAGGED OUTPUT LOSES THIS LEVEL TO THE NEXT ONE.
+            # Measured: inside one couple_levels call the warning that a side "keeps no
+            # level-tagged output" arrived after every level had overwritten the one
+            # before, and two right couplings were handed in with fields re-run without
+            # the partner. The ladder stops before the next level runs over it.
+            if rep.get("untagged_sides") and rep.get("converged") and len(out_levels) + 1 < len(lv):
+                compact["untagged_sides"] = list(rep["untagged_sides"])
             out_levels.append(compact)
-            if not rep.get("converged"):
+            if not rep.get("converged") or compact.get("mesh_unchanged") or compact.get("untagged_sides"):
                 break
+        _left = _LADDER_IFACE_CSV_INLINE_MAX
+        for _x in reversed(out_levels):          # the finest level keeps its blocks first
+            _blocks = _x.get("interface_csv")
+            if not isinstance(_blocks, dict):
+                continue
+            for _pn, _b in list(_blocks.items()):
+                if not isinstance(_b, dict) or not isinstance(_b.get("csv"), str):
+                    continue
+                if len(_b["csv"]) <= _left:
+                    _left -= len(_b["csv"])
+                else:
+                    _blocks[_pn] = _iface_block_not_inlined(
+                        _pn, _b, len(_b["csv"]), level=None if _x is out_levels[-1] else _x.get("level"))
         all_ok = (bool(out_levels) and len(out_levels) == len(lv)
                   and all(x.get("converged") and not x.get("coupled_evidence")
-                          for x in out_levels))
+                          and not x.get("mesh_unchanged") for x in out_levels))
         # BOTH FACTS, NOT THE LOUDER ONE. A sequence can carry a level that is not a
         # coupling AND stop later on a level that did not converge, and the two need
         # different repairs. Naming only the first buries the other: the test fixture
@@ -7116,7 +9443,24 @@ def register_consolidated_tools(mcp: FastMCP):
         # without knowing what it ran into.
         _null = [x for x in out_levels if x.get("coupled_evidence")]
         _stopped = (out_levels and not out_levels[-1].get("converged"))
+        _same = [x for x in out_levels if x.get("mesh_unchanged")]
+        _kept = [x for x in out_levels if x.get("untagged_sides")]
         _parts = []
+        if _kept:
+            _parts.append(
+                f"THE LADDER STOPPED AFTER LEVEL {_kept[0]['level']} BEFORE THE NEXT LEVEL COULD OVERWRITE IT: side "
+                f"{' and '.join(_kept[0]['untagged_sides'])} keeps no file named with 'level{_kept[0]['level']}' "
+                f"beside its exports.json, so the next level's run would reuse the same names. Copy this level's "
+                f"field and interface output to level-tagged names now (or add the served contract's dump block, "
+                f"which writes field_level<k>.csv and interface_level<k>.csv after exports.json), then call "
+                f"couple_levels again from level {_kept[0]['level'] + 1} on.")
+        if _same:
+            _parts.append(
+                f"LEVEL {_same[0]['level']} RAN ON THE MESH OF THE LEVEL BEFORE IT (its sides printed the "
+                f"same NDOF), so the ladder stopped there. The keys this call hands each side arrive in the "
+                f"environment variable OPENPASO_CONFIG_JSON; that side's script must merge them over its "
+                f"./config.json and build its mesh from the merged values. Fix it, then call couple_levels "
+                f"again from level {_same[0]['level']} on.")
         if _null:
             first = _null[0]
             _parts.append(
@@ -7138,27 +9482,80 @@ def register_consolidated_tools(mcp: FastMCP):
                    "per-level field file from that side's field_level<k>.csv (interpolated at the task's "
                    "probe points, one griddata call per value column), its per-level interface file from "
                    "interface_level<k>.csv (trace and flux at its interface nodes, interpolated along the "
-                   "interface to the task's interface points), and its per-level run log from "
+                   "interface to the task's interface points with np.interp on the coordinate the interface "
+                   "runs along -- griddata refuses points that lie on one line), and its per-level run log from "
                    "participant_output_level<k>.log plus the NDOF line; the coupling histories are already "
-                   "at the history paths above. Then audit_results(work_dir) and the summary.")
+                   "at the history paths above. NO NaN GOES INTO A FILE: griddata(method='linear') returns NaN "
+                   "at a probe outside the convex hull of the dump's nodes, and a probe on the side's edge can "
+                   "miss that hull by round-off (measured: 1e-14 outside a unit-size box is enough); count "
+                   "them with np.isnan before you write. A probe that round-off put outside is inside at "
+                   "P + 1e-6 * (c - P), c the mean of the dump's nodes: evaluate it there, or with the side's "
+                   "own point evaluation (deal.II: VectorTools::point_value). A NaN that remains marks a probe "
+                   "the side's mesh does not reach -- outside the side's region, or in a part of it the mesh "
+                   "misses -- to fix, never to fill; inside the hull, griddata's triangles bridge such a gap "
+                   "and give a value that is not the field. Then audit_results(work_dir) and the summary.")
         else:
             bad = out_levels[-1]["level"] if out_levels else "?"
             nxt = (f"LEVEL {bad} DID NOT CONVERGE (or errored): read its what_to_fix_next and the "
                    f"participant logs, fix the cause, then call couple_levels again with the levels "
                    f"from {bad} on -- the earlier levels' files and histories stay.")
-        # THE EQUATION VERDICT, FROM THE FILES THAT EXIST NOW. The audit on
-        # delivery computes this too; here it reaches the agent at the moment it
-        # can still act, and only when the per-level deliverables are already on
-        # disk. It reads each side's own config.json for the operator, never a
-        # task file or a key, and it judges nothing when the files are the
-        # participants' mesh dumps -- see result_audit.equation_findings.
+        # THE EQUATION VERDICT, FROM THE FILES THIS LADDER WROTE. Each side's own
+        # mesh dumps from this ladder (field_level<k>.csv, interpolated to cell
+        # midpoints -- see result_audit._dump_level_sets) decide what the field
+        # is; delivered per-level files, where they exist, are judged too, and
+        # only for whether they carry that field. The audit on delivery computes
+        # this again; here it reaches the agent while it can still act. It reads
+        # each side's own config.json for the operator, never a task file or a key.
         _eq = []
+        _cut = {}
         try:
             from .result_audit import equation_findings as _eqf
-            _eq = [f["finding"] for f in _eqf(Path(history_dir))
+            # A DUMP IS CURRENT WHEN IT IS NEWER THAN WHAT WROTE IT, not only newer
+            # than this call: a run that coupled level 1 with couple() and levels 2-3
+            # with couple_levels had its level-1 dump set aside, and a three-level
+            # result that satisfied its equation read "only two levels could be
+            # checked" (measured). Each side's cutoff is the newest of its
+            # participant script and its config.json.
+            for _sp in specs:
+                if not isinstance(_sp, dict) or not _sp.get("work_dir"):
+                    continue
+                _wd = Path(str(_sp["work_dir"]))
+                _wd = _wd if _wd.is_absolute() else Path(history_dir) / _wd
+                _stamps = [(_wd / "config.json")] + [
+                    (_wd / _c if not Path(str(_c)).is_absolute() else Path(str(_c)))
+                    for _c in (_sp.get("command") or []) if str(_c).endswith(".py")]
+                _ts = [q.stat().st_mtime for q in _stamps if q.is_file()]
+                try:
+                    _cut[str(_wd.resolve())] = max(_ts) if _ts else _ladder_t0
+                except OSError:
+                    pass
+            _all_eq = list(_eqf(Path(history_dir), since=_cut or _ladder_t0))
+            _eq = [f["finding"] for f in _all_eq
                    if "NOT CHECKED" not in f.get("finding", "")]
+            # THE GAP IS NAMED, IN ONE LINE. This filtered every NOT CHECKED
+            # note out of the ladder reply, so a whole round of couplings whose
+            # config.json named its source under a key the check did not read
+            # heard nothing -- the one check that separates a field converging
+            # to the right function from one converging to a wrong one ran on
+            # no side of no cell, silently. The note that would have said so
+            # is 300 characters.
+            _eq_gaps = [_at_sentence(str(f["finding"]), 400) for f in _all_eq
+                        if "NOT CHECKED" in f.get("finding", "")]
+            # FILES OLDER THAN THIS LADDER ARE THE LAST RUN'S. After a re-run the
+            # per-level deliverables on disk are still the previous ladder's until
+            # they are rewritten, and this verdict was computed from them without
+            # a word (measured on a second ladder whose files were the first's).
+            _stale = sorted(q.name for q in Path(history_dir).glob("solution_level*.csv")
+                            if q.is_file() and q.stat().st_mtime < _ladder_t0)
+            if (_eq or _eq_gaps) and _stale:
+                _eq.insert(0, f"THE EQUATION VERDICT BELOW WAS TAKEN FROM FILES WRITTEN BEFORE THIS "
+                              f"LADDER STARTED ({', '.join(_stale[:4])}{' ...' if len(_stale) > 4 else ''}): "
+                              f"it describes the previous run until you rewrite them from this "
+                              f"ladder's dumps.")
         except Exception:                                    # noqa: BLE001
+            _all_eq = []
             _eq = []
+            _eq_gaps = []
         # THE LADDER'S OWN VERDICT, under the key names couple() uses so a reader
         # needs no mapping. It is STRICTLY STRONGER than the conjunction of the
         # levels: a level answers for one mesh, the ladder answers for the mesh
@@ -7174,24 +9571,176 @@ def register_consolidated_tools(mcp: FastMCP):
                 "no critic review of this coupling setup is on record ("
                 + _review_note + "); one submit_critic_review for this setup "
                 "covers every level of the ladder")
-        _unverified = [x["level"] for x in out_levels if not x.get("trustworthy_result")]
+        # THE TREND DECIDES WHAT A LEVEL-1 CAVEAT WAS. A balance finding at the
+        # coarsest level is discretisation error when it shrinks under
+        # refinement and a wrong transmission condition when it does not; the
+        # level cannot know which, the ladder can. A level whose only finding
+        # is a balance that the later levels show shrinking is not held against
+        # the ladder; a balance that does not shrink is a ladder fault, named
+        # with its numbers.
+        _bal_faults, _bal_notes, _bal_excused = _interface_balance_trend(out_levels)
+        _ladder_faults.extend(_bal_faults)
+        _prof_faults, _prof_notes, _prof_excused = _interface_profile_trend(out_levels)
+        _ladder_faults.extend(_prof_faults)
+        # THE PER-BLOCK ITERATION CAVEAT BY ITS OWN PER-LEVEL TREND, stated with its numbers;
+        # a level whose only findings are such caveats answers through it, not through its
+        # level text (which carried the caveat's generic reason).
+        _blk_faults, _blk_notes, _blk_excused = _block_caveat_trend(out_levels, _blocks_by_level)
+        _ladder_faults.extend(_blk_faults)
+        _blk_stated = {x["level"] for x in out_levels
+                       if (x.get("validation") or []) and x.get("converged") and not x.get("coupled_evidence")
+                       and all(_BLOCK_CAVEAT in str(v) for v in x["validation"])}
+        _bal_notes = _bal_notes + _prof_notes + _blk_notes
+
+        def _excused_finding(level: int, v) -> bool:
+            v = str(v)
+            return ((v.startswith("Interface flux NOT balanced") and level in _bal_excused)
+                    or ("does NOT match POINT BY POINT" in v and level in _prof_excused)
+                    or (_BLOCK_CAVEAT in v and level in _blk_excused))
+        _tautology = any(isinstance(x.get("interface_balance"), dict)
+                         and x["interface_balance"].get("tautology")
+                         for x in out_levels)
+        _unverified = [x["level"] for x in out_levels
+                       if not x.get("trustworthy_result")
+                       and not ((x["level"] in _bal_excused or x["level"] in _prof_excused
+                                 or x["level"] in _blk_excused)
+                                and all(_excused_finding(x["level"], v)
+                                        for v in (x.get("validation") or []))
+                                and x.get("converged") and not x.get("coupled_evidence")
+                                and _reviewed)
+                       and not (x["level"] in _blk_stated and _reviewed)]
         if _unverified:
-            _first = next(x for x in out_levels if x["level"] == _unverified[0])
-            _why = (str(_first.get("coupled_evidence") or _first.get("verification")
-                        or "it did not pass the verification gate")).strip()
-            _ladder_faults.append(f"level {_unverified[0]} is not verified: {_why}")
+            # A DEFECTIVE FIELD AND A CAVEAT OR REVIEW GAP ARE TWO FAULTS, named apart:
+            # the first reason of several levels used to speak for all of them.
+            def _why_of(_x):
+                return (str(_x.get("coupled_evidence") or _x.get("verification")
+                            or "it did not pass the verification gate")).strip()
+            _bad = [x for x in out_levels if x["level"] in _unverified]
+            _field_bad = [x for x in _bad if x.get("coupled_evidence") or _level_fault_is_field(_why_of(x))]
+            for _grp in (_field_bad, [x for x in _bad if x not in _field_bad]):
+                if not _grp:
+                    continue
+                _lv = ", ".join(str(x["level"]) for x in _grp)
+                _ladder_faults.append(
+                    (f"level {_lv} is not verified: " if len(_grp) == 1
+                     else f"levels {_lv} are not verified; level {_grp[0]['level']}: ") + _why_of(_grp[0]))
         if len(out_levels) > 1:
             try:
                 from .result_audit import ndof_ladder_findings as _ndof
                 for _f in _ndof(Path(history_dir)):
-                    _ladder_faults.append(str(_f.get("finding", ""))[:600])
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 600))
             except Exception:                                # noqa: BLE001
                 pass
+        # TWO FAULTS NO EXCHANGE CHECK CAN SEE. Measured on a coupled run: a
+        # Dirichlet side solved none of its interior (its mask was built by looping
+        # over a BitArray and held one bit), exported the imported trace over a zero interior, converged
+        # in ten iterations with every exchange check passing -- and this verdict
+        # read VERIFIED LADDER, trustworthy_result: true, because nothing here
+        # looked at either side's own field. A side that never solved its interior,
+        # and a side whose field does not satisfy its own equation, now sink the
+        # ladder by name.
+        _part_dirs = []
+        for _sp in specs:
+            _wd = _sp.get("work_dir") if isinstance(_sp, dict) else None
+            if _wd and _sp.get("name") != "__monolithic__":
+                _pd = Path(str(_wd))
+                _part_dirs.append(_pd if _pd.is_absolute() else Path(history_dir) / _pd)
+        try:
+            from .result_audit import unsolved_field_findings as _unsolved
+            # THE LADDER ANSWERS FOR ITS PARTICIPANTS: a probe folder beside them holds
+            # no dump of this sequence and must not sink it (scan=False).
+            for _f in _unsolved(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 500))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import own_field_flux_findings as _own_flux
+            for _f in _own_flux(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                if not _f.get("informational"):          # an abstention note is no fault
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 700))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import flux_sign_3d_findings as _sign3d
+            for _f in _sign3d(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 700))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import nonfinite_field_findings as _nonfinite
+            for _f in _nonfinite(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 500))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import exports_not_the_field_findings as _not_field
+            for _f in _not_field(Path(history_dir), dirs=_part_dirs, since=_cut or _ladder_t0, scan=False):
+                _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 700))
+        except Exception:                                    # noqa: BLE001
+            pass
+        for _t in _eq:
+            if "DOES NOT SATISFY" in str(_t):
+                _ladder_faults.append(_at_sentence(str(_t), 600))
+        # THE FIELD'S OWN BOUNDARY, TOO. Measured: a ladder whose side B left both
+        # interface corners free read VERIFIED LADDER while every level led with the
+        # free-corner finding, and another buried a located outer-boundary finding
+        # under "this level's numbers passed".
+        try:
+            from .result_audit import free_interface_end_findings as _free_ends
+            for _f in _free_ends(Path(history_dir), dirs=_part_dirs):
+                if not _f.get("informational") and int(_f.get("priority", 99)) <= 10:
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 600))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from .result_audit import outer_boundary_findings as _outer
+            for _f in _outer(Path(history_dir)):
+                if not _f.get("informational"):
+                    _ladder_faults.append(_at_sentence(str(_f.get("finding", "")), 600))
+        except Exception:                                    # noqa: BLE001
+            pass
+        # WHAT IS WRONG WITH A FIELD LEADS; the review record and a level's caveat follow.
+        def _record_fault(_t: str) -> bool:
+            return (_t.startswith("no critic review") or "Global residual is NOT representative" in _t
+                    or "the per-block iteration caveat does not shrink" in _t
+                    or (("is not verified:" in _t or "are not verified;" in _t)
+                        and ("critic review" in _t or "caveat" in _t) and not _level_fault_is_field(_t)))
+        _ladder_faults = ([_t for _t in _ladder_faults if not _record_fault(_t)]
+                          + [_t for _t in _ladder_faults if _record_fault(_t)])
+        # VERIFIED MEANS EACH SIDE'S OWN EQUATION WAS CHECKED AND HOLDS, not only
+        # that the two sides agree with each other. The equation findings are
+        # keyed by the side's folder name; a participant with none is unchecked.
+        _eq_by_side: dict = {}
+        for _f in _all_eq:
+            _sq = str(_f.get("sequence", ""))
+            if " check side " in _sq:
+                _eq_by_side.setdefault(_sq.split(" check side ", 1)[1], []).append(str(_f.get("finding", "")))
+        _unchecked = []
+        for _pd in _part_dirs:
+            _texts = _eq_by_side.get(_pd.name) or []
+            # "SOLVER FIELD SATISFIES ... FILES DO NOT" is a verdict on the delivered
+            # files, not on this ladder's field: the field is what the ladder answers for
+            if not _texts or not all(("SATISFIES" in _t and "DOES NOT SATISFY" not in _t)
+                                     for _t in _texts):
+                _unchecked.append((_pd.name, next((_t for _t in _texts if "SATISFIES" not in _t),
+                                                  _texts[0] if _texts else "")))
         _covers = (
             " The critic review this verdict rests on is a review of the SETUP, and "
             "couple_levels resolves it once for the whole call because every level "
             "is that same setup at a different mesh: one review covers the ladder, "
             "not one review per mesh.")
+        if _bal_notes:
+            _covers += " " + " ".join(_bal_notes)
+        if _tautology:
+            _covers += (
+                " CONSERVATION WAS NOT JUDGED FROM THE EXPORTS: on this pair the two "
+                "exported fluxes are exact opposites by construction (a Neumann side's "
+                "consistent recovery returns the flux it was given), so their balance "
+                "is no evidence either way. It is judged on the flux each side recovers "
+                "from its OWN field at the task's interface points -- the per-level "
+                "interface deliverables -- by audit_results, channel by channel and "
+                "level by level; a channel whose jump does not shrink like the others "
+                "is a wrong sign, scaling or missing term in that exchange.")
         if _ladder_faults:
             _trust = False
             _verif = ("THIS LADDER IS NOT VERIFIED. " + " ".join(_ladder_faults)
@@ -7199,22 +9748,81 @@ def register_consolidated_tools(mcp: FastMCP):
                       "transmitted nothing, or a mesh that did not refine, makes "
                       "the ladder worthless however good the other levels are."
                       + _covers)
+        elif all_ok and _unchecked:
+            _trust = False
+            _first_side, _why = _unchecked[0]
+            _verif = ("CONVERGED LADDER, NOT VERIFIED: every level converged, exchanged "
+                      "data and refined, but the check of each side's field against its "
+                      "own equation has not passed on " + ", ".join(n for n, _ in _unchecked)
+                      + ". " + (f"{_first_side}: {_at_sentence(_why, 500)} " if _why else
+                                f"{_first_side}: no equation finding was produced for that "
+                                "folder. ")
+                      + "Two sides that agree with each other are not two sides that each "
+                      "solve their own problem: a side that never solved its interior "
+                      "converges just as cleanly (measured). "
+                      # A SIDE NO KEY CAN STATE (a bent or several-material side, see
+                      # result_audit._one_box_one_k_cannot_state) is not sent after keys.
+                      + ("No key in a config.json makes that check run on such a side; the "
+                         "checks that read both sides still stand."
+                         if "no key in" in str(_why) and "changes that" in str(_why) else
+                         "Once the check can run -- "
+                         "the side's config.json states its box, coefficient and source, and "
+                         "its field_level<k>.csv dumps are on disk -- audit_results(work_dir) "
+                         "judges the dumps this ladder wrote; no new coupling run is needed.")
+                      + _covers)
         elif all_ok:
             _trust = True
             _verif = ("VERIFIED LADDER -- every requested level passed openPASO's "
-                      "verification gate, each level's exchange carried data, and "
-                      "the mesh refined between levels. This is verification, not "
-                      "validation: confirm physical validity yourself." + _covers)
+                      "verification gate, each level's exchange carried data, the mesh "
+                      "refined between levels, and each side's field satisfies its own "
+                      "equation -- the equation, source, coefficients and boundary data that "
+                      "side's config and script STATE; nothing here compares them with your "
+                      "problem statement, so a constant transcribed wrongly verifies as cleanly "
+                      "as a right one. Check them against the task term by term. This is "
+                      "verification, not validation: confirm physical validity yourself." + _covers)
         else:
             _trust = False
-            _verif = ("THIS LADDER IS NOT VERIFIED: it did not run every requested "
-                      "level, so there is no mesh sequence to answer for." + _covers)
+            # THE REASON, NOT A GUESS AT ONE. Measured: a ladder that ran 3 of 3 levels
+            # was told "it did not run every requested level".
+            if len(out_levels) < len(lv):
+                _why_not = f"it ran {len(out_levels)} of the {len(lv)} requested levels"
+            elif out_levels and not out_levels[-1].get("converged"):
+                _why_not = f"level {out_levels[-1]['level']} did not converge"
+            else:
+                _badl = [str(x["level"]) for x in out_levels
+                         if x.get("coupled_evidence") or not x.get("converged")]
+                _why_not = (f"level(s) {', '.join(_badl)} produced no coupled result" if _badl
+                            else "not every level passed its own checks")
+            _verif = ("THIS LADDER IS NOT VERIFIED: " + _why_not
+                      + ", so there is no complete mesh sequence to answer for." + _covers)
         out = {"all_levels_converged": all_ok, "levels_run": len(out_levels),
                "levels_requested": len(lv), "history_dir": history_dir,
                "trustworthy_result": _trust, "verification": _verif,
                "critic_review": {"reviewed": bool(_reviewed), "note": _review_note,
                                  "self_reported_flag": bool(critic_approved)},
                "levels": out_levels, "next_step": nxt}
+        # A LADDER FAULT COMES BEFORE THE DELIVERABLES, as an equation that is not
+        # satisfied does. Measured: a ladder that named a side never solved inside its
+        # subdomain still told the run to write every deliverable from that side.
+        if _ladder_faults and all_ok:
+            _lead_fault = str(_ladder_faults[0])
+            out["next_step"] = (_at_sentence(_lead_fault, 400)
+                                + ("" if _record_fault(_lead_fault) else
+                                   " Fix that before the deliverables: files written from "
+                                   "this ladder carry it.") + " " + str(nxt))
+        if _eq_gaps:
+            out["equation_check_not_run"] = _eq_gaps
+        # THE DATA THE CONFIGS STATE, CHECKED FOR WHAT A SMOOTH SOLUTION NEEDS, LEADS IT. Measured:
+        # a source constant transcribed 10x too small converged cleanly at order 2 on both
+        # sides and was handed in; two compatibility conditions at the held corners and the
+        # interface ends flag every such result set on record and no correct one.
+        try:
+            from .result_audit import data_compatibility_findings as _compat
+            _cf = [_at_sentence(str(_f.get("finding", "")), 700) for _f in _compat(Path(history_dir))]
+        except Exception:                                    # noqa: BLE001
+            _cf = []
+        if _cf:
+            _eq = _cf + list(_eq)
         if _eq:
             out["equation_check"] = _eq
             if any("DOES NOT SATISFY" in t for t in _eq):
@@ -7224,6 +9832,276 @@ def register_consolidated_tools(mcp: FastMCP):
                       "the wrong function passes every convergence study you can "
                       "run on it. " + str(nxt))
         return json.dumps(out, indent=2)
+
+    async def write_participant_contract(solver: str, path: str, variant: str = "",
+                                         overwrite: bool = False) -> str:
+        """Write the served participant CONTRACT for `solver` to `path`, solve elided.
+
+        The file is byte-for-byte the text `knowledge(topic='coupling', solver=...,
+        signal='participant[:<variant>]:part<k>')` serves in parts, concatenated:
+        the contract with its handshake, its checks and its recovery, and the
+        SOLVE elided where the banner sits. It is not a runnable program; fill the
+        marked hole(s) yourself. {VARIANTS} The knowledge door takes the same words.
+        Refuses to overwrite an existing file unless overwrite=True.
+        """
+        from .coupling_knowledge import (participant_companions, participant_contract_text,
+                                         resolve_participant)
+        from .result_audit import resolve_under_cell
+        text, err = participant_contract_text(solver, variant or "")
+        # THE FILES SERVED BESIDE IT (deal.II: its program scaffold and CMakeLists.txt),
+        # the same texts the knowledge door shows, written next to `path`.
+        companions, _cerr = participant_companions(solver, variant or "")
+        err = err or _cerr
+        if err:
+            return json.dumps({"written": False, "error": err})
+        # WHICH CONTRACT THIS IS, SAID. Measured: two runs took the default Kratos
+        # contract -- its Dirichlet side -- for their Neumann side, because the
+        # reply said only "written"; one re-typed the Neumann text by hand after it.
+        _src_path, _label, _ = resolve_participant(solver, variant or "")
+        _doc = next((_l.strip().strip('"').strip() for _l in text.splitlines()
+                     if _l.strip().strip('"').strip()), "")
+        # THE OTHER VARIANTS ARE THE RESOLVER'S WORDS, not read off the file name: a fluid-structure
+        # contract is named participant_fsi_<role>_<code>.py, and its stem's second word is 'fsi'.
+        from .coupling_knowledge import _participant_key_suffix, participant_variants
+        _key, _suffix = _participant_key_suffix(solver, variant or "")
+        _others = [_w for _w in participant_variants().get(_key, []) if _w and f"_{_w}" != _suffix]
+        if _suffix:
+            _others.insert(0, "the base one (variant='')")
+        _which = (f"This is the {_label} contract ({_src_path.name}): {_doc[:160]}"
+                  + (f" Other variants for this solver: {', '.join(_others)} (variant=...)."
+                     if _others else "") + " ")
+        # THE MCP SERVER IS A SEPARATE PROCESS WITH ITS OWN WORKING DIRECTORY,
+        # which the caller can neither see nor control (result_audit's
+        # resolve_under_cell and the three doors that learned it the hard way).
+        # This tool's first round resolved './side_A/participant_A.py' against
+        # the server's cwd -- a frozen, read-only source snapshot -- and every
+        # call in every cell that used it came back "Read-only file system:
+        # 'side_A'"; two cells then re-typed the contract anyway. A relative
+        # path means a path in the CALLER's working directory, and when that
+        # directory is not known the tool says so instead of writing somewhere.
+        import os as _os
+        _cell = _os.environ.get("OPENPASO_CELL_WORKDIR")
+        target = resolve_under_cell(path)
+        if not target.is_absolute():
+            return json.dumps({"written": False, "path": str(path),
+                               "error": ("a relative path cannot be resolved: this server "
+                                         "does not know your working directory. Pass the "
+                                         "ABSOLUTE path of the file inside your working "
+                                         f"directory; with no task directory declared to it, "
+                                         f"it writes only inside your home directory, "
+                                         f"{Path.home()}.")})
+        # EVERY WRITE STAYS INSIDE ONE DIRECTORY: the task's, when the server was told it,
+        # and otherwise the user's home directory. With no task directory declared, an
+        # absolute path used to be written wherever it pointed, a system directory
+        # included. Not the directory the server was started in: the README's launch
+        # config starts it inside the openPASO source tree, and that rule refused every
+        # project outside it.
+        _root = Path(_cell) if _cell else Path.home()
+        try:
+            target.resolve().relative_to(_root.resolve())
+        except ValueError:
+            return json.dumps({"written": False, "path": str(target), "error": (
+                f"{target} is outside your working directory {_root}; write the contract inside it."
+                + ("" if _cell else
+                   " No task directory was declared to this server (OPENPASO_CELL_WORKDIR is unset "
+                   "where it was started), so it writes only inside your home directory; to write "
+                   "elsewhere, set OPENPASO_CELL_WORKDIR to the task's directory in the server's "
+                   "launch environment."))})
+        # A PATH OF ANOTHER SUFFIX IS REFUSED. Every contract this call writes is a Python script;
+        # measured: a cell called it for side_B/dealii_side.cc and got the Python wrapper in its .cc.
+        if target.suffix != ".py" and target.name not in {_nm for _nm, _ in companions}:
+            _var = f", variant='{variant}'" if variant else ""
+            return json.dumps({"written": False, "path": str(target), "error": (
+                f"{target.name} is not a .py file, and the contract this call writes is a Python script "
+                f"({_src_path.name}); nothing was written. Give it a .py path: write_participant_contract("
+                f"solver='{solver}', path='{target.parent / 'participant_<x>.py'}'{_var})"
+                + (f". Its program {companions[0][0]} and CMakeLists.txt are written beside it by that same "
+                   f"call" if companions else "") + ".")})
+        if target.exists() and not overwrite:
+            return json.dumps({"written": False, "path": str(target),
+                               "error": "the file exists; pass overwrite=True to replace it"})
+        _beside = [(target.parent / _nm, _tx) for _nm, _tx in companions]
+        # THE WRITTEN BUILD FINDS THE TREE DISCOVER NAMES. Measured: a cell's first build found the
+        # system deal.II 9.1.1, because the served HINTS were ${DEAL_II_DIR} $ENV{DEAL_II_DIR} and it
+        # had set neither. The knowledge door carries no host path, so the door's CMakeLists stays as
+        # it is; the file written here gets this install's tree after those two, which still win.
+        _tree_dir = ""
+        if _src_path.name.startswith("participant_dealii") and any(_nm == "CMakeLists.txt" for _nm, _ in companions):
+            try:
+                from backends.dealii.backend import _find_dealii as _fd
+                _tree_dir = str(_fd() or "")
+            except Exception:                                  # noqa: BLE001
+                _tree_dir = ""
+        if _tree_dir:
+            _hint = f'"{_tree_dir}"' if " " in _tree_dir else _tree_dir
+            _beside = [(_bp, re.sub(r"(find_package\(deal\.II[^)]*?HINTS \$\{DEAL_II_DIR\} \$ENV\{DEAL_II_DIR\})",
+                                    lambda _m: _m.group(1) + " " + _hint, _tx, count=1)
+                        if _bp.name == "CMakeLists.txt" else _tx) for _bp, _tx in _beside]
+        if any(_bp == target for _bp, _ in _beside):
+            return json.dumps({"written": False, "path": str(target),
+                               "error": (f"{target.name} is a file this contract writes BESIDE the wrapper; "
+                                         f"give the wrapper its own name, participant_<x>.py")})
+        _there = [_bp.name for _bp, _ in _beside if _bp.exists()]
+        if _there and not overwrite:
+            return json.dumps({"written": False, "path": str(target),
+                               "error": (f"{', '.join(_there)} already exist(s) beside it, and this contract "
+                                         f"writes that file too; pass overwrite=True to replace it (your "
+                                         f"file is moved aside first, never lost)")})
+        # A FILLED FILE REPLACED BY THE PRISTINE CONTRACT IS WORK LOST. Measured:
+        # a parent whose worker had died at the step cap called this with
+        # overwrite=True on the worker's 45 kB filled participant, got a bare
+        # "written", and gave up. The caller's own file is MOVED aside -- never
+        # read, never copied, so this stays the one writer that writes nothing
+        # but the elided contract -- and the reply says where it went.
+        # A MOVE THAT FAILED WRITES NOTHING: passed over, the file it could not move was
+        # overwritten, the one loss this move exists to prevent. The moves already made
+        # are undone, so a refusal leaves every file as it was.
+        # A NAME NO EARLIER BACKUP HOLDS: named by the second alone, a second replacement
+        # in the same second renamed onto the first backup and that file was gone.
+        import time as _time
+        _moved: list = []
+        replaced = ""
+        for _p in [target] + [_bp for _bp, _ in _beside]:
+            try:
+                # ANY NON-EMPTY FILE, NOT BY SIZE: a filled participant of exactly the
+                # served contract's byte count was overwritten without being moved aside,
+                # and this tool never reads the caller's file to tell the two apart.
+                if not (_p.exists() and _p.stat().st_size > 0):
+                    continue
+                _size = _p.stat().st_size
+                _stamp = _time.strftime('%H%M%S')
+                _keep = _p.with_name(f"{_p.stem}.replaced-{_stamp}{_p.suffix}")
+                _n = 2
+                while _keep.exists():
+                    _keep = _p.with_name(f"{_p.stem}.replaced-{_stamp}-{_n}{_p.suffix}")
+                    _n += 1
+                _p.rename(_keep)
+            except OSError as exc:
+                for _was, _now in reversed(_moved):
+                    try:
+                        _now.rename(_was)
+                    except OSError:
+                        pass
+                return json.dumps({"written": False, "path": str(target), "error": (
+                    f"could not move your existing {_p.name} aside ({type(exc).__name__}: {exc}), so "
+                    f"nothing was written and your files are as they were. Make its directory "
+                    f"writable, or give the contract another path.")})
+            _moved.append((_p, _keep))
+            replaced += (f" MOVED your existing {_size:,}-byte {_p.name} aside to {_keep.name} first -- "
+                         f"if that was a filled file, take it back from there instead of filling the "
+                         f"hole again.")
+        # ALL OR NOTHING, THE WRITE TOO: a write that failed after the moves left a partial file where
+        # the caller's had been and the caller's own only in a backup. Whatever this call wrote is
+        # removed and every move is undone, so a refusal leaves the folder as it was.
+        _written: list = []
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for _wp, _wt in [(target, text)] + list(_beside):
+                _written.append(_wp)
+                _wp.write_text(_wt)
+        except OSError as exc:
+            for _wp in _written:
+                try:
+                    _wp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for _was, _now in reversed(_moved):
+                try:
+                    _now.rename(_was)
+                except OSError:
+                    pass
+            return json.dumps({"written": False, "path": str(target), "error": (
+                f"{type(exc).__name__}: {exc}. Nothing was written: what this call had written is "
+                f"removed and every file it had moved aside is back in its place.")})
+        import hashlib as _hl
+        # COUNTED FROM THE MARKERS THEMSELVES. It counted "does not serve the
+        # solve itself", a phrase the names list carries once however many solve
+        # regions were cut, so a contract with three elided regions said "2".
+        edit_blocks = text.count("# ── EDIT THIS BLOCK")
+        solve_holes = text.count("THE SOLVE ITSELF IS YOURS AND IS NOT SERVED HERE")
+        if not solve_holes:
+            # A DOOR SCAFFOLD MARKS EACH HOLE BY A PAIR OF BANNER LINES. Measured: every 4C side
+            # of two rounds was told its scaffold had "0 marked region(s)" to fill.
+            solve_holes = sum(1 for _ln in text.splitlines()
+                              if _ln.lstrip().startswith("# ── SOLVE") and "DOES NOT SERVE THIS" in _ln) // 2
+        _also = ""
+        if _beside:
+            _holes = sum(_tx.count("IS YOURS AND IS NOT SERVED HERE") for _, _tx in _beside)
+            _also = (f" It ALSO wrote {', '.join(_bp.name for _bp, _ in _beside)} beside it: the program "
+                     f"the wrapper builds and runs, whose {_holes} holes (each where a HOLE banner sits) "
+                     f"are the solve and are yours; the wrapper itself has none, and the consistent "
+                     f"{'traction' if 'elastic' in _src_path.name else 'flux'} recovery is the program's "
+                     f"served part.")
+        # A SPARTA CONTRACT RUNS A BINARY, SO ITS NOTE NAMES THE ONE THIS INSTALL HAS. Measured: the
+        # contract's placeholder "spa_serial" is not on PATH here, and two runs died on
+        # FileNotFoundError. The file stays the served text; the note says what to put in SPARTA.
+        if _src_path.name == "participant_sparta.py":
+            try:
+                from backends.sparta.backend import _find_sparta_binary as _fsb
+                _spa = _fsb() or ""
+            except Exception:                                  # noqa: BLE001
+                _spa = ""
+            _also += (f" BINARY: set SPARTA in the edit block to {_spa}, the SPARTA binary "
+                      f"discover(query='list') names on this install." if _spa else
+                      " BINARY: discover(query='list') names no SPARTA binary on this install.")
+        # A deal.II CONTRACT IS BUILT, SO ITS NOTE NAMES THE BUILD: the six CMake lines and the
+        # tree this install has. Measured: two coupled sides compiled against a system /usr
+        # deal.II 9.1.1 and never built, one lost 20 min.
+        if _src_path.name.startswith("participant_dealii"):
+            try:
+                from backends.dealii.backend import build_tree_note as _btn
+                _tree = _btn()
+            except Exception:                                  # noqa: BLE001
+                _tree = ""
+            _also += (" BUILD: "
+                      + ("the CMakeLists.txt written beside it is the six lines deal.II needs"
+                         + (f"; to the HINTS of its find_package this call added this install's tree, "
+                            f"{_tree_dir}, after ${{DEAL_II_DIR}} and $ENV{{DEAL_II_DIR}} (a DEAL_II_DIR you set "
+                            f"still comes first), so a build with no DEAL_II_DIR finds that tree and not a "
+                            f"system package" if _tree_dir else "")
+                         if any(_bp.name == "CMakeLists.txt" for _bp, _ in _beside) else
+                         "a CMakeLists.txt of six lines -- cmake_minimum_required(VERSION 3.13); "
+                         "find_package(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR}); "
+                         "deal_ii_initialize_cached_variables(); project(<name>); "
+                         "add_executable(<name> <name>.cc); deal_ii_setup_target(<name>)")
+                      + "; cmake -S <dir> -B build -DDEAL_II_DIR=<tree> -DCMAKE_BUILD_TYPE=Release. "
+                      + (f"On this install: {_tree}." if _tree else
+                         "discover(query='list') names the tree when deal.II is installed.")
+                      + " A compile that reads /usr/include/deal.II is not building against that tree.")
+        return json.dumps({
+            "written": True, "path": str(target), "chars": len(text),
+            "sha256": _hl.sha256(text.encode()).hexdigest(),
+            **({"also_written": [{"path": str(_bp), "chars": len(_tx),
+                                  "sha256": _hl.sha256(_tx.encode()).hexdigest()}
+                                 for _bp, _tx in _beside]} if _beside else {}),
+            "note": (_which + f"The served contract with the solve elided, not a program: "
+                     f"{edit_blocks + solve_holes} marked region(s) are yours to fill "
+                     f"({edit_blocks} EDIT THIS BLOCK, and {solve_holes} elided solve "
+                     f"region(s), each where an elision banner sits). Fill them IN "
+                     f"PLACE -- never re-type the file; the checks "
+                     + ("it carries, and the recovery its program carries, are"
+                        if _beside else
+                        "it carries are"
+                        if _src_path.name.startswith("participant_dealii") else
+                        "and the recovery it carries are")
+                     + " the same ones the knowledge reply serves."
+                     + ("" if _beside or not _src_path.name.startswith("participant_dealii") else
+                        " Its flux recovery is YOUR program's, the consistent one: the residual of "
+                        "the system it assembled with no boundary condition applied, divided by "
+                        "the nodal interface weight.")
+                     + _also + replaced)})
+
+    # THE VARIANTS ARE THE RESOLVER'S, read when the tool is registered. The docstring listed
+    # 'neumann' among the variants of every solver; three FEniCSx workers of one round asked
+    # for it first, and FEniCSx has none (its base contract serves both sides).
+    try:
+        from .coupling_knowledge import participant_variants_text as _pvt
+        _vt = _pvt()
+    except Exception:                                          # noqa: BLE001
+        _vt = ("`variant` names a variant of the contract; a variant this install does not have is "
+               "refused, and the refusal names the ones it has.")
+    write_participant_contract.__doc__ = (write_participant_contract.__doc__ or "").replace("{VARIANTS}", _vt)
+    mcp.tool()(write_participant_contract)
 
     @mcp.tool()
     async def couple_precice(participants: str, data: str, exchanges: str,
@@ -7711,7 +10589,7 @@ def register_consolidated_tools(mcp: FastMCP):
 
         # A SECOND prepare_simulation WITH A DIFFERENT SOLVER IS A COUPLING.
         #
-        # Measured over three coupled development runs: two of the three
+        # Measured over three coupled recorded runs: two of the three
         # called prepare_simulation twice -- once per prescribed
         # code -- and NEVER opened a knowledge door, so the coupled must-read
         # (the couple() recipe, the fields-vs-evidence hierarchy, the
@@ -7929,8 +10807,8 @@ def register_consolidated_tools(mcp: FastMCP):
                         mesh_note = (
                             "\nTHE MESH HERE IS 3x3 AND ILLUSTRATIVE. It shows "
                             "the sections, the node ordering and the topology "
-                            "blocks; it is NOT the mesh your task wants. Every "
-                            "blind task prescribes its own refinement sequence, "
+                            "blocks; it is NOT the mesh your problem wants. A mesh "
+                            "study prescribes its own refinement sequence, "
                             "so GENERATE the node and element lists in a loop "
                             "and emit one deck per level. A hard-coded listing "
                             "is the one part of this template you cannot "
@@ -7971,7 +10849,7 @@ def register_consolidated_tools(mcp: FastMCP):
         #
         # server.py tells the agent "Always do this first" about
         # prepare_simulation, and the block was attached only to
-        # knowledge(topic='physics'). Measured over 98 development runs with
+        # knowledge(topic='physics'). Measured over 98 recorded runs with
         # these tools: 108 prepare_simulation calls, 95 resolving
         # knowledge(topic='physics') calls, and 43 runs (44%) that received
         # the block NEVER. It is the only text that carries the wiring table
@@ -7993,7 +10871,7 @@ def register_consolidated_tools(mcp: FastMCP):
         # must-read, the template, and 0 of the 7 pitfalls (46 bullets) this
         # door serves for 4C/heat, because the previous trim kept the template
         # and pointed at "the rest", and the pitfalls were the rest. On one
-        # development run set the two runs that made this call were the two
+        # recorded run set the two runs that made this call were the two
         # that failed on the 4C side, and no run that got it right had made
         # it -- two of two is a lead, not a rate, which is why the fix names
         # the rule rather than the run set.
@@ -8070,7 +10948,7 @@ def register_consolidated_tools(mcp: FastMCP):
         # room, and the end of the must-read is the run-log contract, the
         # subprocess-capture rule and the per-side naming rule -- the evidence
         # rules a reader judges a coupled result by first, and the family that
-        # lost the most coupled development runs after the physics itself. So
+        # lost the most coupled recorded runs after the physics itself. So
         # the must-read, the deciding facts, every pitfall, every warning and
         # the universal rules are fixed; only the corpus yields, least valuable
         # first, until the reply fits, and what remains is served in its own
@@ -8225,18 +11103,36 @@ def register_consolidated_tools(mcp: FastMCP):
 
     @mcp.tool()
     def generate_mesh(geometry: str, mesh_size: float = 0.1,
-                      output_dir: str = "") -> str:
+                      output_dir: str = "", params: str = "") -> str:
         """Generate a mesh using Gmsh for non-trivial geometries.
+
+        THE SHAPE IS YOURS TO SET. Each geometry below has DIMENSIONS, and
+        `params` sets them. Without it you get this server's defaults, which
+        are one particular published configuration and almost certainly not
+        the one in your problem -- so the reply always states the dimensions
+        it actually built, whether you passed any or not.
 
         Args:
             geometry: One of the built-in geometries:
-                - "l_domain"          — 2D L-shaped domain
-                - "plate_with_hole"   — 2D plate with circular hole
-                - "channel_cylinder"  — 2D channel with cylindrical obstacle
+                - "l_domain"          — 2D L-shaped domain. FIXED at
+                  [-1,1]^2 minus [0,1]x[-1,0] (it matches deal.II's
+                  hyper_L(-1,1)); it takes no shape parameters, and asking
+                  for some is refused rather than ignored.
+                - "plate_with_hole"   — 2D plate with circular hole.
+                  params: radius, width, height.
+                - "channel_cylinder"  — 2D channel with cylindrical
+                  obstacle. params: cyl_radius, cyl_center ([x, y]),
+                  channel_length, channel_height.
                 (No "custom" passthrough yet — passing any other name
                 returns a 'Unknown geometry' message with this list.)
             mesh_size: Target element size
             output_dir: Where to save (auto if empty)
+            params: JSON object of the shape parameters above, e.g.
+                {"channel_length": 5.0, "channel_height": 1.0,
+                 "cyl_center": [1.0, 0.5], "cyl_radius": 0.1}. A key this
+                geometry does not take is REFUSED with the list of the ones
+                it does -- never dropped, because a dropped key hands you the
+                default geometry while you believe you asked for another.
         """
         from tools.mesh_generation import register_mesh_tools
         # Delegate to original. Importer names must match the
@@ -8272,13 +11168,65 @@ def register_consolidated_tools(mcp: FastMCP):
                 out_dir = Path(output_dir or str(_OUTPUT_DIR / "meshes"))
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out_file = out_dir / f"{geometry}.msh"
-                result = gen(mesh_size, output_path=out_file)
+                # THE OVERRIDES ALREADY EXISTED AND THIS DOOR DROPPED THEM.
+                #
+                # Every generator takes its dimensions as keyword arguments
+                # and tools/mesh_generation.py forwards them; this wrapper --
+                # the only one an agent can reach -- called gen(mesh_size,
+                # output_path=...) and nothing else. So `channel_cylinder`
+                # could ONLY ever produce the 2.2 x 0.41 channel with its
+                # cylinder at (0.2, 0.2), and a request for any other channel
+                # returned that one with nothing saying so. That is not a
+                # default being kept, it is one stored geometry with a
+                # parameter list painted on the front (found by the browser
+                # interface session, 2026-09-19).
+                import inspect as _inspect
+                _accepts = [p for p in _inspect.signature(gen).parameters
+                            if p not in ("mesh_size", "output_path")]
+                _shape: dict = {}
+                if str(params).strip():
+                    try:
+                        _shape = json.loads(params)
+                    except json.JSONDecodeError as _exc:
+                        return (f"params is not JSON ({_exc}). Pass a JSON "
+                                f"object of the shape parameters "
+                                f"{geometry} takes: {_accepts or 'none'}.")
+                    if not isinstance(_shape, dict):
+                        return (f"params must be a JSON OBJECT of shape "
+                                f"parameters, not {type(_shape).__name__}. "
+                                f"{geometry} takes: {_accepts or 'none'}.")
+                    # REFUSE, NEVER DROP. A silently ignored key returns the
+                    # default geometry to someone who believes they asked for
+                    # a different one -- the same defect this argument exists
+                    # to cure, one layer in.
+                    _unknown = [k for k in _shape if k not in _accepts]
+                    if _unknown:
+                        return (f"{geometry} does not take {_unknown}. "
+                                + (f"It takes: {_accepts}."
+                                   if _accepts else
+                                   "It takes no shape parameters at all: it "
+                                   "builds one fixed domain. Use a different "
+                                   "geometry, or mesh your own .geo file."))
+                result = gen(mesh_size, output_path=out_file, **_shape)
                 # generators return either Path or (Path, n_nodes,
                 # n_elements). Surface a friendly summary.
+                _defaults = {p: v.default for p, v
+                             in _inspect.signature(gen).parameters.items()
+                             if p in _accepts}
+                _built = {**_defaults, **_shape}
+                # SAY WHAT WAS BUILT, always. The failure being cured is a
+                # silent substitution, and it stays silent for anyone who
+                # passes no params at all unless the reply names the shape.
+                _shape_note = (f" shape: {_built}" if _built else
+                               " shape: fixed [-1,1]^2 minus [0,1]x[-1,0]")
                 if isinstance(result, tuple):
                     path, *meta = result
-                    return f"mesh: {path} (nodes={meta[0]}, elements={meta[1]})"
-                return str(result) if result is not None else "ok"
+                    from tools.mesh_generation import reading_note
+                    return (f"mesh: {path} (nodes={meta[0]}, "
+                            f"elements={meta[1]});{_shape_note}"
+                            + reading_note(geometry, path))
+                return (f"{result};{_shape_note}" if result is not None
+                        else f"ok;{_shape_note}")
             return f"Unknown geometry: {geometry}. Available: {list(generators.keys())}"
         except Exception as e:
             return f"Error: {e}"
@@ -8291,14 +11239,13 @@ def register_consolidated_tools(mcp: FastMCP):
     def reload_catalog() -> str:
         """Hot-reload the per-backend KNOWLEDGE dicts from disk.
 
-        Closes the gap identified by the
-        mcp-catalog-staleness-runtime-isolation post-mortem
-        (2026-06-01): the MCP server normally imports
+        Closes a gap one of openPASO's own post-mortems recorded:
+        the MCP server normally imports
         src/backends/<be>/generators/<physics>.py modules ONCE at
         startup and never refreshes them, so catalog edits made
-        during a long-running session are invisible. Postmortems
-        in data/postmortems/ are scanned on every request (already
-        hot), but pitfall dicts are not.
+        during a long-running session are invisible. Post-mortem
+        records are read on every request (already hot), but
+        pitfall dicts are not.
 
         This tool walks every imported `backends.<be>.generators.*`
         and `backends.<be>.backend` module, runs importlib.reload
@@ -8877,6 +11824,17 @@ def _promote_variant(payload: str, key: str) -> str:
     e = payload.find("```\n", f + 9)
     if e < 0:
         return payload
+    # THE PROGRAM A WRAPPER RUNS MOVES WITH IT (deal.II: its C++ scaffold and
+    # CMakeLists.txt right behind the wrapper). Measured on a transient coupled
+    # round: the promoted transient wrapper led the reply and the program it
+    # runs was nowhere in it.
+    cpp = payload.find("```cpp", e)
+    if 0 <= cpp <= e + 1500 and "THE PROGRAM THE WRAPPER RUNS" in payload[e:cpp]:
+        for fence in ("```cpp", "```cmake"):
+            at = payload.find(fence, e)
+            close = payload.find("```\n", at + len(fence)) if 0 <= at <= e + 1500 else -1
+            if close > 0:
+                e = close
     section = payload[a:e + 4]
     rest = payload[:a] + payload[e + 4:]
     anchor = rest.find("## PARTICIPANT CONTRACT")
@@ -8898,9 +11856,12 @@ def _get_coupling_knowledge(solver: str = "", signal: str = "", physics: str = "
     # had the thermo-elastic contract asked for `participant:dirichlet:part1`
     # and got the scalar heat contract in parts, five calls long.
     _vk = _variant_for(physics)
-    if (signal or "").strip().lower().startswith("participant") and _vk \
-            and _vk not in (signal or "").lower():
-        signal = signal.strip() + ":" + _vk
+    # physics='fsi' too: its parts were the scalar contract's (measured: a fluid worker asked for
+    # signal='participant:...' with physics='fsi' and was served the heat contract in parts).
+    _pk = _vk or ("fsi" if _is_fsi_physics(physics) else "")
+    if (signal or "").strip().lower().startswith("participant") and _pk \
+            and _pk not in (signal or "").lower():
+        signal = signal.strip() + ":" + _pk
     payload = _capture_knowledge_fn("get_coupling_knowledge", solver, signal)
     # THE EXCHANGE THE PHYSICS NAMES GETS ITS CONTRACT FIRST (thermo-elastic,
     # vector, transient or 3-D), where the backend ships one.
@@ -8919,7 +11880,9 @@ def _get_coupling_knowledge(solver: str = "", signal: str = "", physics: str = "
     # wrong API for 68 calls, a DUNE side on a name ufl no longer exports.
     # The facts are short and measured by execution; a coupled side needs
     # them exactly as much as a single-code run does.
-    _facts = (_deciding_block(solver, "coupled side")
+    _fsi_door = _is_fsi_physics(physics) and (solver or "").strip().lower() not in (
+        "fsi", "fluid_structure", "fluid-structure")
+    _facts = (_deciding_block(solver, "fluid-structure side" if _fsi_door else "coupled side", fsi=_fsi_door)
               if isinstance(payload, str) and (solver or "").strip()
               and _DECIDING_FACTS.get((solver or "").strip().lower()) else "")
 
@@ -8943,13 +11906,15 @@ def _get_coupling_knowledge(solver: str = "", signal: str = "", physics: str = "
     if _is_fsi_physics(physics) and (solver or "").strip().lower() not in ("fsi", "fluid_structure",
                                                                           "fluid-structure"):
         _named = (solver or "").strip().lower()
-        _which = {"fourc": "participant_fsi_solid_fourc.py", "4c": "participant_fsi_solid_fourc.py",
-                  "fenics": "participant_fsi_fluid_fenics.py (fluid) and participant_fsi_solid_fenics.py "
-                            "(structure)", "fenicsx": "participant_fsi_fluid_fenics.py (fluid) and "
-                            "participant_fsi_solid_fenics.py (structure)",
-                  "dolfinx": "participant_fsi_fluid_fenics.py (fluid) and participant_fsi_solid_fenics.py "
-                             "(structure)",
-                  "skfem": "participant_fsi_solid_skfem.py", "scikit-fem": "participant_fsi_solid_skfem.py"}
+        # EACH FILE WITH THE WRITER CALL THAT PUTS IT ON DISK. The writer could not write these
+        # (measured: variant='fsi' wrote the scalar heat contract in all five cells of a round).
+        _fenics_two = ("participant_fsi_fluid_fenics.py (fluid, variant='fsi_fluid') and "
+                       "participant_fsi_solid_fenics.py (structure, variant='fsi_solid')")
+        _which = {"fourc": "participant_fsi_solid_fourc.py (variant='fsi')",
+                  "4c": "participant_fsi_solid_fourc.py (variant='fsi')",
+                  "fenics": _fenics_two, "fenicsx": _fenics_two, "dolfinx": _fenics_two,
+                  "skfem": "participant_fsi_solid_skfem.py (variant='fsi')",
+                  "scikit-fem": "participant_fsi_solid_skfem.py (variant='fsi')"}
         _lead = ("[YOU ASKED FOR A FLUID-STRUCTURE COUPLING, so this is the FSI contract rather than the "
                  f"single-field one for {solver!r}."
                  + (f" The participant in it that runs under {solver!r} is {_which[_named]}."
@@ -8967,15 +11932,32 @@ def _get_coupling_knowledge(solver: str = "", signal: str = "", physics: str = "
                 from .coupling_knowledge import _script as _fsi_script     # noqa: PLC0415
                 _own_block = _fsi_script(_own)
                 if _own_block and _own_block[:400] not in _fsi_payload:
+                    _code = _own.rsplit("_", 1)[1]
                     _fsi_payload = (f"## THE STRUCTURE PARTICIPANT THAT RUNS UNDER {solver.upper()} "
                                     f"— contract, solve elided; edit the marked block and write the "
-                                    f"solve\n\n```python\n{_own_block}```\n\n" + _fsi_payload)
+                                    f"solve\n\nwrite_participant_contract(solver='{_code}', variant='fsi', "
+                                    f"path=...) writes it.\n\n"
+                                    f"```python\n{_own_block}```\n\n"
+                                    # the partner's contract, named where this reply still has room
+                                    f"## THE FLUID PARTICIPANT it couples with is FEniCSx's "
+                                    f"participant_fsi_fluid_fenics.py: write_participant_contract("
+                                    f"solver='fenics', variant='fsi_fluid', path=...) writes it, and "
+                                    f"knowledge(topic='coupling', solver='fenics', physics='fsi') "
+                                    f"serves it with its facts.\n\n" + _fsi_payload)
             except Exception:                                  # noqa: BLE001
                 pass
         _fsi_first = not _MUST_READ_STATE["served"]
         _MUST_READ_STATE["served"] = True        # or every FSI call looks like the first reply, and
                                                  # the contract block is never repeated to the worker
-        return _with_facts(_front_load_coupling(_lead + _fsi_payload, solver, must_read=_fsi_first))
+        _text = _front_load_coupling(_lead + _fsi_payload, solver, must_read=_fsi_first)
+        # THE SESSION'S FIRST REPLY IS THE ORCHESTRATOR'S: when the must-read fills it, it says that the
+        # worker's own call "leads with the complete block, the deciding facts and the deck grammar" --
+        # that call (pointer mode) carries the code's facts and its fluid-structure facts. Measured:
+        # with the facts here too, the fluid-structure facts pushed the per-side naming rule out of
+        # this reply for 4C and FEniCSx.
+        if _fsi_first and "IS NOT REPEATED IN THIS FIRST REPLY" in _text:
+            _facts = ""
+        return _with_facts(_text)
     # THE ESCAPE HATCH HAD TO BE MADE REAL.
     #
     # The truncation notice tells the agent, verbatim, that "the rest is
@@ -9200,7 +12182,7 @@ def _re_words(text: str) -> list:
 # Measured: the generic coupling payload is 65,601 chars, and a coupled run
 # typically reads it plus two solver payloads (dune 76,831, kratos 72,115,
 # fenics 72,993) -- about 214,547 chars of prose before a solver runs. 220 of
-# 224 coupled development runs read all three.
+# 224 coupled recorded runs read all three.
 #
 # The consequence is not that the text is unread; it is that the agent runs out
 # of ACTIONS. Median tool calls: 39 with these tools, 95 without. Median input
@@ -9254,9 +12236,9 @@ side that reads ./imports.json, runs its own solver once, writes
 
     couple(participants='[
       {"name": "A", "command": ["<python>", "side_a.py"],
-       "work_dir": "<ABSOLUTE path of ./side_A>", "imports_from": ["B"]},
+       "work_dir": "side_A", "imports_from": ["B"]},
       {"name": "B", "command": ["<python>", "side_b.py"],
-       "work_dir": "<ABSOLUTE path of ./side_B>", "imports_from": ["A"]}]',
+       "work_dir": "side_B", "imports_from": ["A"]}]',
       max_iter=<from the rho guidance below; when unsure use 150>,
       tol=<the tolerance your task prescribes>)
 
@@ -9302,17 +12284,24 @@ sees nothing but this task= string (measured: a worker whose brief kept
     (add physics='thermoelastic' when the interface carries temperature AND
     displacement together, physics='elasticity' when the exchanged field is a
     displacement, physics='transient' for a time-dependent problem, physics='3d'
-    for a three-dimensional domain: the reply then leads with that contract) and
-    copy the served CONTRACT for the role the task gives side A into
-    ./side_A/participant_A.py unchanged (the imports.json handshake, sign
-    convention, flux recovery, exports schema and export self-check); fill
-    only its marked hole(s) with the mesh, form, material, source and solve
+    for a three-dimensional domain, physics='fsi' for a fluid beside a structure:
+    the reply then leads with that contract) and
+    write the served CONTRACT for the role the task gives side A to
+    ./side_A/participant_A.py with write_participant_contract(solver=<code>,
+    path='./side_A/participant_A.py', variant=<physics word above or ''>) --
+    the knowledge reply's code with its comments, never re-typed; fill
+    only its marked hole(s) IN PLACE -- never re-type the file -- with the mesh, form, material, source and solve
     for subdomain A from THIS DATA, which is all you know of the task:
     <SUBDOMAIN A, COPIED FROM YOUR TASK WORD FOR WORD: geometry and interface
     position; equations and coefficients; source terms as written; boundary
     values; the level-1 mesh; the file names the task prescribes for this
-    side>. Write ./side_A/config.json for
-    level 1 and a synthetic ./side_A/imports.json. IF THE CODE TAKES AN INPUT
+    side>. Write ./side_A/config.json for level 1 WITH THE TASK'S DATA for that
+    side as the task writes them (x0, x1, y0, y1, iface, k, lam, mu, beta;
+    source_T, source_ux, source_uy or source_expr as strings in x, y): both
+    contracts read them and the audit judges the side against them. Then a
+    synthetic ./side_A/imports.json whose values and normal_fluxes are
+    NOT zero (on a zero import a Neumann side applies no load, and its
+    EXPORT SELF-CHECK cannot fire). IF THE CODE TAKES AN INPUT
     DECK, that deck is READ AND JUDGED THE MOMENT YOU WRITE IT -- write it to a
     .yaml, .yml or .dat file and the defects come back in that reply, before
     the binary runs, so do not spend an action asking for the check. Run the
@@ -9320,7 +12309,7 @@ sees nothing but this task= string (measured: a worker whose brief kept
     own interpreter (generous timeout, first runs compile) until
     ./side_A/exports.json appears with finite values. CHECK: exports.json
     exists and the script exited 0. Report DONE or the exact error.")
-THEN A SECOND WORKER FOR SIDE B, WITH THE SAME CARE. Its brief carries side B's OWN geometry, equations, boundary values, level-1 mesh and file names, its own knowledge(topic='coupling', solver='<side B's code>', physics=...) call, and ITS interpreter -- a different binary from side A's in most pairs. The worker sees nothing but its task= string, so "the same as side A" tells it nothing. Same check: ./side_B/exports.json with finite values, exit 0. Measured: 151 runs ended with one side exporting and the other with no exports.json at all; the silent one is side B 117 times of 144, and every backend appears there, including codes that ran as the other side of a different pair. One side alone is not a coupling.
+THEN A SECOND WORKER FOR SIDE B, WITH THE SAME CARE. Its brief carries side B's OWN geometry, equations, boundary values, level-1 mesh and file names, its own knowledge(topic='coupling', solver='<side B's code>', physics=...) call, and ITS interpreter -- a different binary from side A's in most pairs. The worker sees nothing but its task= string, so "the same as side A" tells it nothing. Same check: ./side_B/exports.json with finite values, exit 0. One side alone is not a coupling: a side with no exports.json never ran to completion, whichever code it runs.
 
 THAT CODE'S OWN INTERPRETER IS PRINTED BY discover(query='list'), next to the
 backend, and it is the argv `couple` needs as well. The default `python3` is
@@ -9341,8 +12330,8 @@ or ONE couple_levels(participants=..., levels='[{"level": 1, "A": {"nx": ..,
 "ny": ..}, "B": {...}}, ...]', history_pattern='<the per-level history file
 name your task prescribes, with {k} for the level>') call for the whole
 sequence: it hands each side its level's mesh keys in the environment
-(OPENPASO_CONFIG_JSON, read by the served contracts -- openPASO writes no file of
-yours), warm-starts each level from the previous one, and keeps every level's
+(OPENPASO_CONFIG_JSON; a script that never reads it is refused before anything
+runs -- openPASO writes no file of yours), warm-starts each level from the previous one, and keeps every level's
 history, console and interface tables (measured: couplings proven
 at level 1 ran out of wall clock before level 3 when every level cost ten calls).
 
@@ -9380,15 +12369,14 @@ In Kratos, setting FACE_HEAT_FLUX on the interface NODES does nothing unless
 only ever integrated BY a condition. Measured on one mesh, three runs differing
 only in this:
 
-    zero flux, conditions present     max|T| = 2.307291e-03
-    flux on nodes, NO conditions      max|T| = 2.307291e-03   BIT-IDENTICAL
-    flux on nodes AND conditions      max|T| = 3.605675e-03
+    zero flux, conditions present     max|T| = T0
+    flux on nodes, NO conditions      max|T| = T0, BIT-IDENTICAL
+    flux on nodes AND conditions      a different field: the flux is applied
 
 Two real runs died exactly here: side A correct to three digits, side B
-reporting 2.367e-03 and 2.342e-03 against a true 3.670e-03 -- the no-flux
-answer -- with the interface FIELD matching across the seam to 0.000e+00, so
-only the flux jump betrayed it, growing 8.139e-01, 9.066e-01, 9.530e-01 under
-refinement instead of shrinking.
+reporting the no-flux answer, with the interface FIELD matching across the
+seam exactly, so only the flux jump betrayed it, growing under refinement
+instead of shrinking.
 
 THE SHAPE IS GENERAL, not Kratos-specific: a boundary value attached to nodes
 but never integrated over a facet contributes nothing. 4C has the same trap
@@ -9402,11 +12390,11 @@ and compare. If the two fields are identical, the flux never reached the
 operator. That costs one extra solve and is the only check that sees this.
 
 PARAMETERIZE BY LEVEL, OR THE BUDGET EATS YOU. Have each participant read
-its mesh size from a tiny ./config.json ({"level": 1, "nx": 5, "ny": 8})
+its mesh size from a tiny ./config.json ({"level": 1, "nx": <nx>, "ny": <ny>})
 instead of hard-coding it; advancing a level is then: DOUBLE nx and ny
 (halve h) and set the next level in each side's config, call couple again,
 save that level's outputs. The level key is a label; only nx and ny change
-the mesh (measured: three runs raised the label alone and coupled the same
+the mesh (measured: a run that raised the label alone coupled the same
 mesh three times). Measured
 both ways: participants built this way ran all three levels in under two
 minutes of compute; sessions that regenerated their meshes by hand inside
@@ -9414,7 +12402,7 @@ the participant spent their whole budget on level 1. Build the config
 route FIRST -- it costs one extra minute at level 1 and buys the other
 two levels.
 
-THE FIELDS ARE THE RESULT; THE HISTORY IS THE EVIDENCE. Interface rows at points the task does not print are refused wholesale (measured: a coupling converged at every level counted for nothing because all 44 of its interface rows sat at self-chosen coordinates). What counts is the field and interface files at the prescribed probe points, for every level and both sides -- a run that converges its coupling and writes no field files counts for NOTHING (measured: one run drove level 1 to 6.37e-07 and delivered only its level-1 residual history). Alongside them, a task that names a per-level residual-history file wants one row per partitioned-iteration step, per mesh level. That file IS the evidence that two
+THE FIELDS ARE THE RESULT; THE HISTORY IS THE EVIDENCE. Interface rows at points the task does not print are refused wholesale (measured: a coupling converged at every level was refused because every one of its interface rows sat at self-chosen coordinates). What counts is the field and interface files at the prescribed probe points, for every level and both sides -- a run that converges its coupling and writes no field files counts for NOTHING (measured: a run that converged its first level and delivered only that level's residual history). Alongside them, a task that names a per-level residual-history file wants one row per partitioned-iteration step, per mesh level. That file IS the evidence that two
 codes iterated against each other; nothing else you deliver can show it.
 
 THE INTERFACE FILE IS WRITTEN AT THE POINTS THE TASK LISTS, NOT AT YOUR NODES.
@@ -9439,7 +12427,7 @@ the list with them.
 CHECK EACH SUBDOMAIN AGAINST ITS OWN EQUATION FIRST. A converged interface
 residual says the two sides AGREE, not that either is right, and the two
 failures are independent: one run converged to 8e-07 in 16 steps with a field
-TEN TIMES too small, at order -0.02 against an independent reference. Run
+TEN TIMES too small, whose error did not fall at all under refinement. Run
 verify_pde_consistency(...) on each side, with that side's own source and
 coefficient, before spending budget on the iteration.
 
@@ -9448,14 +12436,13 @@ does not model. It implements second-order scalar diffusion, so an elasticity
 form or an added reaction term is refused BY NAME on the equation string. Read
 a refusal as having learned NOTHING about that side, not as a pass.
 
-READ THE TWO VERDICTS ASYMMETRICALLY. Measured: INCONSISTENT lands on 28 sides
-that are wrong and NONE that are right, so fix it before spending budget on
-further levels. CONSISTENT is weaker -- 62 wrong sides also read CONSISTENT,
-because an identity whose test function vanishes on the boundary cannot see a
+READ THE TWO VERDICTS ASYMMETRICALLY. INCONSISTENT is strong evidence against
+a side, so fix it before spending budget on further levels. CONSISTENT is
+weaker, because an identity whose test function vanishes on the boundary cannot see a
 wrong condition ON that boundary. A clean verdict is not a clean bill of
 health.
 
-THE DIRICHLET SIDE RETURNS A MEASURED FLUX, NEVER A PLACEHOLDER. Recover it from your OWN system, in this order: (1) the CONSISTENT residual recovery q = -(A u - b_vol)/w on the interface rows -- second order, valid on BOTH sides; (2) the code's native boundary-flux output ONLY on a side whose interface is Dirichlet (on a Neumann-loaded line it echoes the applied load); (3) one-sided quadratic extrapolation of -k*du/dn from three field points along the normal as a CROSS-CHECK, not the exported value on a high-diffusivity side (measured: routes 1 and 3 agree to 2.7% rel-RMS at h=1/8 on the low-k side; route 3 alone missed by 6.5% on a k=200 side). A constant or invented exchanged quantity turns the partitioned update into a no-op (measured: a hard-coded 0.0 flux never approached tolerance in 50 iterations; the real recovered flux converged in 4). If the residual is not contracting, check FIRST that the data you SEND changes between iterations.
+THE DIRICHLET SIDE RETURNS A MEASURED FLUX, NEVER A PLACEHOLDER. Recover it from your OWN system, in this order: (1) the CONSISTENT residual recovery q = -(A u - b_vol)/w on the interface rows -- second order, valid on BOTH sides; (2) the code's native boundary-flux output ONLY on a side whose interface is Dirichlet (on a Neumann-loaded line it echoes the applied load); (3) one-sided quadratic extrapolation of -k*du/dn from three field points along the normal as a CROSS-CHECK, not the exported value on a high-diffusivity side (measured: routes 1 and 3 agree to 2.7% rel-RMS at h=1/8 on the low-k side; route 3 alone missed by 6.5% on the high-k side). A constant or invented exchanged quantity turns the partitioned update into a no-op (measured: a hard-coded 0.0 flux never approached tolerance in 50 iterations; the real recovered flux converged in 4). If the residual is not contracting, check FIRST that the data you SEND changes between iterations.
 
 THE RECOVERY, READY TO COPY (P1 triangles; split quads into two triangles first; works for any interface axis) -- verified by execution, 9.3e-4 max relative error against an analytic outward flux at h=1/16, second order under refinement. A first-order recovery here caps the whole coupled field at order ~1 however good the elements are. FOR ELASTICITY (vector interface) the same identity holds PER COMPONENT: t_c(x_i) = (K u - F_vol)_(i,c) / w_i with K the elastic stiffness assembled with NO boundary conditions, F_vol the volume load only, w_i the tributary interface length; export q = -t per the sign convention (measured on a manufactured plane-strain case: component orders 1.91-2.10 across the ladder):
 
@@ -9480,11 +12467,11 @@ def consistent_interface_flux(nodes, tris, k, u, f_vol, iface_ids, h_trib):
 
 
     couple(participants='[{"name": "A", "command": "<run side A>",
-                           "work_dir": "<ABSOLUTE path>", "imports_from": ["B"]},
+                           "work_dir": "side_A", "imports_from": ["B"]},
                           {"name": "B", "command": "<run side B>",
-                           "work_dir": "<ABSOLUTE path>", "imports_from": ["A"]}]',
+                           "work_dir": "side_B", "imports_from": ["A"]}]',
            max_iter=100, tol=1e-6,
-           history_path="<ABSOLUTE path of the per-level residual-history file your task names>")
+           history_path="<the per-level residual-history file your task names — a path inside your working directory>")
 
 returns `history` and writes its finite measured values directly to the requested
 CSV. Report `iterations` (also copied
@@ -9501,7 +12488,7 @@ is not a function of its input, and the coupling is not coupled. The residual
 then falls to ~1e-18 in three or four steps, because nothing is moving. That
 looks like spectacular convergence and is worth nothing.
 
-    a real coupling, even a very stiff one (200:1), took 12 iterations to
+    a real coupling, even a very stiff one (a large k ratio), took 12 iterations to
     1.1e-22 with both sides reported responsive
     a dead one reached 1.5e-18 in 4 steps and was reported unresponsive
 
@@ -9525,11 +12512,9 @@ shared interface probes, computed from the two profiles you exported:
 
 An update norm, one side's own solver residual, or the driver's iterate
 difference all fall to 1e-7 while the two codes still disagree completely.
-Reporting one of those is the most common way a coupled answer is lost: of the
-coupled result sets on record that exported both sides, 17 of 31 report a
-residual below 1e-5 that their OWN two files contradict -- one with a 189% flux
-mismatch behind a reported 1.12e-07 -- and it happens whether or not the run
-uses these tools. Recompute the number from the files you just wrote. If it is
+Reporting one of those loses a coupled answer: measured, a 189% flux mismatch
+between the two exported files sat behind a reported residual of 1.12e-07.
+Recompute the number from the files you just wrote. If it is
 not small, the coupling has not converged, whatever the iteration history says.
 
 IF YOU DRIVE THE LOOP YOURSELF, IT MUST ACTUALLY ITERATE. A closed-form
@@ -9564,11 +12549,10 @@ interface refinement.
     conductance of a side is its coefficient divided by its own width, so a
     material contrast of N:1 on subdomains of different widths is NOT rho = N:
         rho = (k_dirichlet / width_dirichlet) / (k_neumann / width_neumann)
-    Worked with arbitrary numbers: k = 1 across a width of 2/3 on the
-    Dirichlet side and k = 100 across a width of 1/3 on the Neumann side give
-    1.5 and 300, so rho = 0.005 — five hundredths of one percent of the 100:1
-    material contrast, and a case that converges in a few iterations needing
-    nothing special. An agent that reads the contrast as rho concludes the
+    Worked with arbitrary numbers: k = 3 across a width of 0.6 on the
+    Dirichlet side and k = 45 across a width of 0.5 on the Neumann side give
+    5 and 90, so rho = 0.056 where the material contrast reads 15:1, and
+    a case that converges in a few iterations needing nothing special. An agent that reads the contrast as rho concludes the
     opposite and starts rebuilding a setup that was already fine. Put YOUR
     numbers in the formula.
   * IF rho > 10 AND THE TASK LEAVES THE ROLES TO YOU, the budget is the wrong
@@ -9631,7 +12615,7 @@ the contract line is read as the FIRST such line in the file. A hand-written
 line above the capture therefore WINS over the real one, and a hand-written
 number is where the wrong one comes from: measured on a coupled run whose mesh
 really did refine, side A's log opened with `NDOF = 1` at every level and the
-submission was rejected for an unrefined mesh. If your own participant does not
+result set read as an unrefined mesh. If your own participant does not
 print the line, add the print INSIDE it rather than in front of the log.
 Measured: one run drove the interface to 4.4e-07 and reached order 1.94, then
 wrote three lines of its own prose into the log and could not be credited with
@@ -9665,13 +12649,12 @@ it names. A session that also exposes the dedicated tool can call it directly
 for the same check on chosen files:
 
     verify_interface_flux(interface_files="<all per-level interface files, both sides>",
-                          solution_files="<all per-level field files, both sides>",
-                          interface_axis=0)
+                          solution_files="<all per-level field files, both sides>")
 
-Either way it needs no reference solution. For a flux you really computed from your own
-solution, q_n(x) / (-du/dn)(x) equals k at every interface point -- so the
-ratio is CONSTANT along the interface whatever k is, and POSITIVE. A constant
-NEGATIVE ratio means your normal points inward.
+Either way it needs no reference solution, and it reads each normal from your files
+(on a bent interface, each leg's own). For a flux you really computed from your
+own solution, q_n = k (-du/dn) at every interface point: a CONSTANT multiple,
+POSITIVE. A NEGATIVE multiple means your normal points inward.
 
 THE TRAP IT CATCHES: on the NEUMANN side the flux you IMPORT and the flux you
 REPORT have OPPOSITE signs. Kratos's FACE_HEAT_FLUX is the INWARD normal flux,
@@ -9680,11 +12663,10 @@ subdomain -- so the number you write into each per-level interface file is the
 NEGATIVE of the one you applied.
 
 Measured on the run described above whose field matched to 0.000e+00 across
-the seam: one side's implied coefficient came out -250.8 instead of +200. The
-same tool on a
-correct result set returns +0.98 to +1.30 on the k=1 side and +200.4 to +206.7
-on the k=200 side, without any reference solution. One call would have told the
-run which of the two it was.
+the seam: one side's implied coefficient came out -1.25 times its stated k. On
+a correct result set the same tool returns 0.98-1.30 times k on the low-k side
+and 1.00-1.03 times k on the high-k side, without any reference solution. One
+call would have told the run which of the two it was.
 
 EACH SIDE'S PER-LEVEL RUN LOG MUST CARRY THAT SOLVER'S OWN OUTPUT.
 
@@ -9750,11 +12732,13 @@ def _contract_block_span(payload: str) -> tuple[int, int]:
         pos = j + 3
 
 
-def _contract_block_end(payload: str, floor: int) -> int:
+def _contract_block_end(payload: str, floor: int, with_program: bool = True) -> int:
     """Where the payload's first participant contract block closes (the fence
     after the first ```python block that carries the handshake), so the
     must-read reply can be cut behind the contract and never through it.
-    `floor` when the payload has no such block."""
+    `floor` when the payload has no such block. `with_program`: the program a
+    wrapper runs, shown right behind it, belongs to the block (the worker's
+    reply and the cap); the orchestrator's first reply leaves it out."""
     if not isinstance(payload, str):
         return floor
     pos = 0
@@ -9775,6 +12759,16 @@ def _contract_block_end(payload: str, floor: int) -> int:
                 nj = payload.find("```", nxt + 9)
                 if nj > 0 and "imports.json" in payload[nxt:nj]:
                     end = nj + 3
+            # the program a wrapper runs, shown right behind it (deal.II: its C++
+            # scaffold and CMakeLists.txt), is the same contract: a head cut
+            # between the two, or inside the program, hands over half a file
+            cpp = payload.find("```cpp", end)
+            if with_program and 0 <= cpp <= end + 1500 and "THE PROGRAM THE WRAPPER RUNS" in payload[end:cpp]:
+                for fence in ("```cpp", "```cmake"):
+                    at = payload.find(fence, end)
+                    close = payload.find("```", at + len(fence)) if 0 <= at <= end + 1500 else -1
+                    if close > 0:
+                        end = close + 3
             return max(floor, min(end + 200, len(payload)))
         pos = j + 3
 
@@ -9815,7 +12809,9 @@ def _front_load_coupling(payload: str, solver: str = "",
         # the head must hold the WHOLE first contract block (4C's lean
         # contract is ~22k, Kratos's ~7k), so its budget is the end of that
         # block plus the section boundary after it, never a fixed number
-        budget = _contract_block_end(payload, _COUPLING_CONTRACT_HEAD)
+        # the orchestrator writes no participant: its first reply keeps the
+        # wrapper contract and leaves the program behind it to the worker's call
+        budget = _contract_block_end(payload, _COUPLING_CONTRACT_HEAD, with_program=False)
         if len(payload) <= budget:
             return _append_deck_grammar(_lead + payload + "\n" + _tail, solver)
         # THE PARENT'S FIRST REPLY MUST KEEP PART B WHOLE. Measured 2026-09-11 on the 4C
@@ -9883,11 +12879,8 @@ def _front_load_coupling(payload: str, solver: str = "",
             f"diverging iteration, a sign convention, a flux that will not "
             f"balance, a participant that will not start.\n"
             f"WHY IT IS CUT. Reading all of it costs you the actions you need "
-            f"to solve the problem. Measured over many coupled runs: those "
-            f"that read the full coupling corpus got a median 39 tool calls "
-            f"and wrote no output file 60% of the time; runs with no coupling "
-            f"text at all got 95 calls and a median 10 output files. The text "
-            f"was not the binding constraint -- your budget was.\n"
+            f"to solve the problem: the text is not the binding constraint, "
+            f"your budget is.\n"
             f"WHAT TO DO NEXT, in order: get ONE participant running "
             f"standalone until it writes exports.json; get the SECOND one "
             f"running; then call couple(); then write the deliverables. Ask "

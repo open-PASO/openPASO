@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for FEBio
 
-17 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+18 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -38,4 +38,5 @@ python check_install.py
 | `plasticity` | Rate-independent plasticity (J2 / Hill / user-curve hardening) — cortical bone, metal implants, surgical tools | 3-D | `3d_uniaxial` |
 | `polar_fluid` | Micropolar (Cosserat) fluid with independent micro-rotation DOFs (blood-rheology, polymer suspensions, near-wall turbulence corrections) | 3-D | `3d_channel` |
 | `rigid_body` | Rigid-body material (impactors, fixtures, articulating joints, contact prescription) | 3-D | `3d_pushdown` |
+| `solute` | Biphasic poroelasticity carrying EXACTLY ONE solute (FEBio module 'solute'); use 'multiphasic' for several solutes or a fixed charge density | 3-D | `3d_diffusion` |
 | `viscoelasticity` | Prony-series viscoelastic stress relaxation / creep response (cartilage, ligament, tendon) | 3-D | `3d_stress_relax` |

@@ -465,6 +465,7 @@ class DuneBackend(SolverBackend):
                 cwd=str(work_dir),
                 env=_dune_subprocess_env(python),
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
             # DUNE JIT compiles on first run — can be slow
 

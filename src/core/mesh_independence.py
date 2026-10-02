@@ -381,7 +381,7 @@ def probe_field(points, values, probe_points) -> list[float]:
 #: not a physical quantity of interest. They change under refinement BY
 #: CONSTRUCTION (ndofs quadruples, resolution doubles, wall time grows), so
 #: monitoring them would flip every study to NOT CONVERGED — the false
-#: negative one development run hit live: its
+#: negative one recorded run hit live: its
 #: summary carried resolution/ndofs and the verdict failed on "QoI 'ndofs'
 #: changed 74.61%" while every physical quantity had settled. Matched
 #: case-insensitively against the LAST dotted key component.

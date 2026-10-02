@@ -73,6 +73,20 @@ def _mcp_config(servers: list[str], workdir: Path | None = None) -> dict:
     return {"mcpServers": out}
 
 
+def _hook_settings(servers: dict) -> dict:
+    """Claude Code settings for one run: the hook that refuses the main conversation's review
+    filing (webui/critic_hook.py), for every openPASO server the run is given."""
+    import shlex
+    import sys
+    hook = str(Path(__file__).resolve().parent / "critic_hook.py")
+    return {"hooks": {"PreToolUse": [
+        {"matcher": f"mcp__{sid}__submit_critic_review",
+         # quoted: a path with a space or a shell character would not start the hook, and a hook
+         # that does not start lets the call through (Copilot on the org PR)
+         "hooks": [{"type": "command", "command": shlex.join([sys.executable, hook])}]}
+        for sid in servers]}}
+
+
 # The work an agent has to do here is write an input deck and run a solver, so
 # it needs the file and shell tools as well as openPASO's own. This list says
 # WHICH KINDS of thing a run may do; it is not a boundary on WHERE. These are
@@ -107,6 +121,8 @@ async def stream_turn(
     tmp = Path(tempfile.mkdtemp(prefix="openpaso-cc-"))
     cfg_path = tmp / "mcp.json"
     cfg_path.write_text(json.dumps(cfg))
+    settings_path = tmp / "settings.json"
+    settings_path.write_text(json.dumps(_hook_settings(cfg["mcpServers"])))
 
     allowed = list(WORK_TOOLS) + [f"mcp__{sid}" for sid in cfg["mcpServers"]]
     cmd = [
@@ -116,6 +132,8 @@ async def stream_turn(
         "--permission-mode", "acceptEdits",
         "--allowedTools", *allowed,
         "--mcp-config", str(cfg_path),
+        # only a sub-agent files a review (the hook refuses the main conversation's filing)
+        "--settings", str(settings_path),
     ]
     if model:
         cmd += ["--model", model]
@@ -215,10 +233,19 @@ async def _consume(proc, emit, state, errors: list[str] | None = None) -> str:
                 if isinstance(body, list):
                     body = " ".join(b.get("text", "") for b in body
                                     if isinstance(b, dict))
-                from .outcome import shorten
-                await _send(emit, {"type": "tool_result", "call_id": cid,
-                                   "tool": calls.get(cid, ""),
-                                   "result": shorten(body)})
+                from .outcome import SOLVER_TOOLS, classify_solver_result, shorten, verdict_reason
+                tool = calls.get(cid, "")
+                event = {"type": "tool_result", "call_id": cid, "tool": tool,
+                         "result": shorten(body)}
+                if tool in SOLVER_TOOLS:
+                    # judged from the WHOLE reply, as the LangGraph path does: the record
+                    # keeps a shortened copy, and a Claude Code run's reply arrives wrapped
+                    # as {"result": "<escaped JSON>"}. Judged from the copy, a run that
+                    # finished was read as one that "computed nothing" (measured
+                    # 2026-09-29: its status was completed_unverified).
+                    event["verdict"] = classify_solver_result(str(body or ""))
+                    event["why"] = verdict_reason(str(body or ""))
+                await _send(emit, event)
         elif kind == "result":
             final = msg.get("result") or final
             # Claude Code can report a failure in this message and still exit

@@ -162,7 +162,23 @@ def _deck_data_refs(deck: str) -> set[str]:
             wanted.add(toks[1])
         elif toks[0] == "react" and len(toks) >= 3:
             wanted.add(toks[2])
+        elif toks[0] == "surf_react" and len(toks) >= 4 and toks[2] in ("prob", "adsorb"):
+            # `surf_react ID prob <file>` / `surf_react ID adsorb ... <file>`: the surface
+            # reaction file. Measured 2026-09-24: a served deck's `surf_react srprob prob air.surf`
+            # aborted with "Cannot open reaction file air.surf" because only species/collide/
+            # read_surf/react references were staged.
+            wanted.update(t for t in toks[3:] if _looks_like_data_file(t))
+        # any other token that carries a SPARTA data-file extension (a user's deck can reference
+        # one from a command not listed above); explicit rules above still win for bare names
+        wanted.update(t for t in toks[1:] if _looks_like_data_file(t))
     return wanted
+
+
+_DATA_FILE_SUFFIXES = (".species", ".vss", ".surf", ".react", ".tce", ".bird", ".qk", ".grid", ".isurf")
+
+
+def _looks_like_data_file(tok: str) -> bool:
+    return tok.lower().endswith(_DATA_FILE_SUFFIXES) and not tok.startswith(("v_", "c_", "f_", "${"))
 
 
 def stage_deck_data_files(deck: str, work_dir: Path,
@@ -330,7 +346,7 @@ scatter, and that scatter does not shrink when you refine the grid — it shrink
 when you average over more samples, or more particles. So a refinement study
 that compares one number per level is comparing mesh error PLUS noise, and if
 the noise is the larger of the two the study answers nothing. Measured across
-the development runs: two runs completed a clean three-level sequence and
+the recorded runs: two runs completed a clean three-level sequence and
 then reported their own result as NOT CONVERGED at 7.4% and 24% level-to-level
 change, while another run of the SAME problem reached 0.2%. That spread is
 sampling, not physics.
@@ -446,7 +462,7 @@ class SpartaBackend(SolverBackend):
         # Measured on the `heat` payload: 1,084 characters in total, with no
         # `fix` and no `run` -- the two commands without which the binary does
         # nothing at all. Same shape of gap as 4C, where it cost three
-        # development runs of one coupled problem their whole attempt, and as
+        # recorded runs of one coupled problem their whole attempt, and as
         # FEBio.
         #
         # It is attached to the unknown-physics reply too: that is exactly when
@@ -652,6 +668,7 @@ class SpartaBackend(SolverBackend):
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir), env=env,
                 start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
             )
 
             # TIMEOUT MUST KILL THE SOLVER, AND THE WHOLE GROUP. Without this, a

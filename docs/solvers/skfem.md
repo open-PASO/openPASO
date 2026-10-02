@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for scikit-fem
 
-22 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+24 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -28,12 +28,14 @@ python check_install.py
 | `convection_diffusion` | Convection-diffusion (SUPG or DG interior penalty) | 2-D | `2d` |
 | `dg_methods` | Discontinuous Galerkin for advection using ElementDG and InteriorFacetBasis | 2-D | `2d` |
 | `eigenvalue` | Eigenvalue problems (Laplace, elasticity) via scipy eigsh | 2-D | `2d` |
+| `element_survey` | Measure the L2 convergence order of every scikit-fem element that can carry Poisson | 1-D, 2-D, 3-D | `poisson` |
 | `heat` | Steady heat conduction | 2-D | `2d`, `2d_steady` |
 | `heat_transient` | Time-dependent heat equation with backward Euler | 2-D | `2d` |
 | `helmholtz` | Helmholtz equation -Δu - k²u = f with complex arithmetic and absorbing BC | 2-D | `2d` |
 | `hydraulic_resistance` | Stokes flow through a 2D rectangular channel; computes resistance R=ΔP/Q against the Poiseuille closed-form 12μL/H³. Matches scikit-fem ex29. | 2-D | `2d` |
 | `hyperelasticity` | Neo-Hookean hyperelasticity with Newton iteration (manual assembly) | 2-D | `2d` |
 | `linear_elasticity` | Linear elasticity (plane strain) | 2-D | `2d` |
+| `mixed_elements` | Survey the H(div), H(curl) and L2/DG element families, each through its own formulation | 1-D, 2-D, 3-D | `survey` |
 | `mixed_poisson` | Mixed Poisson with Raviart-Thomas + DG (flux-conservative) | 2-D | `2d` |
 | `navier_stokes` | Navier-Stokes flow with Newton iteration (Taylor-Hood P2/P1) | 2-D | `2d` |
 | `nonlinear` | Nonlinear PDE with Newton iteration (manual Newton loop) | 2-D | `2d` |

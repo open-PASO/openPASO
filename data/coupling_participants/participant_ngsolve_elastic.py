@@ -38,7 +38,7 @@ import ngsolve                # the MODULE, so ngsolve.ngsglobals.msg_level = 3 
                               # and `from ngsolve import ...` alone leaves `ngsolve` undefined
 import numpy as np
 from netgen.geom2d import SplineGeometry
-from ngsolve import (VERTEX, BilinearForm, CF, GridFunction, InnerProduct,
+from ngsolve import (BND, VERTEX, BilinearForm, CF, GridFunction, InnerProduct,
                      LinearForm, Mesh, NodeId, TaskManager, VectorH1, ds, dx,
                      grad)
 
@@ -55,10 +55,10 @@ IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the lin
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.55          # WHERE that line sits: equal to X0 or X1 for axis "x",
                           # to Y0 or Y1 for axis "y"
-E_MOD     = 1000.0        # Young's modulus
-NU        = 0.3           # Poisson ratio (PLANE STRAIN)
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 UDX = (0.0, 0.0, 0.0, 0.0)
@@ -86,28 +86,89 @@ def B_SRC(x, y):
     a 0-d object array and the source collapses to a constant), and do NOT wrap
     the function -- CoefficientFunction(B_SRC) is a TypeError ("incompatible
     constructor arguments", measured). Sample it at the mesh vertices instead,
-    np.array([v.point for v in mesh.vertices]), into one P1 GridFunction per component on your
-    space (gf.vec.FV().NumPy()[vertex_dofs] = B_SRC(vx, vy)[i]); a GridFunction IS
-    a CoefficientFunction and integrates as gf_x * v[0] * dx + gf_y * v[1] * dx -- the P1 interpolant
-    of the source, quadrature error O(h^2), the order of the discretisation.
+    np.array([vert.point for vert in mesh.vertices]), into one P1 GridFunction per component on
+    your space (gf.vec.FV().NumPy()[vertex_dofs] = B_SRC(vx, vy)[i]); a GridFunction IS
+    a CoefficientFunction and integrates as gf_x * v[0] * dx + gf_y * v[1] * dx, with v the test
+    function -- the P1 interpolant of the source, quadrature error O(h^2), the order of the
+    discretisation. A mesh vertex needs a name of its own: a loop over mesh.vertices that names
+    its variable v leaves v holding the last vertex where the served lines below need the test
+    function.
     """
     return np.zeros_like(x), np.zeros_like(y)
-NX, NY    = 24, 16        # this subdomain's own mesh (netgen maxh derived below)
+NX, NY    = 46, 26        # this subdomain's own mesh (netgen maxh derived below)
 
 # ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
 #    next to this script overrides the mesh knobs and names the level. The dumps
 #    at the foot of this file carry that level in their NAME, so a mesh study
 #    leaves one file per level instead of the fine mesh overwriting the coarse.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
+
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). config.json may carry this
+#    subdomain's box, interface, material, outer displacement and body force AS
+#    THE TASK WRITES THEM -- side, partner; x0, x1, y0, y1; iface ("left"|"right"|"bottom"|"top",
+#    or the coordinate of the interface line) and iface_axis ("x"|"y"); E and nu,
+#    or lam and mu; udx, udy (the four polynomial coefficients of the outer
+#    displacement); source_ux, source_uy as strings in x and y (`^` allowed) --
+#    and when it does they override the constants and the B_SRC body above.
+#    Measured on the thermo-elastic family: the side written as CODE solved a
+#    textbook sine source while its own config.json held the task's polynomials;
+#    a source typed twice is transcribed once wrong. The audit's momentum check
+#    reads the same keys, so a side that states them is the side it can judge.
+def _expr_fn(expr):
+    """A NumPy function of (x, y) from an expression string as a task writes it."""
+    src = str(expr).replace("^", "**")
+    code = compile(src, "<source>", "eval")
+    names = {"pi": np.pi, "sin": np.sin, "cos": np.cos, "exp": np.exp, "sqrt": np.sqrt,
+             "abs": np.abs, "log": np.log, "tanh": np.tanh, "cosh": np.cosh, "sinh": np.sinh}
+    def f(x, y):
+        env = dict(names); env["x"] = x; env["y"] = y
+        return eval(code, {"__builtins__": {}}, env) + 0.0 * x
+    return f
+_cfg_all = _cfg   # config.json and OPENPASO_CONFIG_JSON, read and checked by the level rule above
+if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
+if str(_cfg_all.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
+    IFACE_AXIS = str(_cfg_all["iface_axis"]).strip().lower()[:1]
+_ifc = str(_cfg_all.get("iface", "")).strip().lower()
+if _ifc in ("left", "right", "bottom", "top"):
+    IFACE_AXIS = ("x" if _ifc in ("left", "right") else "y")
+    IFACE_X = {"left": X0, "right": X1, "bottom": Y0, "top": Y1}[_ifc]
+elif _ifc:
+    try:
+        IFACE_X = float(_ifc)
+    except ValueError:
         pass
+if str(_cfg_all.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
+    SIDE = str(_cfg_all["side"]).strip().lower()
+if str(_cfg_all.get("partner", "")).strip():
+    PARTNER = str(_cfg_all["partner"]).strip()
+if "E" in _cfg_all and "nu" in _cfg_all:
+    E_MOD, NU = float(_cfg_all["E"]), float(_cfg_all["nu"])
+elif ("lam" in _cfg_all or "lambda" in _cfg_all) and "mu" in _cfg_all:
+    _lam, _mu = float(_cfg_all.get("lam", _cfg_all.get("lambda"))), float(_cfg_all["mu"])
+    E_MOD, NU = _mu * (3.0 * _lam + 2.0 * _mu) / (_lam + _mu), _lam / (2.0 * (_lam + _mu))
+for _nm, _key in (("UDX", "udx"), ("UDY", "udy")):
+    if isinstance(_cfg_all.get(_key), (list, tuple)) and len(_cfg_all[_key]) == 4:
+        globals()[_nm] = tuple(float(_c) for _c in _cfg_all[_key])
+_SOURCES_FROM = "code (the B_SRC body above)"
+if _cfg_all.get("source_ux") is not None and _cfg_all.get("source_uy") is not None:
+    _bx_cfg, _by_cfg = _expr_fn(_cfg_all["source_ux"]), _expr_fn(_cfg_all["source_uy"])
+    def B_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
+        return _bx_cfg(x, y), _by_cfg(x, y)
+    _SOURCES_FROM = "config.json"
+print(f"SOURCES IN USE: from {_SOURCES_FROM}"
+      + (f"; b_x = {str(_cfg_all.get('source_ux'))[:60]}; b_y = {str(_cfg_all.get('source_uy'))[:60]}"
+         if _cfg_all.get("source_ux") is not None else "; b = the B_SRC body above (config carries no source_ux/source_uy)"))
 
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction export
@@ -197,9 +258,9 @@ ngsolve.ngsglobals.msg_level = 3
 # Everything that is not the interface carries the prescribed displacement, so
 # it all gets the same boundary name.
 geo = SplineGeometry()
-geo.AddRectangle((X0, Y0), (X1, Y1),
-                 bcs=(("outer", "interface", "outer", "outer") if ON_RIGHT else
-                      ("outer", "outer", "outer", "interface")))
+_names = ["outer"] * 4                     # the edges in AddRectangle's order
+_names[(1 if ON_RIGHT else 3) if AX == 0 else (2 if ON_RIGHT else 0)] = "interface"
+geo.AddRectangle((X0, Y0), (X1, Y1), bcs=tuple(_names))
 mesh = Mesh(geo.GenerateMesh(maxh=MAXH))
 
 fes = VectorH1(mesh, order=ORDER,
@@ -210,18 +271,19 @@ u, v = fes.TnT()
 vdof = np.array([fes.GetDofNrs(NodeId(VERTEX, i))[:2] for i in range(mesh.nv)], int)
 vxy = np.array([mesh.vertices[i].point for i in range(mesh.nv)], float)
 
-iface_v = np.where(np.abs(vxy[:, 0] - IFACE_X) < TOL)[0]
-iface_v = iface_v[np.argsort(vxy[iface_v, 1])]           # sorted by y
-y_if = vxy[iface_v, 1]
-outer_v = np.where((np.abs(vxy[:, 0] - OUTER_X) < TOL) |
-                   (np.abs(vxy[:, 1] - Y0) < TOL) |
-                   (np.abs(vxy[:, 1] - Y1) < TOL))[0]
+iface_v = np.where(np.abs(vxy[:, AX] - IFACE_X) < TOL)[0]
+iface_v = iface_v[np.argsort(vxy[iface_v, AL])]          # sorted along the interface
+y_if = vxy[iface_v, AL]
+outer_v = np.where((np.abs(vxy[:, AX] - OUTER_X) < TOL) |
+                   (np.abs(vxy[:, AL] - ALO) < TOL) |
+                   (np.abs(vxy[:, AL] - AHI) < TOL))[0]
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES: they
-# sit on a y-face, which carries a prescribed displacement in the un-split
-# problem. Leaving them to the interface leaves them unconstrained on the
-# Neumann side — the subproblem is still well posed, still converges, and lands
-# a few percent off. They are still EXPORTED, just not interface-imposed.
-corner = (np.abs(y_if - Y0) < TOL) | (np.abs(y_if - Y1) < TOL)
+# sit on the faces the interface ends on, which carry a prescribed displacement
+# in the un-split problem. Leaving them to the interface leaves them
+# unconstrained on the Neumann side — the subproblem is still well posed, still
+# converges, and lands a few percent off. They are still EXPORTED, just not
+# interface-imposed.
+corner = (np.abs(y_if - ALO) < TOL) | (np.abs(y_if - AHI) < TOL)
 
 
 def eps_of(g):
@@ -263,10 +325,70 @@ gfu = GridFunction(fes)                    # also carries the Dirichlet data
 gfu.vec[:] = 0.0
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
+# ── WHAT THE SERVED LINES BELOW RELY ON, CHECKED (served) ─ keep this block.
+#    y_if is the coordinate ALONG the interface: x on a horizontal one (the
+#    name is the vertical case's). And the two served lines that integrate over
+#    ds("interface") need a boundary of exactly that name on the interface line:
+#    NGSolve integrates a ds() over a name the mesh does not carry over NOTHING,
+#    with no error, so the Neumann load and the traction weights come out zero.
+y_if = np.asarray(y_if, float)
+if (y_if.size != len(iface_v) or y_if.size < 2 or np.any(np.diff(y_if) <= 0)
+        or abs(y_if[0] - ALO) > TOL or abs(y_if[-1] - AHI) > TOL):
+    raise SystemExit(f"INTERFACE NODES: y_if must hold the coordinate ALONG the interface ({'xy'[AL]}), "
+                     f"one per node of iface_v in the same order, strictly increasing from {ALO:g} to "
+                     f"{AHI:g}; it holds {y_if.size} value(s) for {len(iface_v)} node(s)"
+                     + (f", from {y_if.min():g} to {y_if.max():g}" if y_if.size else "")
+                     + (f"; only {np.unique(np.round(y_if, 12)).size} of them distinct -- a node "
+                        f"listed once per edge it touches is listed twice"
+                        if 0 < np.unique(np.round(y_if, 12)).size < y_if.size else ""))
+_ends = (np.abs(y_if - ALO) <= TOL) | (np.abs(y_if - AHI) <= TOL)   # the interface's two ends
+_if_pts = np.array([mesh[_n].point for _el in mesh.Elements(BND) if _el.mat == "interface"
+                    for _n in _el.vertices], float).reshape(-1, 2)
+if (not len(_if_pts) or np.abs(_if_pts[:, AX] - IFACE_X).max() > TOL
+        or _if_pts[:, AL].min() > ALO + TOL or _if_pts[:, AL].max() < AHI - TOL):
+    raise SystemExit("BOUNDARY NAME: two served lines integrate over ds(\"interface\"), and on this mesh "
+                     + ("no boundary carries that name" if not len(_if_pts) else
+                        "that name is not exactly the whole interface line")
+                     + f" (the mesh's boundary names: {sorted(set(mesh.GetBoundaries()))}). Name the edge "
+                     f"on the line {'xy'[AX]} = {IFACE_X:g}, and only that edge, \"interface\": the bcs of "
+                     f"AddRectangle are YOUR names, given in the edge order bottom, right, top, left.")
+# THE INTERFACE NODES ARE THE MESH'S OWN, AND vdof IS THEIR DOF MAP. Every served
+# line below writes the partner's data, reads the traction and exports the values
+# THROUGH iface_v and vdof, so a list naming other vertices, or a map naming other
+# dofs, puts the partner's data on other nodes and exports their values under the
+# interface's coordinates -- and a check reading the same lists agrees with them.
+# Measured on a coupled heat run: the interface dofs were the mesh's first
+# vertices' (its corners and part of an outer edge), the interface kept 0.0 at
+# most of its nodes, and the coupling converged with every exchange check passing.
+_line = {_i for _i in range(mesh.nv) if abs(mesh.vertices[_i].point[AX] - IFACE_X) < TOL}
+_ids = [int(_n) for _n in iface_v]
+_bad = [(_k, _n) for _k, _n in enumerate(_ids)
+        if _k >= y_if.size or _n not in _line
+        or abs(mesh.vertices[_n].point[AL] - float(y_if[_k])) > TOL
+        or [int(_c) for _c in vdof[_n][:2]] != [int(_c) for _c in fes.GetDofNrs(NodeId(VERTEX, _n))[:2]]]
+_missed = len(_line - set(_ids))
+if _bad or _missed or len(_ids) != y_if.size:
+    _k, _n = _bad[0] if _bad else (None, None)
+    raise SystemExit(
+        f"INTERFACE VERTICES: iface_v[k] must be the vertex number of the interface node at y_if[k], "
+        f"one per node, and vdof[i] that vertex's two dofs fes.GetDofNrs(NodeId(VERTEX, i))[:2]; "
+        f"iface_v has {len(_ids)} entries for {y_if.size} nodes"
+        + (f", and {len(_bad)} of them fail (the first: iface_v[{_k}] = {_n}, "
+           + (f"the vertex at ({mesh.vertices[_n].point[0]:g}, {mesh.vertices[_n].point[1]:g}) "
+              f"with vdof {[int(_c) for _c in vdof[_n][:2]]} and dofs "
+              f"{[int(_c) for _c in fes.GetDofNrs(NodeId(VERTEX, _n))[:2]]}"
+              if 0 <= _n < mesh.nv else "no vertex of this mesh")
+           + ")" if _bad else "")
+        + (f"; {_missed} of the {len(_line)} vertices on the interface line have no entry"
+           if _missed else "")
+        + ". The served lines below write the partner's data, read the traction and export the "
+          "values through these two. A vertex's number is its own (vert.nr for a mesh vertex vert), "
+          "not its place in a list.")
+
 if SIDE == "dirichlet":
     u_if = sample(imp, "values", (UI_X, UI_Y), y_if)
     for k, vtx in enumerate(iface_v):
-        if corner[k]:
+        if _ends[k]:
             continue
         gfu.vec[int(vdof[vtx, 0])] = float(u_if[k, 0])
         gfu.vec[int(vdof[vtx, 1])] = float(u_if[k, 1])
@@ -300,6 +422,23 @@ with TaskManager():
     gfu.vec.data += a.mat.Inverse(fes.FreeDofs(),
                                   inverse="sparsecholesky") * res
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+    # ── DID THE PARTNER'S DISPLACEMENT ENTER THE SOLVE? (served) ─ keep this block.
+    #    A Dirichlet side whose solve freed the interface dofs returns its own
+    #    answer and the coupling "converges" to two fields that disagree there.
+    #    The nodes are the mesh's own on the interface line, never the lists the
+    #    data were written through: a list naming the wrong nodes agrees with itself.
+    _tv = sorted((float(mesh.vertices[_i].point[AL]), _i) for _i in _line)
+    _tv = [(_a, _i) for _a, _i in _tv if ALO + TOL < _a < AHI - TOL]
+    if SIDE == "dirichlet" and _tv:
+        _ut = sample(imp, "values", (UI_X, UI_Y), np.array([_a for _a, _ in _tv], float))
+        _gap = max(abs(float(gfu.vec[int(fes.GetDofNrs(NodeId(VERTEX, _i))[_c])]) - float(_ut[_k, _c]))
+                   for _k, (_a, _i) in enumerate(_tv) for _c in (0, 1))
+        if _gap > 1e-9 * max(1.0, float(np.abs(u_if).max())):
+            raise SystemExit("EXPORT SELF-CHECK: the partner's displacement is not in the solution at the "
+                             "interface nodes: the interface must be a Dirichlet boundary of the space "
+                             "(dirichlet='outer|interface') and the solve must use fes.FreeDofs(); a solve "
+                             "that frees them returns this side's own answer and couples to nothing")
 
     # Interface traction export q_out = -(sigma . n_own).
     #
@@ -381,24 +520,26 @@ with TaskManager():
             else:
                 ok[k, c] = False
 
-    # THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY (a y-face),
-    # so their rows carry the OUTER reaction too and their residual is not this
-    # interface's traction. Take the nearest interior interface node rather
-    # than exporting a corner value that is physically a different quantity.
-    # This holds on BOTH sides: the corners are outer-Dirichlet either way.
-    suspect = np.isin(iface_v, outer_v) | ~ok.all(axis=1)
+    # THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY (the faces
+    # the interface ends on), so their rows carry the OUTER reaction too and
+    # their residual is not this interface's traction. Take the nearest interior
+    # interface node rather than exporting a corner value that is physically a
+    # different quantity. This holds on BOTH sides: the corners are
+    # outer-Dirichlet either way. They are found by position (_ends), so an
+    # outer_v that leaves them out does not let them through.
+    suspect = _ends | np.isin(iface_v, outer_v) | ~ok.all(axis=1)
     good = np.where(~suspect)[0]
     if len(good):
         for i in np.where(suspect)[0]:
             Q[i] = Q[good[np.argmin(np.abs(good - i))]]
 
 # THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its OWN.
-# The audit and the hand-in read that exact shape, and they read it PER
-# LEVEL: it is how a grader tells a refined mesh from the same mesh run
+# The audit reads that exact shape, and they read it PER
+# LEVEL: it is how anyone checking the result tells a refined mesh from the same mesh run
 # three times. The LEADING NEWLINE is deliberate -- a program that writes
 # without a trailing newline glues its text onto the front of the next
 # line, and an X11 warning has done exactly that here, turning a correct
-# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 54'.
+# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 113'.
 # A number inside a prose sentence does not count either, and a
 # wrong number is worse than none -- one coupled run that was right in
 # every other respect reported NDOF = 1 at all three levels, and its
@@ -412,8 +553,12 @@ except Exception as _ndof_exc:
 
 # PER-LEVEL PERSISTENCE: this level's whole field, and its interface trace and
 # traction, named by LEVEL. exports.json is overwritten by the next level;
-# these files are not.
-# the probe points your task names -- never a file the next level overwrites.
+# these files are not: interpolate THESE onto the probe points your task names.
+# THE qx, qy COLUMNS ARE THIS SIDE'S EXPORT, q_out = -(sigma . n_own) (the sign
+# convention at the top of this file). A task that asks for the traction
+# sigma . n wants their negative, and one that fixes a single normal for both
+# sides flips the side whose own normal points the other way: map the columns
+# to your task's definition when you write its files.
 # A DUMP DEFECT MUST NOT COST YOU THE SOLVE. exports.json is the driver's
 # proof that this participant succeeded, and it is written after these files,
 # so an exception here would throw away a coupling iteration that worked.
@@ -433,14 +578,13 @@ try:
             _f.write(f"{_px:.11e},{_py:.11e},{float(_ux):.11e},"
                      f"{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
 except Exception as _dump_exc:
-    # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-    # before it fails, so a dump that died mid-way leaves a header-only
-    # CSV -- a file that looks like a submission and carries no rows.
+    # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+    # truncated file, a whole field file with no interface file, or a file an
+    # earlier run wrote, and any of them could be read as this level's result.
+    # So both of this level's files go, whatever they hold.
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
     print(f"[ngsolve_elastic per-level dump] level {LEVEL} dump failed: "
@@ -481,6 +625,43 @@ if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size 
     raise SystemExit("EXPORT SELF-CHECK: the exported traction is the partner's "
                      "array negated, bit for bit: a copy, not a recovery from "
                      "this side's own assembled system")
+# THE SOLVE ANSWERS FOR ITS OWN SYSTEM. On every dof that fes.FreeDofs() leaves
+# free and that is off the interface, a solved system leaves r = A u - f at
+# round-off. Measured on a coupled run: a Dirichlet side built its solve mask by
+# looping over a BitArray, which yields True/False rather than dof numbers; the
+# mask held one bit, its solve moved nothing, it exported the imported trace over
+# a zero interior, and
+# its coupling converged in ten iterations with every exchange check passing. A
+# correction applied to the load alone, instead of to the residual of the values
+# already in gfu, fails here the same way.
+_chk_fd = fes.FreeDofs()
+_chk_on = fes.GetDofs(mesh.Boundaries("interface"))
+_chk_in = np.array([d for d in range(fes.ndof) if _chk_fd[d] and not _chk_on[d]], int)
+try:                                   # the scale is |A| |u|, not |A u|: a constant
+    _chk_i, _chk_j, _chk_v = a.mat.COO()     # field has A u ~ 1e-13 and is solved all the same
+    _chk_rows = np.bincount(np.asarray(_chk_i, int), weights=np.abs(np.asarray(_chk_v, float)),
+                            minlength=fes.ndof)
+except Exception:                      # noqa: BLE001 -- no entries to read: no check
+    _chk_rows = None
+if _chk_in.size and _chk_rows is not None and not getattr(a, "condense", False):
+    _chk_Au = f.vec.CreateVector()
+    _chk_Au.data = a.mat * gfu.vec
+    _chk_A = np.asarray(_chk_Au.FV().NumPy(), float)
+    _chk_F = np.asarray(f.vec.FV().NumPy(), float)
+    _chk_U = np.abs(np.asarray(gfu.vec.FV().NumPy(), float)).max()
+    _chk_r = np.abs(_chk_A - _chk_F)[_chk_in]
+    _chk_sc = max(float(np.abs(_chk_F).max()), float(_chk_rows.max()) * float(_chk_U))
+    if _chk_sc > 0 and _chk_r.max() > 1e-6 * _chk_sc:
+        raise SystemExit(
+            f"SOLVE SELF-CHECK: off the interface, on the dofs fes.FreeDofs() leaves free, "
+            f"r = A u - f reaches {_chk_r.max():.2e} against a system scale of {_chk_sc:.2e} "
+            f"({int((_chk_r > 1e-6 * _chk_sc).sum())} of {_chk_in.size} dofs); a solved "
+            f"system leaves round-off there. The field was not solved for those dofs from "
+            f"this a and f. Two ways measured to get here: a mask whose bits are not the "
+            f"free dofs (a loop over a BitArray yields True/False, not dof numbers), or a "
+            f"correction applied to the load alone instead of to the residual that the "
+            f"values already in gfu leave. The flux recovery above reads the same a.mat, "
+            f"so nothing was exported.")
 
 Path("exports.json").write_text(json.dumps({
     "field_name": "displacement",

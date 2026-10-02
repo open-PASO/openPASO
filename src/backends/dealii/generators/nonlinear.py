@@ -95,8 +95,9 @@ int main() {{
     system_matrix = 0;
     system_rhs = 0;
 
+    // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
     FEValues<dim> fe_values(fe, quadrature,
-      update_values | update_gradients | update_JxW_values);
+      update_values | update_gradients | update_JxW_values | update_quadrature_points);
     FullMatrix<double> cell_matrix(dpc, dpc);
     Vector<double> cell_rhs(dpc);
     std::vector<types::global_dof_index> local_dof_indices(dpc);

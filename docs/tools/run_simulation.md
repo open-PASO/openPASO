@@ -9,7 +9,8 @@ Group: Run.
 | Parameter | Type | Required | Default |
 |---|---|---|---|
 | `solver` | string | yes |  |
-| `input_content` | string | yes |  |
+| `input_content` | string | no | `''` |
+| `input_path` | string | no | `''` |
 | `job_name` | string | no | `''` |
 | `np` | integer | no | `1` |
 | `critic_approved` | boolean | no | `False` |
@@ -35,6 +36,9 @@ The text below is the tool's own description, exactly as the AI model receives i
     Args:
         solver: Backend name (best for: fenics, ngsolve, skfem, dune)
         input_content: The input content (Python script / YAML / C++ / XML)
+        input_path: instead of input_content, the name of a file in the run
+            folder whose text is the input. Use it to run a file the critic
+            reviewed: what runs is then exactly the reviewed text.
         job_name: Optional job name
         np: MPI processes
         critic_approved: recorded, not trusted. The result is verified only

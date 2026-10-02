@@ -51,6 +51,13 @@ class CriticGateError(Exception):
     """Raised when a run is attempted without a valid, matching review."""
 
 
+def _over_rejection(turned: "ReviewRecord") -> str:
+    first = (turned.findings.strip().splitlines() or [""])[0][:200]
+    return (f"a critic REJECTED this exact setup ({first}); an approval of the same text does not "
+            f"lift it. It stays NOT VERIFIED until the text changes and a critic approves the "
+            f"changed text.")
+
+
 def setup_digest(*parts: str) -> str:
     """Stable digest of everything that defines the run being reviewed."""
     h = hashlib.sha256()
@@ -68,11 +75,33 @@ class ReviewRecord:
     findings: str
     created: float
     ttl_s: float = DEFAULT_TTL_S
+    # THE TEXT THE DIGEST WAS TAKEN OF, so a run whose digest does not match
+    # can say WHICH PART of the setup changed instead of only that something
+    # did. Measured 2026-09-19: ten of ten coupled runs were told "a critic
+    # review exists for this solver but NOT for this setup" with no way for
+    # the caller -- or for us reading the record afterwards -- to see what
+    # differed. What a mismatch reply shows of it: for a coupling setup, the
+    # changed argument's name and its short reviewed and current values (scalars
+    # such as tol or max_iter; a long value is only named); for a script or deck,
+    # the NUMBER of the first differing line and the caller's current line, never
+    # a stored line, which may hold private literals. The audit log keeps its
+    # length, not its text.
+    setup_text: str = ""
     consumed_by: str | None = None
     consumed_at: float | None = None
+    # A REJECTION IS KEPT, NOT DROPPED. Refusing a rejected review left no trace of it, so a
+    # working agent could ask one critic after another until one approved the same text, and
+    # the record showed only the approval (both peer sessions named this, 2026-10-01). A
+    # rejection issues no token; it blocks that exact text until the text changes.
+    rejected: bool = False
+    # the file the review named, when it named one: rejections of earlier versions of the
+    # same file are counted beside a later approval
+    source_name: str = ""
 
     def expired(self, now: float | None = None) -> bool:
-        return (now or time.time()) > self.created + self.ttl_s
+        # a rejection does not time out: it never lets anything pass, and it holds until the text
+        # changes (it expired with the approvals' hour, and the same text could then be approved)
+        return not self.rejected and (now or time.time()) > self.created + self.ttl_s
 
 
 class CriticRegistry:
@@ -85,7 +114,9 @@ class CriticRegistry:
 
     # ── issuing ──────────────────────────────────────────────────────────
     def submit_review(self, *, solver: str, findings: str,
-                      digest: str, ttl_s: float = DEFAULT_TTL_S) -> ReviewRecord:
+                      digest: str, ttl_s: float = DEFAULT_TTL_S,
+                      setup_text: str = "", rejected: bool = False,
+                      source_name: str = "") -> ReviewRecord:
         text = (findings or "").strip()
         if len(text) < MIN_FINDINGS_CHARS:
             raise CriticGateError(
@@ -94,10 +125,24 @@ class CriticRegistry:
                 f"An empty approval is indistinguishable from no review.")
         rec = ReviewRecord(token=secrets.token_urlsafe(24), digest=digest,
                            solver=solver, findings=text, created=time.time(),
-                           ttl_s=ttl_s)
+                           ttl_s=ttl_s, setup_text=setup_text or "",
+                           rejected=bool(rejected), source_name=source_name or "")
+        turned = None if rec.rejected else self.rejection_of(solver=solver, digest=digest)
+        if turned is not None:
+            # THE SAME TEXT CANNOT BE BOTH REJECTED AND APPROVED, here as in the verdict: an
+            # approval of text a critic turned down was accepted and handed a token (Copilot on
+            # the org PR), which the run then refused. It is logged and issues nothing.
+            self._append_audit("approval_refused_over_rejection", rec)
+            raise CriticGateError(_over_rejection(turned))
         self._reviews[rec.token] = rec
         self._append_audit("review_submitted", rec)
         return rec
+
+    def rejection_of(self, *, solver: str, digest: str) -> ReviewRecord | None:
+        """The latest rejection on record of exactly this text for this solver, if any."""
+        turned = [r for r in self._reviews.values()
+                  if r.rejected and r.solver == solver and r.digest == digest]
+        return max(turned, key=lambda r: r.created) if turned else None
 
     # ── redeeming ────────────────────────────────────────────────────────
     def consume(self, token: str | None, *, digest: str, solver: str,
@@ -117,6 +162,8 @@ class CriticRegistry:
             raise CriticGateError(
                 "critic review token is not known to this server; it cannot be "
                 "self-issued.")
+        if rec.rejected:
+            raise CriticGateError("that review REJECTED the setup; it issues no approval.")
         if rec.expired():
             raise CriticGateError("critic review has expired; review the setup again.")
         if rec.consumed_by is not None:
@@ -131,6 +178,9 @@ class CriticRegistry:
                 "critic review does not match the setup being run: the input "
                 "changed after it was reviewed. Review the setup you intend to "
                 "run.")
+        turned = self.rejection_of(solver=solver, digest=digest)
+        if turned is not None:                 # an approval filed before a rejection of the same text
+            raise CriticGateError(_over_rejection(turned))
         rec.consumed_by = job_id or "unnamed-job"
         rec.consumed_at = time.time()
         self._append_audit("review_consumed", rec)
@@ -144,6 +194,10 @@ class CriticRegistry:
             self._audit.parent.mkdir(parents=True, exist_ok=True)
             with open(self._audit, "a", encoding="utf-8") as fh:
                 payload = asdict(rec)
+                # the setup's own text stays out of the log (a script, a deck: whatever the
+                # caller ran); its length says enough to tell two reviews apart (Copilot on the
+                # org PR: the field was called server-side only and was written out whole)
+                payload["setup_chars"] = len(payload.pop("setup_text", "") or "")
                 payload["event"] = event
                 payload["at"] = time.time()
                 fh.write(json.dumps(payload, sort_keys=True) + "\n")

@@ -29,9 +29,9 @@ The text below is the tool's own description, exactly as the AI model receives i
     claimed convergence order, which the order check needs):
     
       * NEAR-ZERO FIELD - your finest solution peaks below 1e-8. On a
-        driven problem that almost always means the source/load was never
-        wired in (a defined function no condition references, a load curve
-        never activated), not that the answer is small.
+        driven problem check that the source/load reaches the solve (a
+        defined function no condition references, a load curve never
+        activated, boundary values all zero) before reading it as small.
       * FLOOR - successive refinement levels within 5% of each other:
         whatever limits your number, it is not the mesh. Usual cause is a
         solver tolerance (nonlinear/iterative defaults stop near 1e-6).

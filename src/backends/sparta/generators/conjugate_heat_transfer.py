@@ -76,16 +76,19 @@ KNOWLEDGE = {
                          "f_<avesurf> — writes the wall temperature field",
         },
         "solver": "SPARTA DSMC; run: spa_serial -in <deck>",
-        "coupling_notes": "For a two-code coupling, drive SPARTA from its "
-                          "Python library (build with 'make mode=shlib "
-                          "serial'), which exposes command / extract_global / "
-                          "extract_compute / extract_variable only. There is "
-                          "no per-surface scatter, so exchange a SCALAR (total "
-                          "flux out, uniform wall temperature in) by "
-                          "re-issuing a SPARTA equal-style variable for the "
-                          "wall temperature each coupling window. Explicit "
-                          "serial coupling is stable here because the solid's "
-                          "thermal inertia damps the DSMC fluctuations.",
+        "coupling_notes": "For a two-code coupling, couple() runs the "
+                          "participant knowledge(topic='coupling', "
+                          "solver='sparta') serves: a Python wrapper that "
+                          "writes the deck, runs the binary and exchanges one "
+                          "value per surface element through files -- the "
+                          "partner's wall temperature in through 'custom surf "
+                          "... file' and 'surf_collide ... diffuse s_<name>', "
+                          "the per-element etot tally out through a surf "
+                          "dump. SPARTA's Python library (built with 'make "
+                          "mode=shlib serial') exposes command / "
+                          "extract_global / extract_compute / "
+                          "extract_variable only, with no per-surface "
+                          "scatter.",
         "output_idioms": output_idioms("per-surf tally idiom", "dump format"),
         "pitfalls": [
             "[Setup] The command order is a hard dependency chain: fix "
@@ -145,10 +148,9 @@ KNOWLEDGE = {
             "species, VSS and surface files were staged there first. "
             "Signal: 'ERROR on proc 0: Cannot open species file <name>' from "
             "particle.cpp at setup, before any stats line. The openPASO couple() "
-            "path stages every file referenced by the deck into the "
-            "participant work directory; pass task-specific files through the "
-            "participant's data_files list so they win over the "
-            "identically-named distribution examples.",
+            "copies every file listed in a participant's data_files into its "
+            "work directory before the first iteration; it does not read the "
+            "deck for file names.",
 
             "[Setup] A half-body surface used with a symmetry plane is an OPEN "
             "curve and fails the watertight test. Put the open endpoints "

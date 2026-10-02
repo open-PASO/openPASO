@@ -13,8 +13,8 @@ served nothing. The runs that got it right used VectorTools::point_value, which
 they had to know already.
 
 VERIFIED BY EXECUTION on this install, not quoted from documentation. A known
-function was interpolated onto FE_Q(1) and read back at the 1936 points
-(i+0.5)/44 x (j+0.5)/44 — none of which is a node:
+function was interpolated onto FE_Q(1) and read back at a midpoint probe grid
+(i+0.5)/n x (j+0.5)/n — none of whose points is a node:
 
     N =  8   NDOF =   81   max|probe - exact| = 1.896963e-03
     N = 16   NDOF =  289   max|probe - exact| = 4.810567e-04
@@ -39,7 +39,7 @@ taking the nearest vertex instead caps your reported order at 1.
     const double u_at_p = VectorTools::point_value(dof_handler, solution, p);
 
 Measured on this install by interpolating a known function onto FE_Q(1) and
-reading it back at 1936 non-nodal points:
+reading it back at a grid of non-nodal midpoint probes:
 
     N =  8   NDOF =   81   max|probe - exact| = 1.896963e-03
     N = 16   NDOF =  289   max|probe - exact| = 4.810567e-04

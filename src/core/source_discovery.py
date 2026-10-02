@@ -291,7 +291,7 @@ def _check_binary(spec: BackendSpec) -> tuple[bool, str]:
         for py in pythons:
             try:
                 r = subprocess.run([py, "-c", spec.binary_check],
-                                   capture_output=True, text=True, timeout=15)
+                                   capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
                 if r.returncode == 0:
                     return True, f"{py}: {r.stdout.strip()}"
             except Exception:
@@ -300,7 +300,7 @@ def _check_binary(spec: BackendSpec) -> tuple[bool, str]:
     else:
         try:
             r = subprocess.run(spec.binary_check, shell=True,
-                               capture_output=True, text=True, timeout=15)
+                               capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
             if r.returncode == 0:
                 return True, r.stdout.strip() or "ok"
             return False, r.stderr.strip() or "not on PATH"

@@ -8,7 +8,7 @@ Group: Two solvers on one problem.
 
 | Parameter | Type | Required | Default |
 |---|---|---|---|
-| `participants` | string | yes |  |
+| `participants` | string or array | yes |  |
 | `max_iter` | integer | no | `50` |
 | `tol` | number | no | `1e-06` |
 | `accelerator` | string | no | `'auto'` |
@@ -22,6 +22,7 @@ Group: Two solvers on one problem.
 | `history_path` | string | no | `''` |
 | `iface_level` | integer | no | `0` |
 | `pde_sources` | string | no | `''` |
+| `pde_check` | string | no | `''` |
 
 ## What the model reads
 
@@ -134,6 +135,8 @@ The text below is the tool's own description, exactly as the AI model receives i
                         residual-history file your task names; never retype the returned history.
     
     iface_level: optional level number stamped into the suggested_filename of the interface_csv blocks the reply carries on convergence (each participant's own final interface data, ready to save verbatim).
+    
+    pde_check: THE ONE CHECK THAT SEPARATES A RIGHT ANSWER FROM A CONVERGED WRONG ONE, run for you on every converged level. JSON keyed by participant name: {"A": {"solution_files": "<this side's per-level field files, comma-separated, in level order>", "equation": "<your task's EQUATION line, verbatim>", "source": "<that side's source, as your task wrote it>", "coefficient": "<that side's coefficient>", "domain": "[[x0,x1],[y0,y1]]"}, "B": {...}}. The files must be on the PROBE GRID your task prescribes, not your mesh nodes: the test is a midpoint quadrature and on a scatter it reports nothing rather than a misleading number. You name them; openPASO guesses no filename and opens no task file. Give it once and openPASO puts each side's own field back into that side's own equation at every level from the second on, and reports CONSISTENT or INCONSISTENT in `pde_consistency`. A refinement study cannot do this: a field that converges cleanly to the WRONG function is indistinguishable in one -- measured on three recorded coupled runs whose every self-consistency measure reported a converging run while the answer was wrong. Nothing here is read from any task file; these are YOUR strings, and openPASO neither stores nor supplies them. A side whose operator this check does not model is refused by name and the rest still run.
     
     pde_sources: OPTIONAL, public-only. JSON {"A": {"source": "<the forcing/coefficient you actually implemented>", "task_source": "<the task's stated source, verbatim>"}, "B": {...}}. When supplied, openPASO compares the two PUBLIC strings and flags a mismatch — a silent wrong forcing (right shape, wrong function) converges cleanly to a different answer and no self-consistency check can see it. Never required; openPASO reads no reference solution and never supplies the equation for you.
     

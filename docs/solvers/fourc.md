@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for 4C Multiphysics
 
-49 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+53 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -35,6 +35,7 @@ python check_install.py
 | `electrochemistry` | Electrochemistry (Nernst-Planck) | 2-D, 3-D | `nernst_planck_3d` |
 | `fbi` | Fluid-beam interaction (immersed) | 3-D | `penalty_3d` |
 | `fluid` | Incompressible Navier-Stokes | 2-D, 3-D | `channel_2d`, `cavity_2d` |
+| `fluid_ale` | Fluid on a deforming (ALE) mesh -- the moving-domain setting every FSI and free-surface problem needs | 2-D | `hdg_2d` |
 | `fluid_turbulence` | Fluid turbulence: LES (Smagorinsky, dynamic, WALE) and DNS | 2-D, 3-D | `les_channel_3d` |
 | `fpsi` | Fluid-porous-structure interaction | 3-D | `monolithic_3d` |
 | `fs3i` | FS3I (fluid-structure-scalar-scalar, 5-field) | 3-D | `fs3i_3d` |
@@ -56,6 +57,9 @@ python check_install.py
 | `pasi` | Particle-structure interaction | 3-D | `dem_impact_3d` |
 | `plasticity` | Elasto-plasticity: J2/von Mises, Drucker-Prager, GTN damage, crystal plasticity | 2-D, 3-D | `linear_2d`, `nonlinear_3d` |
 | `poisson` | Poisson / scalar transport | 2-D, 3-D | `poisson_2d`, `heat_2d`, `poisson_3d` |
+| `poroelast_scatra` | Poroelasticity + reacting scalar transport through the pore fluid | 3-D | `homogeneous_3d` |
+| `porofluid_elasticity` | Pressure-based porous-media flow monolithically coupled to an elastic skeleton | 3-D | `monolithic_3d` |
+| `porofluid_elasticity_scatra` | Multiphase porous flow + deformable skeleton + scalar transport, monolithically coupled | 3-D | `monolithic_3d` |
 | `porous_media` | Poroelasticity (Biot/mixture theory, consolidation) | 2-D, 3-D | `single_phase_3d`, `terzaghi_2d`, `consolidation_3d` |
 | `reduced_airways` | Reduced-dimensional airways (lung) | 1-D | `airways_1d` |
 | `reduced_lung` | Reduced lung model: 1D airways + 0D alveoli + optional 3D parenchyma | 1-D, 3-D | `lung_1d` |

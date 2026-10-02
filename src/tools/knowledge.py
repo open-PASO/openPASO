@@ -274,7 +274,7 @@ def _find_reference_test_files(solver: str, physics: str) -> str:
 # This first went into the generic capture recipe, which lives in the full
 # block on the topic="physics" path — and coupled agents call topic="coupling".
 # Measured right after writing it: the physics reply carried it, the coupling
-# reply did not, the exact defect class the development runs keep hitting.
+# reply did not, the exact defect class the recorded runs keep hitting.
 _PER_SIDE_NAMING = """ON A COUPLED TASK THE NAME CARRIES THE SIDE: one run log per participant per
 level, named for its side, each holding THAT participant's own solver output.
 Two codes writing into one file cannot be told apart, and a result set whose
@@ -308,7 +308,7 @@ IF YOU HAVE DELIVERED AND WANT TO KNOW WHETHER IT IS RIGHT
         separated a third of all result sets.
      b. IS YOUR EVALUATOR ITSELF SECOND ORDER? Push a function you KNOW (say
         x(1-x)y(1-y)) through the SAME code that produces your probe values.
-        Measured on a 44x44 grid at N = 8, 16, 32:
+        Measured on a fine midpoint probe grid over three halvings of a coarse mesh:
             nearest-node lookup    5.39e-3 -> 2.66e-3 -> 1.34e-3   order ~1.0
             linear/shape function  1.09e-3 -> 2.73e-4 -> 6.85e-5   order ~2.0
         Your evaluator's own order BOUNDS the order you can report.
@@ -537,7 +537,7 @@ def _physics_tail() -> str:
 # MEASURED, and this is why this constant exists. `_UNIVERSAL` was appended on
 # exactly ONE of the 31 return paths of tools.consolidated.knowledge() — the
 # topic="physics" path. Across 995 measured knowledge calls from 193
-# development runs, topic="pitfalls" was 66.3% and topic="physics" only 11.5%,
+# recorded runs, topic="pitfalls" was 66.3% and topic="physics" only 11.5%,
 # so 75.6% OF THOSE RUNS RECEIVED NONE OF IT. Every universal rule added
 # during development — the deliverable's location, the input-language warning,
 # the do-not-declare-the-solver-broken rule, the refinement ladder — reached at
@@ -565,7 +565,7 @@ TEN RULES THAT APPLY WHATEVER YOU ASKED FOR
    powers are `^` not `**`, constants are the solver's own (lowercase `pi`),
    and a wrong operator is often SILENT: the numeric prefix is taken, the rest
    dropped, and the run succeeds with the wrong load. Rewrite every term of a
-   source you copied out of the task text.
+   source you copied out of your problem statement.
 
 3. DO NOT CONCLUDE A SOLVER IS BROKEN. Nearly every "broken solver" seen in
    development was an unread log: capture BOTH streams (`cmd > out.log 2>&1`),
@@ -573,11 +573,10 @@ TEN RULES THAT APPLY WHATEVER YOU ASKED FOR
    still exit 0), re-run with the backend's verbose flag, and ask
    knowledge(topic='pitfalls', solver=...) before reporting a failure.
 
-4. THE MOST COMMON FAILURE IS NEVER PRODUCING THE NUMBERS: 36% of 464 measured
-   runs wrote no probe output, and the largest slice of those SOLVED and never
-   read the field back at the required points. Do ONE coarse level end to end
-   -- solve, extract at the prescribed points, write the file -- before
-   refining anything.
+4. PRODUCE THE NUMBERS EARLY. A field that was solved and never read back at
+   the required points is no result. Do ONE coarse level end to end -- solve,
+   extract at the prescribed points, write the file -- before refining
+   anything.
 
 5. MEASURE, DO NOT GUESS. Whether your field satisfies the equation you were
    given is falsifiable with no reference answer:
@@ -651,7 +650,7 @@ SEVEN RULES THAT APPLY WHATEVER YOU ASKED FOR
    powers are `^` and not `**` (`-1*X^2`, never `-1*X**2`), and `pi`, `sin`
    and `exp` may not exist. A wrong operator is often SILENT: the numeric
    prefix is taken and the rest discarded, so the run succeeds with the wrong
-   load. Rewrite every term of a source you copied out of the task text.
+   load. Rewrite every term of a source you copied out of your problem statement.
 
 3. DO NOT CONCLUDE A SOLVER IS BROKEN. Almost every "broken solver" seen in
    development was a missing capture or an unread log. Redirect BOTH streams
@@ -735,9 +734,9 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
    each measured:
      * NGSolve: after `from ngsolve import *`, ANY loop that assigns `x` or
        `y` rebinds the symbolic coordinates to floats, so your source becomes
-       a CONSTANT. Verified: `type(f)` is CoefficientFunction before a
-       44x44 probe-point loop and `float` after, value 0.02514662, with x and
-       y both left at 0.9886363636. `CoefficientFunction((float, float))` is
+       a CONSTANT. Verified: `type(f)` is CoefficientFunction before the
+       probe-point loop and `float` after, with x and y both left at the
+       last probe the loop visited. `CoefficientFunction((float, float))` is
        accepted silently. A constant body force on a fully-Dirichlet
        incompressible domain gives u identically 0 -- measured 7.16e-17,
        3.60e-17, 1.30e-17 at the three levels, order 0.0000 -- against
@@ -760,8 +759,8 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
        max|T| = 0.000000000e+00 with exit 0; the PLAIN sections work and match
        an independent assembly to 1.08e-15.
      * Kratos: FACE_HEAT_FLUX set on interface nodes with no ThermalFace2D2N
-       condition to integrate it is discarded. Measured 2.307291e-03 ignored
-       against 3.605675e-03 applied, bit-identical to a zero-flux run. Create
+       condition to integrate it is discarded: measured, the field is
+       bit-identical to a zero-flux run's. Create
        it BY NAME -- `mp.CreateNewCondition("ThermalFace2D2N", cid, [n1, n2],
        prop)`. Registered components are not Python attributes, so
        `SomeApplication.ThermalFace2D2N(...)` raises `has no attribute` for
@@ -785,20 +784,18 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
     with the value at the closest node is O(h) accurate, so it caps your
     reported order at 1 no matter how good the solve was.
 
-    PROVEN against an independent reference, one solve exported two ways and
-    nothing else changed:
-        interpolated       verified correct   order 1.9796
-        nearest node       confidently wrong  order 0.9815
-    A second problem gave +1.9516 interpolated against +1.0179 nearest-node,
-    and +1.0179 is exactly what that result set reported.
+    MEASURED on one solve exported two ways, nothing else changed: read by
+    interpolation its error fell at second order, read at the nearest node at
+    first order.
 
     CHECK IT FOR FREE, no reference needed: count the DISTINCT values you
     wrote. Nearest-node sampling on a mesh of N cells per side can only ever
-    return (N-1)^2 + 1 distinct interior values, so 1936 probe points collapse
-    to 50, 226 and 962 at N = 8, 16, 32. Measured on real result sets: four
-    reported exactly 50/1936, 226/1936, 962/1936; a correct one reported
-    1908/1928/1936. If distinct is far below the probe count, you sampled
-    nodes.
+    return (N-1)^2 + 1 distinct interior values, so a probe grid of a few
+    thousand points collapses to a few dozen, a few hundred and under a
+    thousand distinct values over three halvings -- exactly (N-1)^2 + 1 each
+    time. Measured on real result sets: four reported exactly that count at
+    every level; a correct one reported close to one distinct value per
+    probe. If distinct is far below the probe count, you sampled nodes.
 
     THE FIX IS POST-PROCESSING -- you do not re-run the solver, you re-read
     it. Every backend already has the call:
@@ -1117,7 +1114,7 @@ the ingredient.
 #
 # WHAT IS CUT IS ONLY ELABORATION. The core carries ALL TEN numbered rules and
 # ALL SIXTEEN of the decisive measurements and API calls -- 0.000000000e+00,
-# 1.08e-15, 2.307291e-03 vs 3.605675e-03, 8.875850e-02, 0.02514662,
+# 1.08e-15, a Kratos field bit-identical to a zero-flux run's, 8.875850e-02, a float source,
 # 1.2229e-02, 1.115344e+00, 2.36e-16, 1.9796 vs 0.9815, (N-1)^2+1,
 # 50/226/962, basis.interpolator, bb_tree, find_containing_cell -- none of
 # which appears only in the tail. The tail's own numbered list is a
@@ -1144,7 +1141,7 @@ the ingredient.
 # test_what_we_write_is_what_agents_see (1, covering four rules x nine
 # backends), test_served_text_is_not_self_referential (4).
 #
-# The cost was paid. One development run spent its budget on a 4C abort whose
+# The cost was paid. One recorded run spent its budget on a 4C abort whose
 # whole record is an empty stdout plus MPI boilerplate, concluded "the 4C
 # binary requires specific MPI environment configuration", and delivered
 # nothing; the two sections that speak to precisely that were not in the reply

@@ -206,6 +206,17 @@ class ReducedAirwaysGenerator(BaseGenerator):
             },
             "pitfalls": [
                 (
+                    "[Output] ReducedDimensionalAirWays writes only 4C-native output "
+                    "(<prefix>.control, .result.*), and post_processor aborts on this 1-D "
+                    "result type with both --filter=vtu and --filter=ensight, so no field "
+                    "file that openPASO's result gate can read exists for it. Signal: the "
+                    "run ends with 'processor 0 finished normally', no *.vtu or *.pvd "
+                    "appears, and post_processor.log in the run directory ends in an MPI "
+                    "abort. The per-step |Pressure|_max and |Q|_max lines in the log are "
+                    "the readable record of the solve. (Measured 2026-09-24 by running the "
+                    "served template.)"
+                ),
+                (
                     "[Input] 4C does NOT validate reduced-airway tree topology. "
                     "A loop, or a branch ending on a node with no boundary "
                     "condition, is accepted and solved. Signal: none - there is "

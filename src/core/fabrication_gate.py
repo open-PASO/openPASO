@@ -328,3 +328,133 @@ def degenerate_cell_fraction(points, cells, *, dim: int) -> float | None:
     if scale <= 0:
         return 1.0
     return float((meas <= 1e-12 * scale).mean())
+
+
+# ── what the result holds: zero fields, a field that never moved, the mesh it lives on ──
+# Measured 2026-09-29 in the web interface, three FEniCSx runs of one flow problem that
+# the gate reported as "the automated checks passed":
+#   * one wrote velocity and pressure that are EXACTLY 0 at every node, on a mesh of 95
+#     cells covering [0.15, 0.25] x [0.15, 0.25] -- the obstacle's disc, not the fluid;
+#   * one wrote a velocity identical, to 1e-15 of its size, at all 80 saved times of an
+#     "unsteady" run (its time term had been replaced by a second viscous term);
+#   * one was a real, changing flow.
+# Finite and non-degenerate, all three: the scans above had nothing to say. What was
+# missing is a look at the numbers themselves, from the run's own files.
+_SOLUTION_SUFFIXES = (".vtu", ".vtk", ".vtp", ".xdmf", ".xmf")
+
+
+def _solution_fields(fields: dict) -> dict:
+    from .attestation import is_solution_field
+    return {k: np.asarray(v, float) for k, v in (fields or {}).items() if is_solution_field(k)}
+
+
+def _measure(points, cells) -> float | None:
+    """Area (2-D) or volume (3-D) of the triangles/quads or tetrahedra a result lives on."""
+    p = np.asarray(points, float)
+    total, seen = 0.0, False
+    for name, conn in _cell_arrays(cells):
+        conn = np.asarray(conn)
+        if conn.size == 0 or conn.max() >= p.shape[0]:
+            continue
+        if name.startswith("triangle"):
+            a, b, c = p[conn[:, 0], :2], p[conn[:, 1], :2], p[conn[:, 2], :2]
+            total += float(np.sum(0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
+                                               - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))))
+            seen = True
+        elif name.startswith("quad"):
+            a, b, c, d = (p[conn[:, i], :2] for i in range(4))
+            total += float(np.sum(0.5 * np.abs((a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1])
+                                               + (b[:, 0] * c[:, 1] - c[:, 0] * b[:, 1])
+                                               + (c[:, 0] * d[:, 1] - d[:, 0] * c[:, 1])
+                                               + (d[:, 0] * a[:, 1] - a[:, 0] * d[:, 1]))))
+            seen = True
+        elif name.startswith("tetra"):
+            a, b, c, d = (p[conn[:, i], :3] for i in range(4))
+            total += float(np.sum(np.abs(np.einsum("ij,ij->i", np.cross(b - a, c - a), d - a)) / 6.0))
+            seen = True
+    return total if seen else None
+
+
+def _saved_times(path: Path, max_reads: int = 3):
+    """(times, [(time, {field: array})]) of an XDMF time series: its first and last two saves."""
+    import meshio
+    with meshio.xdmf.TimeSeriesReader(str(path)) as reader:
+        reader.read_points_cells()
+        n = reader.num_steps
+        picks = sorted({0, max(0, n - 2), n - 1})[:max_reads]
+        frames = []
+        for k in picks:
+            t, point_data, _cell_data = reader.read_data(k)
+            frames.append((float(t), _solution_fields(point_data)))
+    return n, frames
+
+
+def result_content_findings(result_files, max_files: int = 12):
+    """(hard, notes, mesh) about what a run's output files hold.
+
+    hard  -- the result is not a result: every solution field in every file is exactly 0.
+    notes -- measured facts a reader needs, with no verdict: a field identical at the first and
+             the last saved time of a time series.
+    mesh  -- the mesh the result lives on: cells, points, bounding box, area or volume.
+    Never raises.
+    """
+    hard, notes, mesh = [], [], None
+    try:
+        from .mesh_independence import read_nodal_mesh
+    except Exception:
+        return hard, notes, mesh
+    zero, nonzero = [], []
+    for path in list(result_files)[:max_files]:
+        p = Path(path)
+        suffix = p.suffix.lower()
+        if suffix not in _SOLUTION_SUFFIXES:
+            continue
+        if suffix in (".xdmf", ".xmf"):
+            try:
+                n, frames = _saved_times(p)
+            except BaseException:
+                continue
+            # A TIME SERIES COUNTS TOO, as zero or as live, from its last save. It was left out of
+            # both tallies (Copilot, 2026-10-01): a run whose only output was an all-zero XDMF
+            # series passed, and a zero .vtu beside a live series read as "every field is 0".
+            if frames:
+                for name, arr in frames[-1][1].items():
+                    (zero if arr.size and not np.any(arr) else nonzero).append(f"{p.name}:{name}")
+            if n >= 3 and len(frames) >= 2:
+                (t0, first), (t1, last) = frames[0], frames[-1]
+                for name, arr in last.items():
+                    if name not in first or first[name].shape != arr.shape:
+                        continue
+                    size = float(np.max(np.abs(arr))) if arr.size else 0.0
+                    if size == 0.0:
+                        continue          # counted as zero above
+                    change = float(np.max(np.abs(arr - first[name]))) / size
+                    if change <= 1e-12:
+                        notes.append(
+                            f"{p.name}: {n} saved times from t = {t0:.6g} to t = {t1:.6g}, and "
+                            f"'{name}' is the same at the first and the last of them (they differ "
+                            f"by {change:.1e} of its size): the field never changed in time")
+            continue
+        try:
+            points, cells, fields = read_nodal_mesh(p)
+        except BaseException:
+            continue
+        sol = _solution_fields(fields)
+        if not sol:
+            continue
+        if mesh is None:
+            pts = np.asarray(points, float)
+            dim = 3 if _looks_3d(pts) else 2
+            lo, hi = pts[:, :dim].min(axis=0), pts[:, :dim].max(axis=0)
+            mesh = {"file": p.name, "cells": int(sum(len(np.asarray(c)) for _n, c in _cell_arrays(cells))),
+                    "points": int(len(pts)),
+                    "bounding_box": [[round(float(v), 6) for v in lo], [round(float(v), 6) for v in hi]]}
+            meas = _measure(pts, cells)
+            if meas is not None:
+                mesh["area" if dim == 2 else "volume"] = round(meas, 8)
+        for name, arr in sol.items():
+            (zero if arr.size and not np.any(arr) else nonzero).append(f"{p.name}:{name}")
+    if zero and not nonzero:
+        hard.append("every solution field this run wrote is exactly 0 at every node ("
+                    + ", ".join(zero) + "): the run computed no field")
+    return hard, notes, mesh

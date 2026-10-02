@@ -3503,6 +3503,14 @@ STRUCTURAL DYNAMIC:
   MAXITER: 500
   LOADLIN: true
   LINEAR_SOLVER: 1
+# Runtime VTK output for the structure: without it 4C writes only its native binary result
+# files, which neither a model nor openPASO's own result gate can open (found by the coverage
+# run of 2026-09-24; the 0D windkessel values stay in the native output, the 3D field is here).
+IO/RUNTIME VTK OUTPUT:
+  INTERVAL_STEPS: 1
+IO/RUNTIME VTK OUTPUT/STRUCTURE:
+  OUTPUT_STRUCTURE: true
+  DISPLACEMENT: true
 MATERIALS:
   - MAT: 1
     MAT_Struct_StVenantKirchhoff:

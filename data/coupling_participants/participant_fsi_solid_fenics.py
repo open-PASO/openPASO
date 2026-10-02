@@ -46,9 +46,9 @@ from mpi4py import MPI
 #    Replace ALL of them with your problem's geometry, material and BCs.
 PARTNER    = "fluid"     # the fluid participant's `name` in your couple(...) call
 LX         = 1.2         # wall length
-Y0         = 0.25        # the FSI interface (this body's LOWER edge)
+Y0         = 0.18        # the FSI interface (this body's LOWER edge)
 HS         = 0.04        # wall thickness
-NXS, NYS   = 24, 3       # this body's OWN mesh; need not match the fluid's
+NXS, NYS   = 46, 3       # this body's OWN mesh; need not match the fluid's
 E_MOD      = 1.5e6       # Young's modulus
 NU         = 0.35       # Poisson ratio
 CLAMP_X    = (0.0, 1.2)  # x positions of the clamped ends

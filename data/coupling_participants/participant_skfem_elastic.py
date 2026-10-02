@@ -37,7 +37,7 @@ interface state, and the optimal theta is 1/(1+rho) with rho the ratio of the
 two subdomains' interface stiffnesses. For a VECTOR interface rho is a matrix,
 so u_x and u_y generally want DIFFERENT thetas and the single theta must be
 chosen for the WORST component: (1-theta)^2 + rho_c*theta^2 < 1 has to hold for
-every component c, so theta < 2/(1+max_c rho_c). Measured on this problem with
+every component c, so theta < 2/(1+max_c rho_c). Measured on a coupled pair with
 traction-free y-faces: rho_x ~ 0.4 while rho_y ~ 1.8, and theta = 1/(1+rho_x)
 diverges on the y component while the x component converges — a
 half-converging coupling that a single global residual reports only as "did
@@ -71,10 +71,10 @@ IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the lin
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.55          # WHERE that line sits: equal to X0 or X1 for axis "x",
                           # to Y0 or Y1 for axis "y"
-E_MOD     = 1000.0        # Young's modulus
-NU        = 0.3           # Poisson ratio (PLANE STRAIN)
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio (PLANE STRAIN)
 # Prescribed displacement on this subdomain's WHOLE non-interface boundary
-# (its outer x-face and both y-faces), as a polynomial in (x, y):
+# (every face but the interface), as a polynomial in (x, y):
 #     u_x = UDX[0] + UDX[1]*x + UDX[2]*y + UDX[3]*y*y
 #     u_y = UDY[0] + UDY[1]*x + UDY[2]*y + UDY[3]*y*y
 # The two subdomains must agree at the two interface corners, or the coupled
@@ -99,7 +99,70 @@ def B_SRC(x, y):
                 np.zeros_like(x))
     """
     return np.zeros_like(x), np.zeros_like(y)
-NX, NY    = 24, 16        # this subdomain's own mesh (need not match the partner)
+NX, NY    = 46, 26        # this subdomain's own mesh (need not match the partner)
+# ── THE PROBLEM'S DATA ARE DATA, NOT CODE (served). config.json may carry this
+#    subdomain's box, interface, material, outer displacement and body force AS
+#    THE TASK WRITES THEM -- side, partner; x0, x1, y0, y1; iface ("left"|"right"|"bottom"|"top",
+#    or the coordinate of the interface line) and iface_axis ("x"|"y"); E and nu,
+#    or lam and mu; udx, udy (the four polynomial coefficients of the outer
+#    displacement); source_ux, source_uy as strings in x and y (`^` allowed) --
+#    and when it does they override the constants and the B_SRC body above.
+#    Measured on the thermo-elastic family: the side written as CODE solved a
+#    textbook sine source while its own config.json held the task's polynomials;
+#    a source typed twice is transcribed once wrong. The audit's momentum check
+#    reads the same keys, so a side that states them is the side it can judge.
+def _expr_fn(expr):
+    """A NumPy function of (x, y) from an expression string as a task writes it."""
+    src = str(expr).replace("^", "**")
+    code = compile(src, "<source>", "eval")
+    names = {"pi": np.pi, "sin": np.sin, "cos": np.cos, "exp": np.exp, "sqrt": np.sqrt,
+             "abs": np.abs, "log": np.log, "tanh": np.tanh, "cosh": np.cosh, "sinh": np.sinh}
+    def f(x, y):
+        env = dict(names); env["x"] = x; env["y"] = y
+        return eval(code, {"__builtins__": {}}, env) + 0.0 * x
+    return f
+_cfg_all = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
+    try:
+        _cfg_all.update(**json.loads(_txt or "{}"))
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
+if all(_k in _cfg_all for _k in ("x0", "x1", "y0", "y1")):
+    X0, X1, Y0, Y1 = (float(_cfg_all[_k]) for _k in ("x0", "x1", "y0", "y1"))
+if str(_cfg_all.get("iface_axis", "")).strip().lower()[:1] in ("x", "y"):
+    IFACE_AXIS = str(_cfg_all["iface_axis"]).strip().lower()[:1]
+_ifc = str(_cfg_all.get("iface", "")).strip().lower()
+if _ifc in ("left", "right", "bottom", "top"):
+    IFACE_AXIS = ("x" if _ifc in ("left", "right") else "y")
+    IFACE_X = {"left": X0, "right": X1, "bottom": Y0, "top": Y1}[_ifc]
+elif _ifc:
+    try:
+        IFACE_X = float(_ifc)
+    except ValueError:
+        pass
+if str(_cfg_all.get("side", "")).strip().lower() in ("dirichlet", "neumann"):
+    SIDE = str(_cfg_all["side"]).strip().lower()
+if str(_cfg_all.get("partner", "")).strip():
+    PARTNER = str(_cfg_all["partner"]).strip()
+if "E" in _cfg_all and "nu" in _cfg_all:
+    E_MOD, NU = float(_cfg_all["E"]), float(_cfg_all["nu"])
+elif ("lam" in _cfg_all or "lambda" in _cfg_all) and "mu" in _cfg_all:
+    _lam, _mu = float(_cfg_all.get("lam", _cfg_all.get("lambda"))), float(_cfg_all["mu"])
+    E_MOD, NU = _mu * (3.0 * _lam + 2.0 * _mu) / (_lam + _mu), _lam / (2.0 * (_lam + _mu))
+for _nm, _key in (("UDX", "udx"), ("UDY", "udy")):
+    if isinstance(_cfg_all.get(_key), (list, tuple)) and len(_cfg_all[_key]) == 4:
+        globals()[_nm] = tuple(float(_c) for _c in _cfg_all[_key])
+_SOURCES_FROM = "code (the B_SRC body above)"
+if _cfg_all.get("source_ux") is not None and _cfg_all.get("source_uy") is not None:
+    _bx_cfg, _by_cfg = _expr_fn(_cfg_all["source_ux"]), _expr_fn(_cfg_all["source_uy"])
+    def B_SRC(x, y):                                   # noqa: F811 -- config wins over the body above
+        return _bx_cfg(x, y), _by_cfg(x, y)
+    _SOURCES_FROM = "config.json"
+print(f"SOURCES IN USE: from {_SOURCES_FROM}"
+      + (f"; b_x = {str(_cfg_all.get('source_ux'))[:60]}; b_y = {str(_cfg_all.get('source_uy'))[:60]}"
+         if _cfg_all.get("source_ux") is not None else "; b = the B_SRC body above (config carries no source_ux/source_uy)"))
+
 UI_X, UI_Y = 0.0, 0.0     # iteration-1 fallback interface displacement
 TI_X, TI_Y = 0.0, 0.0     # iteration-1 fallback interface traction export
 # ─────────────────────────────────────────────────────────────────────────
@@ -181,15 +244,14 @@ def sample(imp, key, fallback, y):
 #    at the foot of this file carry that level in their NAME, so a mesh study
 #    leaves one file per level instead of the fine mesh overwriting the coarse.
 LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
-    try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))
-        LEVEL = int(_cfg.get("level", LEVEL))
-        NX = int(_cfg.get("nx", NX))
-        NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+_cfg = _cfg_all   # config.json and OPENPASO_CONFIG_JSON, read and checked above
+try:
+    LEVEL = int(_cfg.get("level", LEVEL))
+    NX = int(_cfg.get("nx", NX))
+    NY = int(_cfg.get("ny", NY))
+except (ValueError, TypeError) as _cfg_exc:
+    raise SystemExit(f"config.json / OPENPASO_CONFIG_JSON: the level and the mesh keys nx, ny "
+                     f"could not be read ({_cfg_exc!r}); fix them, nothing was solved")
 
 # MAKE THIS CODE SPEAK, BEFORE THE SOLVE RUNS. It is silent by default, and a
 # per-level run log carrying no line the solver itself emitted cannot
@@ -218,23 +280,24 @@ basis = Basis(mesh, elem)
 nd = basis.nodal_dofs                      # (2, nnodes): node -> (x, y) dof
 
 px, py = mesh.p[0], mesh.p[1]
-iface_n = np.where(np.abs(px - IFACE_X) < TOL)[0]
-iface_n = iface_n[np.argsort(py[iface_n])]             # sorted by y
-y_if = py[iface_n]
-outer_n = np.where((np.abs(px - OUTER_X) < TOL) |
-                   (np.abs(py - Y0) < TOL) | (np.abs(py - Y1) < TOL))[0]
+pa, pl = mesh.p[AX], mesh.p[AL]            # across the interface, and along it
+iface_n = np.where(np.abs(pa - IFACE_X) < TOL)[0]
+iface_n = iface_n[np.argsort(pl[iface_n])]             # sorted along the interface
+y_if = pl[iface_n]
+outer_n = np.where((np.abs(pa - OUTER_X) < TOL) |
+                   (np.abs(pl - ALO) < TOL) | (np.abs(pl - AHI) < TOL))[0]
 # THE TWO INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES.
-# (IFACE_X, Y0) and (IFACE_X, Y1) sit on a y-face, which carries a prescribed
-# displacement in the un-split problem, so they are Dirichlet nodes there and
-# must stay Dirichlet in BOTH subproblems. Handing them to the interface
-# instead leaves them unconstrained on the Neumann side: that subproblem is
-# still well posed, still converges, and lands a few percent off — measured
-# here, 4.7% in the interface displacement and 28% in the interface traction,
-# on a coupling whose residual reached 1e-10 and whose flux balanced. So the
-# interface Dirichlet set EXCLUDES them; they are still exported, because they
-# are still points of the interface.
-iface_bc_n = iface_n[(np.abs(py[iface_n] - Y0) > TOL) &
-                     (np.abs(py[iface_n] - Y1) > TOL)]
+# The two ends of the interface sit on the faces it ends on, which carry a
+# prescribed displacement in the un-split problem, so they are Dirichlet nodes
+# there and must stay Dirichlet in BOTH subproblems. Handing them to the
+# interface instead leaves them unconstrained on the Neumann side: that
+# subproblem is still well posed, still converges, and lands a few percent off
+# — measured here, 4.7% in the interface displacement and 28% in the interface
+# traction, on a coupling whose residual reached 1e-10 and whose flux balanced.
+# So the interface Dirichlet set EXCLUDES them; they are still exported,
+# because they are still points of the interface.
+iface_bc_n = iface_n[(np.abs(pl[iface_n] - ALO) > TOL) &
+                     (np.abs(pl[iface_n] - AHI) > TOL)]
 iface_bc_dofs = np.concatenate([nd[0, iface_bc_n], nd[1, iface_bc_n]])
 outer_dofs = np.concatenate([nd[0, outer_n], nd[1, outer_n]])
 
@@ -280,7 +343,7 @@ b = body_force.assemble(basis)         # not modify A or b in place
 b_vol = b
 fbi = FacetBasis(mesh, elem,
                  facets=mesh.facets_satisfying(
-                     lambda p: np.abs(p[0] - IFACE_X) < TOL))
+                     lambda p: np.abs(p[AX] - IFACE_X) < TOL))
 
 sol = basis.zeros()
 ux_d, uy_d = u_dirichlet(px[outer_n], py[outer_n])
@@ -288,6 +351,47 @@ sol[nd[0, outer_n]] = ux_d
 sol[nd[1, outer_n]] = uy_d
 D = outer_dofs
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+# ── WHAT THE SERVED LINES BELOW RELY ON, CHECKED (served) ─ keep this block.
+#    y_if is the coordinate ALONG the interface: x on a horizontal one (the
+#    name is the vertical case's). iface_bc_n is iface_n without its two end
+#    nodes, in the same order. And fbi must sit on the interface line: a
+#    FacetBasis over facets that match nothing integrates over NOTHING (skfem
+#    only prints "with no facets"), so the Neumann load and the traction
+#    weights come out zero. It must carry basis's own element: the served lines
+#    interpolate a dof vector of basis on it.
+y_if = np.asarray(y_if, float)
+if (y_if.size != len(iface_n) or y_if.size < 2 or np.any(np.diff(y_if) <= 0)
+        or abs(y_if[0] - ALO) > TOL or abs(y_if[-1] - AHI) > TOL):
+    raise SystemExit(f"INTERFACE NODES: y_if must hold the coordinate ALONG the interface ({'xy'[AL]}), "
+                     f"one per node of iface_n in the same order, strictly increasing from {ALO:g} to "
+                     f"{AHI:g}; it holds {y_if.size} value(s) for {len(iface_n)} node(s)"
+                     + (f", from {y_if.min():g} to {y_if.max():g}" if y_if.size else "")
+                     + (f"; only {np.unique(np.round(y_if, 12)).size} of them distinct -- a node "
+                        f"listed once per edge it touches is listed twice"
+                        if 0 < np.unique(np.round(y_if, 12)).size < y_if.size else ""))
+_ends = (np.abs(y_if - ALO) <= TOL) | (np.abs(y_if - AHI) <= TOL)   # the interface's two ends
+if not np.array_equal(np.asarray(nd), np.asarray(basis.nodal_dofs)):
+    raise SystemExit("NODE DOFS: nd must be basis.nodal_dofs, shape (2, number of nodes): row 0 holds "
+                     "each node's x-dof and row 1 its y-dof, and every served line below indexes it so")
+if not np.array_equal(np.asarray(iface_bc_n), np.asarray(iface_n)[~_ends]):
+    raise SystemExit("INTERFACE NODES: iface_bc_n must be iface_n without the interface's two end "
+                     "nodes, in the same order: the Dirichlet branch below writes the partner's values "
+                     "into it row by row")
+_fb_pts = (fbi.mesh.p[:, np.unique(fbi.mesh.facets[:, fbi.find])].T if len(fbi.find)
+           else np.zeros((0, 2)))
+if (not len(_fb_pts) or np.abs(_fb_pts[:, AX] - IFACE_X).max() > TOL
+        or _fb_pts[:, AL].min() > ALO + TOL or _fb_pts[:, AL].max() < AHI - TOL):
+    raise SystemExit("INTERFACE FACETS: two served lines integrate over fbi, and "
+                     + ("fbi holds no facet" if not len(_fb_pts) else
+                        "fbi's facets are not exactly the whole interface line")
+                     + f". Build it on the facets of the line {'xy'[AX]} = {IFACE_X:g}, and only those: "
+                     f"facets_satisfying hands its test the facet midpoints p, with p[0] = x and p[1] = y.")
+if fbi.N != basis.N:
+    raise SystemExit(f"INTERFACE FACETS: fbi is built on another element than basis (fbi.N = {fbi.N}, "
+                     f"basis.N = {basis.N}). The served lines interpolate a dof vector of basis on fbi, and "
+                     f"FacetBasis.interpolate takes fbi.N values ('Input array has wrong size.'): build fbi "
+                     f"on basis's element, FacetBasis(mesh, basis.elem, facets=...).")
 
 if SIDE == "dirichlet":
     u_if = sample(imp, "values", (UI_X, UI_Y), y_if)
@@ -308,6 +412,19 @@ else:
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 sol = solve(*condense(A, b, x=sol, D=D))
 # ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
+
+# ── DID THE PARTNER'S DISPLACEMENT ENTER THE SOLVE? (served) ─ keep this block.
+#    A Dirichlet side whose solve dropped the interface dofs returns its own
+#    answer, exports it, and the coupling "converges" in two iterations to two
+#    fields that disagree at the interface (measured: 150-200 %).
+if SIDE == "dirichlet" and len(iface_bc_n):
+    _want = np.stack([u_if[keep, 0], u_if[keep, 1]], axis=1)
+    _got = np.stack([sol[nd[0, iface_bc_n]], sol[nd[1, iface_bc_n]]], axis=1)
+    if np.abs(_got - _want).max() > 1e-9 * max(1.0, float(np.abs(_want).max())):
+        raise SystemExit("EXPORT SELF-CHECK: the partner's displacement is not in the solution at the "
+                         "interface nodes: the solve must keep the Dirichlet dofs D at the values set in "
+                         "`sol` (condense(A, b, x=sol, D=D)); a solve that drops them returns this side's "
+                         "own answer and couples to nothing")
 
 # Interface traction export q_out = -(sigma . n_own).
 #
@@ -380,24 +497,26 @@ Q = np.zeros_like(wi)
 ok = np.abs(wi) > 1e-14
 Q[ok] = -r[idx][ok] / wi[ok]
 
-# THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY (a y-face), so
-# their rows carry the OUTER reaction too and their residual is not this
-# interface's traction. Take the nearest interior interface node rather than
-# exporting a corner value that is physically a different quantity. This holds
-# on BOTH sides: the corners are outer-Dirichlet in either subproblem.
-suspect = np.isin(iface_n, outer_n) | ~ok.all(axis=1)
+# THE TWO INTERFACE CORNERS ARE ON THE OUTER DIRICHLET BOUNDARY (the faces the
+# interface ends on), so their rows carry the OUTER reaction too and their
+# residual is not this interface's traction. Take the nearest interior
+# interface node rather than exporting a corner value that is physically a
+# different quantity. This holds on BOTH sides: the corners are outer-Dirichlet
+# in either subproblem. They are found by position (_ends), so an outer_n that
+# leaves them out does not let them through.
+suspect = _ends | np.isin(iface_n, outer_n) | ~ok.all(axis=1)
 good = np.where(~suspect)[0]
 if len(good):
     for i in np.where(suspect)[0]:
         Q[i] = Q[good[np.argmin(np.abs(good - i))]]
 
 # THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its OWN.
-# The audit and the hand-in read that exact shape, and they read it PER
-# LEVEL: it is how a grader tells a refined mesh from the same mesh run
+# The audit reads that exact shape, and they read it PER
+# LEVEL: it is how anyone checking the result tells a refined mesh from the same mesh run
 # three times. The LEADING NEWLINE is deliberate -- a program that writes
 # without a trailing newline glues its text onto the front of the next
 # line, and an X11 warning has done exactly that here, turning a correct
-# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 54'.
+# line into 'Invalid MIT-MAGIC-COOKIE-1 keyNDOF = 113'.
 # A number inside a prose sentence does not count either, and a
 # wrong number is worse than none -- one coupled run that was right in
 # every other respect reported NDOF = 1 at all three levels, and its
@@ -411,8 +530,12 @@ except Exception as _ndof_exc:
 
 # PER-LEVEL PERSISTENCE: this level's whole field, and its interface trace and
 # traction, named by LEVEL. exports.json is overwritten by the next level;
-# these files are not.
-# the probe points your task names -- never a file the next level overwrites.
+# these files are not: interpolate THESE onto the probe points your task names.
+# THE qx, qy COLUMNS ARE THIS SIDE'S EXPORT, q_out = -(sigma . n_own) (the sign
+# convention at the top of this file). A task that asks for the traction
+# sigma . n wants their negative, and one that fixes a single normal for both
+# sides flips the side whose own normal points the other way: map the columns
+# to your task's definition when you write its files.
 # A DUMP DEFECT MUST NOT COST YOU THE SOLVE. exports.json is the driver's
 # proof that this participant succeeded, and it is written after these files,
 # so an exception here would throw away a coupling iteration that worked.
@@ -430,14 +553,13 @@ try:
             _f.write(f"{_px:.11e},{_py:.11e},{float(_ux):.11e},"
                      f"{float(_uy):.11e},{float(_qx):.11e},{float(_qy):.11e}\n")
 except Exception as _dump_exc:
-    # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-    # before it fails, so a dump that died mid-way leaves a header-only
-    # CSV -- a file that looks like a submission and carries no rows.
+    # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+    # truncated file, a whole field file with no interface file, or a file an
+    # earlier run wrote, and any of them could be read as this level's result.
+    # So both of this level's files go, whatever they hold.
     for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
         try:
-            if Path(_partial).is_file() and len(
-                    Path(_partial).read_text().splitlines()) <= 1:
-                Path(_partial).unlink()
+            Path(_partial).unlink(missing_ok=True)
         except OSError:
             pass
     print(f"[skfem_elastic per-level dump] level {LEVEL} dump failed: "
@@ -474,7 +596,7 @@ if SIDE == "neumann" and _chk_qin.size and np.abs(_chk_qin).max() > 0 \
 # (Dirichlet role only: a Neumann side's consistent recovery of a CONSTANT
 #  applied traction can legitimately reproduce it to the last bit.)
 if SIDE == "dirichlet" and _chk_qin.shape == _chk_flux.shape and _chk_flux.size \
-        and np.array_equal(_chk_flux, -_chk_qin):
+        and np.any(_chk_flux) and np.array_equal(_chk_flux, -_chk_qin):
     raise SystemExit("EXPORT SELF-CHECK: the exported traction is the partner's "
                      "array negated, bit for bit: a copy, not a recovery from "
                      "this side's own assembled system")

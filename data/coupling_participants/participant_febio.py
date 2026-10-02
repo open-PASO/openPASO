@@ -23,8 +23,10 @@ to the 1D equation
 
     d/dx ( M du/dx ) = 0 ,   M = lambda + 2 mu   (P-wave / oedometric modulus)
 
-which is `-div(k grad T) = 0` with T -> u_x and k -> M.  Dirichlet/Neumann
-interface structure is identical:
+which is `-div(k grad T) = 0` with T -> u_x and k -> M.  It exchanges ONE number per
+point: for a plane-strain elastic exchange (a displacement and a traction vector) the
+contract is write_participant_contract(solver='febio', variant='elasticity').
+Dirichlet/Neumann interface structure is identical:
   * Dirichlet side: imports the partner's `values` (interface u_x), applies
     them as a per-node prescribed x-displacement.
   * Neumann side  : imports the partner's `normal_fluxes` and applies them
@@ -55,10 +57,10 @@ IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the lin
                           # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
                           # (they are stacked). Everything below follows from it.
 IFACE_X   = 0.5           # shared interface (X0/X1 for axis "x", Y0/Y1 for axis "y")
-E_MOD     = 1000.0        # Young's modulus
-NU        = 0.3           # Poisson ratio
+E_MOD     = 870.0         # Young's modulus
+NU        = 0.29          # Poisson ratio
 U_OUTER   = 0.0           # prescribed u_x on the NON-interface x-face
-NX, NY    = 16, 8         # this subdomain's own mesh (NZ is always 1)
+NX, NY    = 26, 8         # this subdomain's own mesh (NZ is always 1)
 U_INIT    = 5.0e-5        # iteration-1 fallback interface displacement
 Q_INIT    = 0.0           # iteration-1 fallback interface flux (traction)
 FEBIO     = "febio4"      # the FEBio binary path `discover(query='list')` prints

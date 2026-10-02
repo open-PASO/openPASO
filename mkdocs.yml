@@ -102,6 +102,7 @@ nav:
           - coupled_solve: tools/coupled_solve.md
           - couple_precice: tools/couple_precice.md
           - transfer_field: tools/transfer_field.md
+          - write_participant_contract: tools/write_participant_contract.md
       - Set up and develop:
           - setup_backend: tools/setup_backend.md
           - rediscover_backends: tools/rediscover_backends.md

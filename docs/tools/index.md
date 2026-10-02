@@ -1,6 +1,6 @@
 # The tools the AI model gets
 
-openPASO gives the AI model **24 tools**. You never call them yourself: you describe what you want, and the model decides which tool to use. This page tells you what each one is for, so you can follow what the model is doing.
+openPASO gives the AI model **25 tools**. You never call them yourself: you describe what you want, and the model decides which tool to use. This page tells you what each one is for, so you can follow what the model is doing.
 
 Each tool page also shows the full description the model reads. It is long and technical on purpose: it is written for the model, not for you.
 
@@ -43,6 +43,7 @@ Each tool page also shows the full description the model reads. It is long and t
 | [`coupled_solve`](coupled_solve.md) | A ready-made coupled setup for common pairs of physics. |
 | [`couple_precice`](couple_precice.md) | Couples two solvers through the preCICE library instead of openPASO's own driver. |
 | [`transfer_field`](transfer_field.md) | Moves a result from one solver's output into another solver's input. |
+| [`write_participant_contract`](write_participant_contract.md) | Writes the fill-in participant script for one solver of a coupled problem into your folder: everything around the solve, which you then write yourself. |
 
 ## Set up and develop
 

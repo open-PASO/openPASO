@@ -17,14 +17,13 @@ The text below is the tool's own description, exactly as the AI model receives i
     ```text
     Hot-reload the per-backend KNOWLEDGE dicts from disk.
     
-    Closes the gap identified by the
-    mcp-catalog-staleness-runtime-isolation post-mortem
-    (2026-06-01): the MCP server normally imports
+    Closes a gap one of openPASO's own post-mortems recorded:
+    the MCP server normally imports
     src/backends/<be>/generators/<physics>.py modules ONCE at
     startup and never refreshes them, so catalog edits made
-    during a long-running session are invisible. Postmortems
-    in data/postmortems/ are scanned on every request (already
-    hot), but pitfall dicts are not.
+    during a long-running session are invisible. Post-mortem
+    records are read on every request (already hot), but
+    pitfall dicts are not.
     
     This tool walks every imported `backends.<be>.generators.*`
     and `backends.<be>.backend` module, runs importlib.reload

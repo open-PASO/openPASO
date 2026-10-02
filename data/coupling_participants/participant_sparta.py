@@ -4,18 +4,38 @@ SPARTA is a rarefied-gas DSMC particle code, not a FEM code, and has no
 scripting API: it reads a text input deck and writes text dump/log files.
 This module is therefore a WRAPPER that, each coupling iteration:
   1. reads imports.json  -> per-surface-element WALL TEMPERATURE,
-  2. writes `tsurf.in` in SPARTA's `custom surf ... file` format,
-  3. writes the deck, which does
+  2. writes TSURF_IN in SPARTA's `custom surf ... file` format,
+  3. writes the deck -- write_deck(seed), the one part that is yours -- which
+     must read SURF_FILE FIRST (its lines then carry ids 1..N, the ids TSURF_IN
+     and the dump reader use) and does
          custom      surf create tsurf float 0 file tsurf.in 1 tsurf
          surf_collide 1 diffuse s_tsurf 1.0      <- per-element Dirichlet T
-         compute     1 surf all all etot         <- per-element heat flux
-         fix         1 ave/surf all 1 N N c_1[1] ave one
-         dump        1 surf all N flux.out id v1x v1y v2x v2y f_1 s_tsurf
+         compute     1 surf <group> all etot     <- per-element heat flux
+         fix         1 ave/surf <group> 1 N N c_1[1] ave one
+         dump        1 surf <group> N flux.out id v1x v1y v2x v2y f_1 s_tsurf
+     with <group> the group of SURF_FILE's lines (read_surf ... group <name>).
      NOTE the dump must reference `f_1`, NOT `f_1[1]`: a fix ave/surf with a
      single input column is a per-surf VECTOR, and the [1] form aborts with
      "Dump surf fix does not compute per-surf array" (dump_surf.cpp:609).
-  4. runs spa_serial,
-  5. parses the ASCII surf dump and writes exports.json.
+  4. runs the SPARTA binary with its console passed through,
+  5. checks SPARTA's own setup report (the PARTICLE SELF-CHECK),
+  6. parses the ASCII surf dump and writes exports.json.
+
+THE FILE FORMATS (SPARTA's own rules, measured on this install; the readers
+and the writer below follow them).
+  SURF_FILE (read_surf, 2-D): the FIRST LINE IS ALWAYS SKIPPED.  Header lines
+    "<N> points" and "<M> lines" follow (blank lines and # comments allowed
+    there).  Then the line "Points", ONE SKIPPED LINE, and N rows "id x y";
+    then the line "Lines", ONE SKIPPED LINE, and M rows "id p1 p2" (p1, p2 count
+    the Points from 1 in the order they are listed).  The rows of a section
+    follow each other with no blank line.  Without a Points section a Lines row
+    is "id x1 y1 x2 y2".
+  TSURF_IN (custom surf ... file <file> M <names>): comment or blank lines,
+    then the count line "N M" (N value lines follow; M values on each, M the
+    number of names after the file name), then N lines "id value".
+  FLUX_OUT (dump surf): each snapshot is "ITEM: TIMESTEP", "ITEM: NUMBER OF
+    SURFS", "ITEM: BOX BOUNDS ..." and "ITEM: SURFS <columns>", one row per
+    element.  The reader takes the LAST snapshot and finds its columns by name.
 
 ROLE.  SPARTA is a DIRICHLET-type participant for conjugate heat transfer:
 it IMPORTS a field value (wall temperature) and EXPORTS a flux (the net
@@ -24,26 +44,48 @@ energy = energy leaving the gas subdomain through the interface, i.e.
 exactly SPEC.md's outward-normal q_out for the gas side).
 SPARTA HAS NO NATIVE FLUX BC, so this script is the Dirichlet side: none of the
 nine `surf_collide` styles takes a prescribed heat flux, and the four thermal
-ones (`diffuse`, `cll`, `td`, `impulsive`) all take a temperature.
-A flux can be imposed only INDIRECTLY: `fix surf/temp` turns a per-surf flux
-into a per-surf temperature via the gray-body law q = sigma*emisurf*T^4, and it
-accepts that flux from ANY per-surf compute or fix — SPARTA's own doc states it
-"does not check that the specified compute/fix calculates an energy flux" — so
-an imported flux does reach it through `custom surf ... file` plus
-`fix ave/surf s_<name>`.  That route prescribes the wall temperature which would
-RADIATE the imported flux; it does not constrain the gas-side flux, and it adds
-an emissivity unrelated to the coupling.  It is NOT implemented below and was
-NOT run.  See knowledge(topic='coupling', solver='sparta').
+ones (`diffuse`, `cll`, `td`, `impulsive`) all take a temperature.  The one
+indirect route (`fix surf/temp`, a radiative-equilibrium wall temperature) is
+NOT implemented below and was NOT run; knowledge(topic='coupling',
+solver='sparta') describes it.
+
+SURFACE LINES HAVE A FLOW SIDE.  SPARTA puts the gas on the side a line's
+normal points to, N = (0,0,1) x (p2 - p1): walking from p1 to p2, the gas is on
+your left.  read_surf reports "<a> <b> <c> = cells outside/inside/overlapping
+surfs"; a = 0 means every grid cell is inside a body, create_particles makes 0
+particles, and the run still exits 0 with every tally zero.  The PARTICLE
+SELF-CHECK below stops on that and on any run that ends with 0 particles.
+
+SURF_FILE IS THE INTERFACE AND NOTHING ELSE.  Every line in it takes the
+partner's temperature (TSURF_IN) and sends its flux to the partner.  A wall
+with its own temperature is a box face (boundary s, bound_modify <face> collide
+<id>) or a second read_surf after SURF_FILE's, with its own group, surf_collide
+and surf_modify.  The INTERFACE SELF-CHECK below stops on a line the partner's
+interface points do not lie along.
+
+THE GAS IN THE DECK.  `global nrho` is the gas's NUMBER density, molecules per
+m^3 (not a mass density, not a count per cell), and `global fnum` the number
+of molecules one simulated particle stands for.  `create_particles <mix> n 0`
+makes nrho x V / fnum particles, V the flow volume (in 2-D the area: SPARTA
+gives a 2-D cell unit depth); `create_particles <mix> n N` makes N particles in
+all, not per cell, and the gas is then N x fnum / V whatever nrho says.  DSMC
+collides the particles of one grid cell with each other, so each cell needs
+several.  The DECK SELF-CHECK and the PARTICLE SELF-CHECK below measure this.
 
 STOCHASTICITY.  DSMC output is a Monte-Carlo estimate.  With a fixed RNG seed
 and identical input the run is bit-reproducible (so a fixed-point iteration
 can appear to "converge" even when the physics has not); with a varying seed
 the exported flux carries sampling noise that does NOT shrink with coupling
 iterations, so the driver's relative-residual tolerance cannot be driven below
-that noise floor.  SEED_MODE below selects which regime you are in.
+that noise floor.  SEED_MODE below selects which regime you are in: with
+SEED_MODE = "vary", couple(..., noise_replicates=5) measures that floor and
+judges convergence against it.
 """
 import json
 import math
+import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,8 +95,10 @@ import numpy as np
 # ── EDIT THIS BLOCK ─ every number below is an ARBITRARY PLACEHOLDER.
 #    Replace ALL of them with your problem's geometry, material and BCs.
 PARTNER    = "solid"      # partner participant name in couple(...)
-SPARTA     = "spa_serial"    # the SPARTA binary path `discover(query='list')` prints
-DATA_DIR   = ""              # dir holding the surf/species/vss files, "" = work_dir
+SPARTA     = "spa_serial"    # the SPARTA binary: the path `discover(query='list')` prints
+                             # after "SPARTA at"; a bare name runs only when it is on PATH
+DATA_DIR   = ""              # dir holding the surf/species/vss files; a file not here is
+                             # copied from it, then from the SPARTA distribution's data dir
 SURF_FILE  = "circle.surf"     # 50 line elements (2D cylinder)
 SPECIES    = "ar.species"
 VSS        = "ar.vss"
@@ -103,40 +147,90 @@ def read_imports():
     return _partner_block(d)
 
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 def read_surf_elements():
-    """Parse SPARTA's surf file -> (n_elem, centroids[n,2])."""
-    txt = Path(SURF_FILE).read_text().splitlines()
-    npts = nlines = 0
-    for ln in txt:
-        s = ln.split("#")[0].strip()
-        if s.endswith("points"):
-            npts = int(s.split()[0])
-        elif s.endswith("lines"):
-            nlines = int(s.split()[0])
-    pts, lines, sec = {}, [], None
-    for ln in txt:
-        s = ln.split("#")[0].strip()
+    """SURF_FILE -> (number of lines, their centroids (n, 2) in id order), read by
+    read_surf's own rules (the docstring's FILE FORMATS). Stops naming the rule a
+    file breaks, where SPARTA would stop or misread it."""
+    rows = Path(SURF_FILE).read_text().splitlines()
+    npts = nlin = 0
+    i = 1                                          # the first line is always skipped
+    while i < len(rows):
+        s = rows[i].split("#")[0].strip()
         if not s:
+            i += 1
             continue
-        low = s.lower()
-        if low == "points":
-            sec = "p"; continue
-        if low == "lines":
-            sec = "l"; continue
-        if low.endswith("points") or low.endswith("lines"):
+        if "points" in s or "lines" in s:          # header: "<N> points" / "<M> lines"
+            try:
+                cnt = int(s.split()[0])
+            except ValueError:
+                raise SystemExit(f"{SURF_FILE} line {i + 1}: {rows[i]!r} is not '<N> points' "
+                                 f"or '<M> lines'")
+            if "points" in s:
+                npts = cnt
+            else:
+                nlin = cnt
+            i += 1
             continue
-        f = s.split()
-        if sec == "p" and len(f) >= 3:
-            pts[int(f[0])] = (float(f[1]), float(f[2]))
-        elif sec == "l" and len(f) >= 3:
-            lines.append((int(f[0]), int(f[-2]), int(f[-1])))
+        break                                      # the first section keyword
+    if nlin == 0:
+        raise SystemExit(f"{SURF_FILE}: no '<M> lines' header line before the first section "
+                         f"(its first line is always skipped, so a count written there is lost)")
+
+    def section(i):
+        """(keyword, its line index, index of its first row): blank lines, the keyword
+        line, then ONE skipped line before the rows."""
+        while i < len(rows) and not rows[i].split("#")[0].strip():
+            i += 1
+        return (rows[i].split("#")[0].strip() if i < len(rows) else ""), i, i + 2
+
+    def row(k):
+        return rows[k] if k < len(rows) else ""
+
+    pts = []
+    key, at, i = section(i)
+    if key not in ("Points", "Lines"):
+        raise SystemExit(f"{SURF_FILE} line {at + 1}: {row(at)!r} is neither a header line ('<N> "
+                         f"points', '<M> lines') nor a section keyword ('Points', 'Lines')")
+    if npts and key != "Points":
+        raise SystemExit(f"{SURF_FILE}: the header says {npts} points and the file has no "
+                         f"'Points' section before 'Lines'")
+    if key == "Points":
+        if npts == 0:
+            raise SystemExit(f"{SURF_FILE}: a 'Points' section and no '<N> points' header line "
+                             f"(the first line is always skipped, so a count written there is lost)")
+        for k in range(i, i + npts):
+            f = row(k).split()
+            try:
+                pts.append((float(f[1]), float(f[2])))
+            except (ValueError, IndexError):
+                raise SystemExit(f"{SURF_FILE} line {k + 1}: {row(k)!r} is not a Points row 'id x y' "
+                                 f"(the line after 'Points' is skipped, and the {npts} rows follow "
+                                 f"it with no blank line)")
+        key, at, i = section(i + npts)
+        if key != "Lines":
+            raise SystemExit(f"{SURF_FILE} line {at + 1}: {row(at)!r} where the 'Lines' section "
+                             f"should begin, after the {npts} Points rows")
+    lines = []
+    for k in range(i, i + nlin):
+        f = row(k).split()
+        try:
+            if pts and len(f) in (3, 4):                     # id [type] p1 p2
+                a, b = pts[int(f[-2]) - 1], pts[int(f[-1]) - 1]
+            elif not pts and len(f) in (5, 6):               # id [type] x1 y1 x2 y2
+                a, b = (float(f[-4]), float(f[-3])), (float(f[-2]), float(f[-1]))
+            else:
+                raise ValueError
+            lines.append((int(f[0]), a, b))
+        except (ValueError, IndexError):
+            raise SystemExit(f"{SURF_FILE} line {k + 1}: {row(k)!r} is not a Lines row "
+                             + ("'id p1 p2'" if pts else "'id x1 y1 x2 y2'")
+                             + f" (the line after 'Lines' is skipped, and the {nlin} rows follow "
+                             f"it with no blank line)")
     lines.sort()
-    cen = np.array([[0.5 * (pts[a][0] + pts[b][0]),
-                     0.5 * (pts[a][1] + pts[b][1])] for (_, a, b) in lines])
-    assert len(lines) == nlines and len(pts) == npts, "surf file parse mismatch"
+    cen = np.array([[0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])] for _, a, b in lines])
+    global SURF_LEN
+    SURF_LEN = np.array([np.hypot(b[0] - a[0], b[1] - a[1]) for _, a, b in lines])
     return len(lines), cen
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 
 def _arclen(p):
@@ -160,9 +254,8 @@ def sample_on(imp, key, fallback, cen):
     return np.interp(_arclen(cen), _arclen(src), vs)
 
 
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 def write_tsurf(t):
-    """SPARTA `custom surf ... file` format: comment, blank, 'N M', 'id v'."""
+    """TSURF_IN in the `custom surf ... file` format: comment, blank, 'N 1', 'id value'."""
     L = ["# per-surf wall temperature written by the openPASO coupling driver", ""]
     L.append(f"{len(t)} 1")
     for i, v in enumerate(t, 1):
@@ -170,6 +263,7 @@ def write_tsurf(t):
     Path(TSURF_IN).write_text("\n".join(L) + "\n")
 
 
+# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 def write_deck(seed):
     Path(DECK).write_text(f"""\
 seed                {seed}
@@ -181,7 +275,7 @@ create_box          -0.2 0.65 0.0 0.4 -0.5 0.5
 create_grid         30 15 1 block * * *
 species             {SPECIES} Ar
 mixture             all vstream 2634.1 0 0 temp 200.0
-collide             vss all ar.vss
+collide             vss all {VSS}
 collide_modify      vremax 1000 yes
 read_surf           {SURF_FILE} group 1
 
@@ -201,47 +295,149 @@ stats               {NRUN}
 stats_style         step cpu np nscoll
 run                 {NRUN}
 """)
+# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 
 def parse_dump(path, n):
-    """Read the LAST snapshot of a SPARTA ASCII surf dump."""
+    """The LAST snapshot of the surf dump `path` as rows [id, v1x, v1y, v2x, v2y,
+    etot, T], sorted by id; its columns are found by the names on its "ITEM: SURFS"
+    line (id v1x v1y v2x v2y, one f_ or c_ column, one s_ column)."""
     txt = Path(path).read_text().splitlines()
     starts = [i for i, l in enumerate(txt) if l.startswith("ITEM: SURFS")]
     if not starts:
         raise SystemExit(f"no 'ITEM: SURFS' block in {path}")
-    i0 = starts[-1] + 1
+    names = txt[starts[-1]].split()[2:]
+    flux = [c for c in names if c.startswith(("f_", "c_"))]
+    temp = [c for c in names if c.startswith("s_")]
+    if not {"id", "v1x", "v1y", "v2x", "v2y"} <= set(names) or len(flux) != 1 or len(temp) != 1:
+        raise SystemExit(f"{path} has the columns {names}; this reader takes id v1x v1y v2x v2y, "
+                         f"ONE f_ (or c_) column holding the etot tally and ONE s_ column holding "
+                         f"the wall temperature, as in: dump <ID> surf <group> <N> {path} id v1x "
+                         f"v1y v2x v2y f_<fix> s_tsurf")
+    cols = [names.index(c) for c in ("id", "v1x", "v1y", "v2x", "v2y")] + \
+           [names.index(flux[0]), names.index(temp[0])]
     rows = []
-    for l in txt[i0:]:
+    for l in txt[starts[-1] + 1:]:
         if l.startswith("ITEM:"):
             break
         f = l.split()
-        if len(f) >= 7:
-            rows.append([float(x) for x in f[:7]])
-    a = np.asarray(rows, float)
+        if len(f) >= len(names):
+            rows.append([float(f[k]) for k in cols])
+    a = np.asarray(rows, float).reshape(-1, 7)
     a = a[np.argsort(a[:, 0])]
-    if len(a) != n:
-        raise SystemExit(f"dump has {len(a)} rows, expected {n}")
+    ids = a[:, 0].astype(int).tolist()
+    if ids != list(range(1, n + 1)):
+        raise SystemExit(f"{path} holds {len(ids)} elements"
+                         + (f" with ids {ids[0]}..{ids[-1]}" if ids else "")
+                         + f"; it must hold the {n} lines of {SURF_FILE}, ids 1..{n}: read "
+                         f"{SURF_FILE} FIRST (a second read_surf numbers its lines after them) "
+                         f"and dump only its group")
     return a
 
 
-# --------------------------------------------------------------------- run
+def deck_gas(text):
+    """What the deck's create_particles line makes, read the way SPARTA reads the deck: the nrho
+    and fnum in effect at that line (SPARTA's defaults are 1 and 1, and a mixture's own nrho wins
+    over the global one), the box's volume (in 2-D its area) and the line's own count. None when
+    the deck uses what this reading does not follow (a variable, a region, a density per cell,
+    cell weights, axisymmetry, more than one create_particles)."""
+    g, mix, box, dim, made, collide = {"nrho": 1.0, "fnum": 1.0}, {}, None, 3, [], False
+    for raw in text.splitlines():
+        t = raw.split("#")[0].split()
+        if not t:
+            continue
+        cmd, a = t[0], t[1:]
+        try:
+            if cmd == "dimension":
+                dim = int(a[0])
+            elif cmd == "boundary" and any("a" in x for x in a):
+                return None
+            elif cmd == "create_box":
+                box = [float(x) for x in a[:6]]
+            elif cmd == "global":
+                if "weight" in a:
+                    return None
+                for k in ("nrho", "fnum"):
+                    if k in a:
+                        g[k] = float(a[a.index(k) + 1])
+            elif cmd == "mixture" and "nrho" in a:
+                mix[a[0]] = float(a[a.index("nrho") + 1])
+            elif cmd == "collide":
+                collide = True
+            elif cmd == "create_particles":
+                if len(a) < 3 or a[1] != "n" or {"region", "density", "custom"} & set(a[3:]):
+                    return None
+                made.append({"mix": a[0], "n": int(a[2]), "nrho": mix.get(a[0], g["nrho"]),
+                             "fnum": g["fnum"]})
+        except (ValueError, IndexError):
+            return None
+    if len(made) != 1 or box is None or len(box) < 6 or made[0]["fnum"] <= 0:
+        return None
+    vol = (box[1] - box[0]) * (box[3] - box[2]) * ((box[5] - box[4]) if dim == 3 else 1.0)
+    return dict(made[0], dim=dim, volume=vol, collide=collide) if vol > 0 else None
+
+
+# ── THE BINARY (served) ─ keep this block. A bare name runs only from PATH, and a SPARTA
+#    built in a checkout is often not on it: measured, the placeholder name died on
+#    FileNotFoundError in two runs.
+_env = os.environ.get("SPARTA_BINARY", "")
+_spa = (SPARTA if Path(SPARTA).is_file() else shutil.which(SPARTA)
+        or (_env if _env and Path(_env).is_file() else None))
+if not _spa:
+    raise SystemExit(f"SPARTA BINARY: {SPARTA!r} is not a file, not a command on PATH, and "
+                     f"SPARTA_BINARY names none. Set SPARTA to the path discover(query='list') prints "
+                     f"for SPARTA, after 'SPARTA at'.")
+SPARTA = _spa
+
+# ── THE DATA FILES (served) ─ keep this block. SPARTA opens every file a deck names
+#    relative to the directory it runs in, and couple() copies the files listed in a
+#    participant's data_files into its work_dir before the first iteration.
+_dist = Path(SPARTA).resolve().parent.parent / "data" if Path(SPARTA).is_file() else None
 for f in (SURF_FILE, SPECIES, VSS):
     if not Path(f).is_file():
-        src = Path(DATA_DIR) / f
-        if not src.is_file():
-            sys.stderr.write(f"missing SPARTA data file {f} (not in cwd, not in "
-                             f"{DATA_DIR}). couple() DOES stage files a deck in work_dir "
-                             f"references -- searching data_dir and data_files first, then "
-                             f"SPARTA_DATA_DIR, then the distribution -- so this is a STANDALONE "
-                             f"run: put the file beside the deck yourself, or pass data_dir.\n")
+        src = next((d / f for d in ([Path(DATA_DIR)] if DATA_DIR else []) + ([_dist] if _dist else [])
+                    if (d / f).is_file()), None)
+        if src is None:
+            sys.stderr.write(f"missing SPARTA data file {f}: not in this directory, not in "
+                             f"DATA_DIR ({DATA_DIR or 'unset'})"
+                             + (f" and not in the SPARTA distribution's {_dist}" if _dist else "")
+                             + ". couple() copies the files listed in this participant's "
+                             "data_files into its work_dir before the first iteration; it does "
+                             "not read the deck for file names. Run standalone with the file "
+                             "beside this script or in DATA_DIR.\n")
             sys.exit(3)
         Path(f).write_bytes(src.read_bytes())
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 
 n_elem, cen = read_surf_elements()
 imp = read_imports()
+
+# ── INTERFACE SELF-CHECK (served) ─ keep this block. Every line of SURF_FILE takes the partner's
+#    temperature and sends its flux to the partner. Measured on a coupled round: a far wall listed
+#    in SURF_FILE took the partner's interface temperature, its own wall model was never bound,
+#    and the gas between two walls at one temperature carried almost no flux.
+_chk_pts = np.asarray((imp or {}).get("coordinates") or [], float)
+if _chk_pts.ndim == 2 and len(_chk_pts) >= 2 and _chk_pts.shape[1] >= 2 and len(cen):
+    _chk_pts = _chk_pts[:, :2]
+    _chk_h = float(np.median(np.linalg.norm(np.diff(_chk_pts, axis=0), axis=1)))
+    _chk_d = np.min(np.linalg.norm(cen[:, None, :] - _chk_pts[None, :, :], axis=2), axis=1)
+    for _a, _b in zip(_chk_pts[:-1], _chk_pts[1:]):           # and to the segments between them
+        _ab = _b - _a
+        if _ab @ _ab > 0:
+            _s = np.clip((cen - _a) @ _ab / (_ab @ _ab), 0.0, 1.0)
+            _chk_d = np.minimum(_chk_d, np.linalg.norm(_a + _s[:, None] * _ab - cen, axis=1))
+    _chk_off = np.where(_chk_d > np.maximum(0.5 * _chk_h, 0.25 * SURF_LEN))[0]
+    if _chk_off.size:
+        raise SystemExit(
+            f"INTERFACE SELF-CHECK: line(s) {', '.join(str(i + 1) for i in _chk_off[:8])} of "
+            f"{SURF_FILE} lie off the interface the partner sent: their midpoints are up to "
+            f"{_chk_d[_chk_off].max():.3g} from its {len(_chk_pts)} interface points (spaced "
+            f"{_chk_h:.3g}). Every line of {SURF_FILE} takes the partner's temperature through "
+            f"{TSURF_IN} and sends its flux to the partner, so {SURF_FILE} holds the interface lines "
+            f"and no other wall. A wall with its own temperature is a box face (boundary s, "
+            f"bound_modify <face> collide <id>) or a second read_surf after {SURF_FILE}'s, with its "
+            f"own group, surf_collide and surf_modify.")
+
 t_wall = sample_on(imp, "values", T_INIT, cen)
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
 write_tsurf(t_wall)
 
 it = 0
@@ -252,48 +448,149 @@ ctr.write_text(str(it + 1))
 seed = SEED if SEED_MODE == "fixed" else SEED + 1000 * (it + 1)
 write_deck(seed)
 
+# ── DECK SELF-CHECK (served) ─ keep this block. It reads the gas the deck's create_particles
+#    line makes before SPARTA runs. Measured on a coupled round: decks that wrote nrho as a count
+#    per cell or as a mass density made 0 particles; one then switched to an explicit count and
+#    ran a gas hundreds of times thinner than its own density, another one tens of thousands of times
+#    denser, whose collisions kept SPARTA busy until the run was killed.
+_gas = deck_gas(Path(DECK).read_text())
+if _gas:
+    _V = f"{_gas['volume']:.4g} (the box's {'area' if _gas['dim'] == 2 else 'volume'})"
+    _made = _gas["nrho"] * _gas["volume"] / _gas["fnum"]
+    _what = (" nrho is the gas's number density, molecules per m^3 (not a mass density, not a count "
+             "per cell); fnum is how many molecules one simulated particle stands for. With n 0 "
+             "SPARTA makes nrho x V / fnum particles, V the flow volume (in 2-D the area: a 2-D cell "
+             "has unit depth), so fnum = nrho x V / (particles per cell x grid cells) gives that many "
+             "in each cell.")
+    if _gas["n"] == 0 and _made < 1.0:
+        raise SystemExit(
+            f"DECK SELF-CHECK: create_particles {_gas['mix']} n 0 makes nrho x V / fnum particles, "
+            f"and with the nrho {_gas['nrho']:.4g} and fnum {_gas['fnum']:.4g} in effect at that line "
+            f"(SPARTA's defaults are 1 and 1 when no global line sets them before it) and V = {_V} "
+            f"that is {_made:.3g}: SPARTA would create no particle and run an empty box." + _what)
+    if _gas["n"] > 0:
+        _dens = _gas["n"] * _gas["fnum"] / _gas["volume"]
+        _apart = (max(_dens / _gas["nrho"], _gas["nrho"] / _dens) if _gas["nrho"] > 0
+                  else float("inf"))
+        if _apart > 10.0:
+            raise SystemExit(
+                f"DECK SELF-CHECK: create_particles {_gas['mix']} n {_gas['n']} makes {_gas['n']} "
+                f"particles in all, not per cell. With fnum {_gas['fnum']:.4g} they are a gas of "
+                f"N x fnum / V = {_dens:.4g} molecules per m^3 (V = {_V}), while the nrho in effect "
+                f"at that line is {_gas['nrho']:.4g}: the deck states two densities {_apart:.3g} "
+                f"times apart." + _what)
+
+# ── THE RUN (served) ─ keep this block. SPARTA's console is passed through: the
+#    per-level run log your task asks for is that console, and a log carrying only
+#    this wrapper's prose cannot establish which code ran on this side.
 Path(FLUX_OUT).unlink(missing_ok=True)
 r = subprocess.run([SPARTA, "-in", DECK], capture_output=True, text=True, timeout=3600)
-if r.returncode != 0 or not Path(FLUX_OUT).is_file():
-    sys.stderr.write(f"SPARTA failed rc={r.returncode}\n{(r.stdout or '')[-1500:]}\n"
-                     f"{(r.stderr or '')[-800:]}\n")
-    sys.exit(1)
-
-# PASS THE SOLVER'S OWN CONSOLE THROUGH. capture_output keeps SPARTA's banner,
-# its step table and its particle counts out of this script's stdout, and the
-# per-level run log your task asks for is exactly that console -- a log carrying
-# only this wrapper's prose cannot establish which code ran on this side.
 if r.stdout:
     print(r.stdout, end="")
 if r.stderr:
     sys.stderr.write(r.stderr)
+if r.returncode != 0 or not Path(FLUX_OUT).is_file():
+    _said = [l.strip() for l in (r.stdout or "").splitlines() if l.startswith("ERROR")]
+    sys.stderr.write(f"SPARTA failed rc={r.returncode}"
+                     + (f": {_said[-1]}" if _said else "")
+                     + ("" if r.returncode else f", and wrote no {FLUX_OUT}: the deck's dump surf "
+                        f"must write that file") + "\n")
+    sys.exit(1)
+
+# ── PARTICLE SELF-CHECK (served) ─ keep this block. SPARTA gives no error when no
+#    grid cell lies on the flow side of a surface line: read_surf prints
+#    "<a> <b> <c> = cells outside/inside/overlapping surfs" with a = 0,
+#    create_particles makes 0 particles, the run ends "with 0 particles" and exits
+#    0, and every tally in the dump is zero. Read from SPARTA's own console (r).
+_chk_con = str(getattr(r, "stdout", "") or "")
+_chk_cells = re.findall(r"^\s*(\d+) (\d+) (\d+) = cells outside/inside/overlapping surfs",
+                        _chk_con, re.M)
+_chk_np = re.findall(r"^Loop time of .* with (\d+) particles", _chk_con, re.M)
+_chk_made = re.findall(r"^Created (\d+) particles", _chk_con, re.M)
+if _chk_cells and int(_chk_cells[-1][0]) == 0:
+    raise SystemExit(
+        f"PARTICLE SELF-CHECK: read_surf reported 0 cells outside the surfaces "
+        f"('{' '.join(_chk_cells[-1])} = cells outside/inside/overlapping surfs'): every grid "
+        f"cell is inside a body, so there is no gas"
+        + (f" (create_particles made {_chk_made[-1]} particles)" if _chk_made else "")
+        + ". SPARTA puts the gas on the side a line's normal points to, N = (0,0,1) x "
+        f"(p2 - p1): walking from p1 to p2, the gas is on your left. Swap p1 and p2 of each "
+        f"line in {SURF_FILE} whose gas is on its right, and run again.")
+if _chk_np and int(_chk_np[-1]) == 0:
+    raise SystemExit(
+        "PARTICLE SELF-CHECK: SPARTA ran to the end with 0 particles, so every tally it wrote "
+        "is zero. "
+        + (f"read_surf reported {int(_chk_cells[-1][0])} cells outside the surfaces, so the "
+           "gas has room; " if _chk_cells else "")
+        + (f"create_particles made {_chk_made[-1]} particles. " if _chk_made else
+           "no create_particles line ran. ")
+        + ("With 'Created 0 particles': create_particles <mix> n 0 makes nrho x V / fnum "
+           "particles, V the flow volume, with the nrho and fnum in effect at that line. SPARTA's "
+           "defaults 1 and 1 hold when no 'global nrho <n> fnum <F>' comes before it, and a nrho "
+           "written as a mass density or as a count per cell makes the count fall below one "
+           "(nrho is molecules per m^3). " if _chk_made and int(_chk_made[-1]) == 0 else
+           "None of them was left at the end; the end-of-run lines 'Boundary exits' and "
+           "'Particles stuck' count where they went. " if _chk_made else "")
+        + "Read the console above before changing anything else.")
+# THE GAS THIS RUN SIMULATED, from SPARTA's own console: particles, grid cells and, with the
+# deck's fnum, the density N x fnum / V. A deck with a collide command whose run made no
+# collision attempt ran a collisionless gas: measured on a coupled round, far fewer particles
+# than grid cells (two particles share a cell too rarely), and a hundred particles per cell that
+# stood for a gas whose nrho was written as a mass density (a near vacuum); both coupled to a
+# wrong flux.
+_chk_grid = re.findall(r"^Created (\d+) child grid cells", _chk_con, re.M)
+_chk_fv = re.findall(r"^\s*\S+\s+(\S+) = cell-wise and global flow volume", _chk_con, re.M)
+_chk_att = re.findall(r"^Collide attempts\s*=\s*(\d+)", _chk_con, re.M)
+if _chk_np and int(_chk_np[-1]) > 0:
+    _n = int(_chk_np[-1])
+    _cells = int(_chk_grid[-1]) if _chk_grid else 0
+    _gasline = f"GAS: {_n} particles" + (f" in {_cells} grid cells ({_n / _cells:.3g} per cell)"
+                                         if _cells else "")
+    if _gas:
+        try:
+            _vol = float(_chk_fv[-1]) if _chk_fv else _gas["volume"]
+        except ValueError:
+            _vol = _gas["volume"]
+        _gasline += (f", each standing for fnum = {_gas['fnum']:.4g} molecules: a gas of N x fnum / V"
+                     f" = {_n * _gas['fnum'] / _vol:.4g} molecules per m^3 (V = {_vol:.4g}, the flow "
+                     f"volume)")
+    print("\n" + _gasline)
+    _collides = any(l.split("#")[0].split()[:1] == ["collide"] for l in Path(DECK).read_text().splitlines())
+    if _collides and _chk_att and int(_chk_att[-1]) == 0:
+        raise SystemExit(
+            f"PARTICLE SELF-CHECK: SPARTA made 0 collision attempts in this run although the deck "
+            f"has a collide command, so its gas never collided: it ran as a free-molecular gas. "
+            f"{_gasline}. SPARTA tries pairs of particles of one grid cell, so a cell with one "
+            f"particle or none makes no pair, and the pairs it tries grow with the gas's density. "
+            f"Compare that density with your gas's number density, and the count per cell with "
+            f"several, before you couple this side.")
 # THE RUN-LOG CONTRACT LINE, in this code's own currency. A DSMC cell refines by
 # PARTICLE COUNT on a fixed grid, not by adding cells, so the `NDOF = <integer>`
-# line the log contract asks for carries the particle count -- SPARTA reports it
-# in the console above, and it is the number that grows between your levels.
-# Print it on a line of its own from whatever your deck actually ran.
+# line the log contract asks for carries the particle count SPARTA reported at the
+# end of the run -- the number that grows between your levels.
+if _chk_np:
+    print(f"\nNDOF = {int(_chk_np[-1])}")
 
 a = parse_dump(FLUX_OUT, n_elem)
-# ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ end
 cx = 0.5 * (a[:, 1] + a[:, 3])
 cy = 0.5 * (a[:, 2] + a[:, 4])
 q_out = a[:, 5]          # etot: net energy flux INTO the wall = OUT of the gas
 t_used = a[:, 6]
 
 # ── EXPORT SELF-CHECK ─ keep this block. An export that is not finite is
-#    worthless however well the iteration behaved, and a field that came out
+#    worthless however well the iteration behaved, and a tally that came out
 #    identically zero still couples, still converges and still hands in tidy
 #    levels. The DSMC tally is the load the solid sees.
 _chk_vals = np.asarray(q_out, float).ravel()
 if not np.isfinite(_chk_vals).all():
-    raise SystemExit("EXPORT SELF-CHECK: non-finite interface values; the "
-                     "solve did not produce a usable field, so nothing was "
-                     "exported")
+    raise SystemExit("EXPORT SELF-CHECK: non-finite etot in the surf dump, so "
+                     "nothing was exported")
 if _chk_vals.size and np.abs(_chk_vals).max() == 0.0:
-    raise SystemExit("EXPORT SELF-CHECK: every exported interface value is "
-                     "exactly zero. That is the no-response answer, not a "
-                     "solve: the partner's data never reached the assembled "
-                     "system. Fix the application; do not couple on")
+    raise SystemExit("EXPORT SELF-CHECK: every exported etot is exactly zero: no "
+                     "particle collision was tallied on these surface elements in "
+                     "the sampling window. Read the 'Created <N> particles' line "
+                     "and the read_surf line '<a> <b> <c> = cells outside/inside/"
+                     "overlapping surfs' in SPARTA's console; do not couple on")
 
 Path("exports.json").write_text(json.dumps({
     "field_name": "wall_temperature",

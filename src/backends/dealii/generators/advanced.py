@@ -626,7 +626,8 @@ int main()
           flow_matrix = 0; flow_rhs = 0;
           FEValues<dim> fev(fe_flow, quad,
             update_values | update_gradients | update_quadrature_points | update_JxW_values);
-          FEValues<dim> fevT(fe_temp, quad, update_values);
+          // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+          FEValues<dim> fevT(fe_temp, quad, update_values | update_quadrature_points);
           const unsigned int dpc = fe_flow.dofs_per_cell;
           FullMatrix<double> lm(dpc, dpc); Vector<double> lr(dpc);
           std::vector<types::global_dof_index> ldi(dpc);
@@ -682,7 +683,8 @@ int main()
         temp_matrix = 0; temp_rhs = 0;
         FEValues<dim> fevT(fe_temp, quad,
           update_values | update_gradients | update_quadrature_points | update_JxW_values);
-        FEValues<dim> fev(fe_flow, quad, update_values);
+        // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+        FEValues<dim> fev(fe_flow, quad, update_values | update_quadrature_points);
         const unsigned int dpc = fe_temp.dofs_per_cell;
         FullMatrix<double> lm(dpc, dpc); Vector<double> lr(dpc);
         std::vector<types::global_dof_index> ldi(dpc);
@@ -1335,8 +1337,9 @@ int main()
       solution.reinit(dof_handler.n_dofs());
 
       QGauss<dim> quadrature(degree + 1);
+      // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
       FEValues<dim> fe_values(fe, quadrature,
-        update_values | update_gradients | update_JxW_values);
+        update_values | update_gradients | update_JxW_values | update_quadrature_points);
       const unsigned int dofs_per_cell = fe.dofs_per_cell;
       FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
       Vector<double> cell_rhs(dofs_per_cell);
@@ -1591,7 +1594,8 @@ int main()
     update_values | update_gradients | update_quadrature_points | update_JxW_values);
   FEFaceValues<dim> fe_f(fe, face_quad,
     update_values | update_quadrature_points | update_normal_vectors | update_JxW_values);
-  FEFaceValues<dim> fe_f_neighbor(fe, face_quad, update_values);
+  // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+  FEFaceValues<dim> fe_f_neighbor(fe, face_quad, update_values | update_quadrature_points);
 
   const unsigned int dpc = fe.dofs_per_cell;
   std::vector<types::global_dof_index> dofs(dpc), dofs_neighbor(dpc);

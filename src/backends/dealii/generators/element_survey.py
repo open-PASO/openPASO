@@ -307,7 +307,8 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
       const Quadrature<dim - 1> qf =
         fe.reference_cell().face_reference_cell(0)
           .template get_gauss_type_quadrature<dim - 1>(deg + 2);
-      FEFaceValues<dim> ff(mapping, fe, qf, update_values | update_JxW_values);
+      // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+      FEFaceValues<dim> ff(mapping, fe, qf, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
         cell->get_dof_indices(idx);
         for (const unsigned int f : cell->face_indices()) {
@@ -336,7 +337,8 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
         ++n_fail; std::fflush(stdout); return;
       }
     } else {
-      FEValues<dim> fa(mapping, fe, qa, update_values | update_JxW_values);
+      // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+      FEValues<dim> fa(mapping, fe, qa, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
         cell->get_dof_indices(idx);
         fa.reinit(cell);
@@ -449,7 +451,8 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
       const Quadrature<dim - 1> qf2 =
         fe.reference_cell().face_reference_cell(0)
           .template get_gauss_type_quadrature<dim - 1>(deg + 4);
-      FEFaceValues<dim> fb(mapping, fe, qf2, update_values | update_JxW_values);
+      // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+      FEFaceValues<dim> fb(mapping, fe, qf2, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
         cell->get_dof_indices(idx);
         for (const unsigned int f : cell->face_indices()) {
@@ -465,7 +468,8 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
         }
       }
     } else {
-      FEValues<dim> fb(mapping, fe, qb, update_values | update_JxW_values);
+      // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
+      FEValues<dim> fb(mapping, fe, qb, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
         cell->get_dof_indices(idx);
         fb.reinit(cell);

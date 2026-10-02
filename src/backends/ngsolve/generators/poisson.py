@@ -154,7 +154,7 @@ KNOWLEDGE = {
             "vector prints [4]. "
             "Measured on -div(K grad u) = f with "
             "K = [[3,-1],[-1,2]] on the unit square, H1 order 1, "
-            "maxh = 1/64, 1936 midpoint probes: the dims=(2,2) "
+            "maxh = 1/64, read at cell-midpoint probes: the dims=(2,2) "
             "form gives max|u| = 7.196098e-02 and an observed "
             "convergence order of 2.069, while "
             "CoefficientFunction([[3,-1],[-1,2]]) gives "

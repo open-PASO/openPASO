@@ -4,11 +4,9 @@ CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1, so an
 iteration-1 fallback is mandatory), writes exports.json LAST and exits 0.
 Needs KratosMultiphysics + ConvectionDiffusionApplication importable in the
-interpreter named in `command`. DO NOT GUESS THAT INTERPRETER: take it from
-`discover(query='list')`, which reports the one this install actually imports
-Kratos with. A system python3 is a common trap — it usually exists, so nothing
-looks wrong, and it raises ModuleNotFoundError because the Kratos build targets
-a different Python version than the system one.
+interpreter named in `command`: take it from `discover(query='list')`, never a
+guessed system python3 (it exists, so nothing looks wrong, and raises
+ModuleNotFoundError because the Kratos build targets another Python version).
 
 THE OTHER HALF OF participant_kratos.py. That file is the DIRICHLET side: it
 imports the partner's `values` (interface temperature), fixes them as nodal
@@ -18,13 +16,13 @@ boundary condition, then exports the interface TEMPERATURE its solve produced,
 which is what a Dirichlet partner consumes.
 
 Physics: steady conduction  -div(K grad T) = f  on one rectangular subdomain of
-a domain split by a straight interface at x = IFACE_X. Top and bottom edges are
-natural (zero flux). The non-interface x-boundary carries a Dirichlet value
-T_OUTER.
+a domain split by a straight interface at x = IFACE_X. The non-interface
+x-boundary carries a Dirichlet value T_OUTER; whether the top and bottom edges
+are held too is FULL_OUTER_DIRICHLET's, from your problem.
 
   x = OUTER_X : Dirichlet T = T_OUTER
   x = IFACE_X : INTERFACE, natural BC = the partner's imported flux
-  top/bottom  : insulated (natural, nothing to do)
+  top/bottom  : held at T_OUTER or natural -- FULL_OUTER_DIRICHLET, from your problem
 
 THE SIGN, WHICH IS THE ONLY THING A NEUMANN PARTICIPANT CAN GET SILENTLY WRONG.
 Every participant exports its outward normal flux density with respect to ITS
@@ -62,10 +60,8 @@ import KratosMultiphysics.ConvectionDiffusionApplication  # noqa: F401
 PARTNER   = "left"        # the partner's `name` in your couple(...) call
 X0, X1    = 0.6, 1.0      # this subdomain's x-extent
 Y0, Y1    = 0.0, 0.4      # this subdomain's y-extent
-IFACE_AXIS = "x"          # WHICH straight line the interface is: "x" -> the line x = IFACE_X
-                          # (the subdomains sit side by side) | "y" -> the line y = IFACE_X
-                          # (they are stacked). Everything below follows from it.
-IFACE_X   = 0.6           # the shared interface; X0/X1 for axis "x", Y0/Y1 for axis "y"
+IFACE_AXIS = "x"          # the line x = IFACE_X; this contract has no other
+IFACE_X   = 0.6           # the shared interface: X0 or X1
 K         = 1.6           # conductivity of THIS subdomain
 
 
@@ -80,16 +76,26 @@ def F_SRC(x, y):
     the outer values.
 
     Unlike its FEniCSx and DUNE siblings, this one is called ONCE PER NODE
-    with SCALAR coordinates (see the SetSolutionStepValue loop below), so
-    write it with plain math or NumPy scalars — do not assume arrays:
+    with SCALAR coordinates, so write it with plain math or NumPy scalars —
+    do not assume arrays:
 
         return 2.0 * np.pi**2 * np.sin(np.pi * x) * np.sin(np.pi * y)
     """
     return 0.0 * x
 
-T_OUTER   = 300.0         # Dirichlet value on the NON-interface x-boundary
-FULL_OUTER_DIRICHLET = False  # True: T_OUTER also on y=Y0,Y1; corners stay outer
-NX, NY    = 20, 16        # this subdomain's OWN mesh; need not match the partner
+T_OUTER   = 295.0         # Dirichlet value on the NON-interface x-boundary
+# WHICH NON-INTERFACE EDGES ARE HELD IS YOUR PROBLEM'S TO SAY, NOT THIS FILE'S:
+# a default here once chose a boundary condition for problems it never saw, and
+# a field obeying the wrong condition converges cleanly with nothing to show it.
+# True if y = Y0 and y = Y1 are held at T_OUTER, False if they are natural (zero
+# flux); the script refuses to run until you set it.
+FULL_OUTER_DIRICHLET = None  # <-- True or False, FROM YOUR PROBLEM STATEMENT
+if FULL_OUTER_DIRICHLET is None:
+    sys.exit("FULL_OUTER_DIRICHLET is unset: say whether the non-interface y-edges "
+             "are held at T_OUTER (True) or natural (False), from your problem "
+             "statement. A default here would be choosing your boundary "
+             "condition for you.")
+NX, NY    = 46, 26        # this subdomain's OWN mesh; need not match the partner
 Q_INIT    = 0.0           # iteration-1 fallback interface flux density
 
 
@@ -103,19 +109,34 @@ def source(x, y):
     return F_SRC(x, y)
 # ─────────────────────────────────────────────────────────────────────────
 
-# ── THE PER-LEVEL RULE (served). A ./config.json {"level": k, "nx": .., "ny": ..}
-#    next to this script overrides NX, NY and names the level; the per-level
-#    dumps below carry that level so the coarse levels survive the fine ones.
-LEVEL = 1
-if Path("config.json").is_file() or os.environ.get("OPENPASO_CONFIG_JSON"):
+# ── THE PER-LEVEL RULE (served). ./config.json names the level and overrides the
+#    mesh, the box, K, F_SRC and T_OUTER; the dumps below carry the level. Write:
+#      {"level": k, "nx": .., "ny": .., "x0": .., "x1": .., "y0": .., "y1": ..,
+#       "iface": "left|right", "k": <diffusivity>,
+#       "source_expr": "<f(x, y), or 0.0>", "outer": <the non-interface value, if any>}
+#    openPASO judges this side's field against them; without them it abstains.
+LEVEL, _REACTION = 1, 0.0
+_cfg = {}
+for _src, _txt in (("config.json", Path("config.json").read_text() if Path("config.json").is_file() else ""),
+                   ("OPENPASO_CONFIG_JSON", os.environ.get("OPENPASO_CONFIG_JSON", ""))):
     try:
-        _cfg = json.loads(Path("config.json").read_text() or "{}") if Path("config.json").is_file() else {}
-        _cfg.update(json.loads(os.environ.get("OPENPASO_CONFIG_JSON") or "{}"))   # a multi-level call's level keys
+        _cfg.update(**json.loads(_txt or "{}"))
         LEVEL = int(_cfg.get("level", LEVEL))
         NX = int(_cfg.get("nx", NX))
         NY = int(_cfg.get("ny", NY))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+        X0 = float(_cfg.get("x0", X0)); X1 = float(_cfg.get("x1", X1))
+        Y0 = float(_cfg.get("y0", Y0)); Y1 = float(_cfg.get("y1", Y1))
+        K = float(_cfg.get("k", K)); T_OUTER = float(_cfg.get("outer", T_OUTER))
+        if _cfg.get("source_expr") is not None:
+            _src = compile(str(_cfg["source_expr"]).replace("^", "**"), "<source_expr>", "eval")
+            F_SRC = lambda x, y, _c=_src: eval(_c, {"__builtins__": {}}, dict(  # noqa: E731
+                x=x, y=y, pi=np.pi, sin=np.sin, cos=np.cos, exp=np.exp, sqrt=np.sqrt)) + 0.0 * x
+        _ifc = str(_cfg.get("iface", "")).lower()
+        IFACE_X = {"left": X0, "right": X1}.get(_ifc, IFACE_X)
+        IFACE_AXIS = "y" if _ifc in ("bottom", "top") else IFACE_AXIS
+        _REACTION = float(_cfg.get("reaction") or 0.0)
+    except (ValueError, TypeError) as _e:
+        raise SystemExit(f"{_src} could not be read ({_e}); nothing was solved")
 
 AX = 0 if IFACE_AXIS == "x" else 1         # the coordinate the interface FIXES
 AL = 1 - AX                                # the coordinate that RUNS ALONG it
@@ -221,9 +242,9 @@ def main():
     so a verification script can `import` this file, call main(), and integrate
     the volume field against a manufactured solution — the coupling itself only
     ever needs the file handshake."""
-    if min(abs(IFACE_X - X0), abs(IFACE_X - X1)) > TOL:
-        sys.exit(f"IFACE_X={IFACE_X} is not an x-boundary of this subdomain "
-                 f"[{X0},{X1}] — nothing is shared with the partner")
+    if IFACE_AXIS != "x" or _REACTION or min(abs(IFACE_X - X0), abs(IFACE_X - X1)) > TOL:
+        sys.exit(f"this side solves -div(K grad T) = f (no reaction) across x = IFACE_X, X0 or X1; "
+                 f"got reaction {_REACTION:g}, axis {IFACE_AXIS}, IFACE_X {IFACE_X} on [{X0},{X1}]")
     # NX < 1 would put the interface column and the outer Dirichlet column on
     # the SAME nodes; the Dirichlet condition wins, the imported flux is
     # discarded, and the run still exits 0 with a plausible-looking export.
@@ -276,7 +297,7 @@ def main():
     for j in range(NY + 1):
         # THE NODAL VALUE IS THE LOAD. FluxCondition2D2N integrates FACE_HEAT_FLUX
         # from its NODES; a condition created without this SetSolutionStepValue
-        # assembles zero, exits 0 and is reported unresponsive (measured 2026-09-11).
+        # assembles zero, exits 0 and is reported unresponsive (measured).
         mp.Nodes[nid[(i_if, j)]].SetSolutionStepValue(
             KM.FACE_HEAT_FLUX, float(q_in[j]))
     props = mp.GetProperties()[1]
@@ -306,13 +327,21 @@ def main():
     #     argument of ResidualBasedLinearStrategy); the conservation self-check
     #     is built from REACTION_FLUX.
 
+    # ── HELD EDGES, END TO END (served) ─ keep. Measured: fills that skipped the
+    #    interface column on the held edges left its two end nodes free.
+    _loose = [_n for _n in mp.Nodes if not _n.IsFixed(KM.TEMPERATURE) and (
+        abs((_n.X, _n.Y)[AX] - OUTER_X) < TOL or (bool(FULL_OUTER_DIRICHLET) and (
+            abs((_n.X, _n.Y)[AL] - ALO) < TOL or abs((_n.X, _n.Y)[AL] - AHI) < TOL)))]
+    if _loose:
+        sys.exit(f"OUTER BOUNDARY: {len(_loose)} node(s) on the edges this side holds are free "
+                 f"(the first at ({_loose[0].X:g}, {_loose[0].Y:g})); every node of them, "
+                 f"{'the interface end nodes included, ' if FULL_OUTER_DIRICHLET else ''}"
+                 f"must be fixed before the solve. Nothing was exported.")
+
     # ── served: the trace is read from the nodes AT x = IFACE_X, checked by
-    #    coordinate before anything is exported. Measured 2026-09-11 on three
-    #    worker scripts written from this contract: two inverted the ON_MAX_X
-    #    test inside their own solve, exported the OUTER column's temperature
-    #    under the interface's coordinates, and nothing else was wrong -- the
-    #    flux, assembled from the conditions, was right in all three. A wrong
-    #    column exits 0 and couples on; this stops it.
+    #    coordinate before anything is exported. Measured: two of three worker
+    #    fills exported the OUTER column's temperature under the interface's
+    #    coordinates; a wrong column exits 0 and couples on, and this stops it.
     _if_nodes = [mp.Nodes[nid[(i_if, j)]] for j in range(NY + 1)]
     _off = [n for n in _if_nodes if abs(n.X - IFACE_X) > TOL]
     if _off:
@@ -325,35 +354,20 @@ def main():
 
     # ── this side's own outward normal flux, from what the CONDITIONS assembled
     #
-    # THE ARGUMENT THIS REPLACES WAS HALF RIGHT. It said the reaction formula
-    # must not be used on a Neumann side because those interface dofs are free,
-    # so r = A u - b is ~0 there and -r/w would export zero. True — but only
-    # because Kratos stores REACTION_FLUX on FIXED dofs alone, and only when
-    # the residual is taken against a load that ALREADY CONTAINS the interface
-    # term. It then fell back to an L2 projection of the elementwise P1
-    # gradient, defended as "acceptable here and only here, because a Dirichlet
-    # partner reads this participant's values, never its normal_fluxes".
-    #
-    # Any reader of the result reads them. The two-sided interface jump is a GATE on a
-    # coupled cell, and this side's export is half of it.
-    #
-    # MEASURED on the 3-D sibling, which had the identical construction, by
-    # imposing q(y,z) = 2 + 3 sin(4y) cos(3z) and asking for it back:
+    # NOT A PROJECTION OF THE GRADIENT. Kratos stores REACTION_FLUX on FIXED dofs
+    # only, so the reaction formula exports zero on these free interface dofs,
+    # and an L2 projection of the elementwise P1 gradient is O(h) where the field
+    # is O(h^2). MEASURED on the 3-D sibling, imposing q(y,z) = 2 + 3 sin(4y)
+    # cos(3z) and asking for it back:
     #     gradient averaging  1.27e+00, 8.37e-01, 3.95e-01   order 0.60, 1.08
     #     assembled conditions 5.16e-01, 1.77e-01, 4.77e-02  order 1.55, 1.89
-    # The projection is O(h) where the field is O(h^2), so it, and not the
-    # physics, sets the interface order any reader will measure.
-    #
-    # AN ECHO OF q_in WOULD NOT DO EITHER, though it is algebraically the exact
-    # answer here: FluxCondition2D2N enforces K grad T . n = FACE_HEAT_FLUX and
-    # FACE_HEAT_FLUX is the partner's array verbatim. An echo never passes
-    # through the discretisation, so applied on the wrong facets or with the
-    # wrong sign it reads the same and the balance gate still reports roundoff.
-    # Summing each condition's own right-hand side is a MEASUREMENT of what
-    # entered the linear system: it is int_Gamma g phi_i ds when the interface
-    # is built correctly and something else the moment it is not. On those rows
-    # the discrete equation gives r_i = +(assembled interface load), so the
-    # outward density is -r_i/w_i — the same expression the Dirichlet side uses.
+    # NOT AN ECHO OF q_in EITHER, though algebraically exact here: an echo never
+    # passes through the discretisation, so applied on the wrong facets or with
+    # the wrong sign it reads the same. Summing each condition's own right-hand
+    # side MEASURES what entered the linear system: int_Gamma g phi_i ds when the
+    # interface is built correctly, something else when not. On those rows
+    # r_i = +(assembled interface load), so the outward density is -r_i/w_i --
+    # the same expression the Dirichlet side uses.
     info = mp.ProcessInfo
     rhs_i = np.zeros(len(mp.Nodes) + 1)
     w_i = np.zeros(len(mp.Nodes) + 1)
@@ -375,8 +389,10 @@ def main():
                  * np.sign(np.where(wq == 0, 1.0, wq)), 0.0)
     if FULL_OUTER_DIRICHLET:
         # Corner reactions also contain the perpendicular outer-boundary flux
-        # and cannot be separated into one interface contribution. Zero it: a corner reaction mixes the perpendicular outer flux and is not a clean interface datum. from grading; retain the points for exchange but not that mixed
-        # reaction.
+        # and cannot be separated into one interface contribution, so the
+        # recovered interface flux at an interface/outer corner is not a clean
+        # datum: retain the corner points for exchange, but zero this mixed
+        # reaction rather than report it as interface flux.
         Q[[0, -1]] = 0.0
 
     # ── CONSERVATION SELF-CHECK: the discrete divergence theorem ──────────────
@@ -384,47 +400,60 @@ def main():
     # sum_i r_i = -sum_i b_i, because sum_i A_ij = int K grad(sum_i phi_i).grad
     # phi_j = 0 (the phi_i are a partition of unity). r vanishes on free rows,
     # so over the fixed rows alone
-    #       sum_{outer} r_i  +  int_Omega f dOmega  +  int_Gamma q_applied ds  =  0
+    #       sum_{fixed} r_i  +  int_Omega f dOmega  +  int_Gamma q_applied ds  =  0
     # exactly, at round-off, for ANY mesh. It is not a discretisation check: it
     # fails only if the flux was applied with the wrong sign or magnitude, or
     # not applied at all — which is precisely the failure mode this side has.
     hy = (Y1 - Y0) / NY
     load_iface = float(hy * (0.5 * q_in[0] + q_in[1:-1].sum() + 0.5 * q_in[-1]))
     load_vol = 0.0
+    _cw = 0                                           # triangles whose nodes run clockwise
     for el in mp.Elements:
         nds = el.GetNodes()
         x = [n.X for n in nds]
         y = [n.Y for n in nds]
         det = (x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0])
+        _cw += det < 0
         load_vol += (0.5 * abs(det)) * sum(
             n.GetSolutionStepValue(KM.HEAT_FLUX) for n in nds) / 3.0
-    react = sum(mp.Nodes[nid[(i_out, j)]].GetSolutionStepValue(KM.REACTION_FLUX)
-                for j in range(NY + 1))
+    if _cw:
+        raise SystemExit(f"MESH: {_cw} of {len(mp.Elements)} triangles run clockwise; order "
+                         f"each element's nodes counter-clockwise.")
+    # Over EVERY fixed row: held y-edges' reactions belong to the sum too.
+    react = sum(n.GetSolutionStepValue(KM.REACTION_FLUX) for n in mp.Nodes
+                if n.IsFixed(KM.TEMPERATURE))
     imb_abs = abs(react + load_vol + load_iface)
     scale = max(abs(react), abs(load_vol), abs(load_iface))
-    # On iteration 1 with Q_INIT = 0 and no source there is no heat flow at all,
-    # every term is round-off, and a RATIO of round-off to round-off is O(1)
-    # while meaning nothing. Say "trivial" instead of printing a 1.0 that reads
-    # as a 100% conservation error.
+    # No heat flow yet (iteration 1, no source): a ratio of round-offs means nothing.
     if scale <= 1e-10 * K * max(1.0, abs(T_OUTER)) * (Y1 - Y0):
         bal = f"balance trivial (no heat flow yet, |imbalance|={imb_abs:.3e})"
     else:
         bal = (f"balance |sum(reactions)+vol+iface| = {imb_abs:.3e} abs / "
                f"{imb_abs / scale:.3e} rel")
+        if imb_abs / scale > 1e-3:        # exact on a right solve (measured 1e-16..4e-15)
+            raise SystemExit(f"CONSERVATION SELF-CHECK: imbalance {imb_abs / scale:.3g} of scale: "
+                             f"the partner's flux entered with the wrong sign or size, or not at "
+                             f"all. Nothing was exported.")
 
     print(f"[kratos neumann] interface n={len(T)} "
           f"q_applied=[{q_in.min():.6g},{q_in.max():.6g}] "
           f"T=[{T.min():.6g},{T.max():.6g}] {bal}")
     print(f"\nNDOF = {len(mp.Nodes)}")
 
+    # ── EXPORT SELF-CHECK (served) ─ keep this block. A singular system leaves NaN
+    #    behind ("Error zero sum"), and nothing else would stop its export.
+    if not (np.isfinite(np.asarray(T, float)).all() and np.isfinite(np.asarray(Q, float)).all()):
+        raise SystemExit("EXPORT SELF-CHECK: non-finite interface values or fluxes -- the solve "
+                         "produced no usable field, so nothing was exported. When Kratos printed "
+                         "'Error zero sum' or 'Error zero in diagonal', the assembled system is "
+                         "singular: an element whose nodes run clockwise (negative area), a node "
+                         "that belongs to no element, or no held value anywhere.")
+
     # PER-LEVEL PERSISTENCE: this level's whole field and its interface trace
     # and flux, named by LEVEL, never overwritten by the next level (exports.json
-    # is). Build the task's per-level files from these.
-    # Interpolate THESE onto the probe points your task names. A file the next
-    # level overwrites cannot carry a mesh study.
-    # A DUMP DEFECT MUST NOT COST YOU THE SOLVE. exports.json is the driver's
-    # proof that this participant succeeded, and it is written after these files,
-    # so an exception here would throw away a coupling iteration that worked.
+    # is): interpolate THESE onto the probe points your task names.
+    # A DUMP DEFECT MUST NOT COST YOU THE SOLVE: exports.json, the driver's proof
+    # that this participant succeeded, is written after these files.
     try:
         with open(f"field_level{LEVEL}.csv", "w") as _f:
             _f.write("x,y,u\n")
@@ -435,14 +464,13 @@ def main():
             for n, t, q in zip(_if_nodes, T, Q):
                 _f.write(f"{float(n.X):.11e},{float(n.Y):.11e},{float(t):.11e},{float(q):.11e}\n")
     except Exception as _dump_exc:
-        # AND LEAVE NO HALF-WRITTEN FILE BEHIND. `open(..., "w")` truncates
-        # before it fails, so a dump that died mid-way leaves a header-only
-        # CSV -- a file that looks like a submission and carries no rows.
+        # AND KEEP BOTH FILES OR NEITHER. A dump that failed part-way can leave a
+        # truncated file, a whole field file with no interface file, or a file an
+        # earlier run wrote, and any of them could be read as this level's result.
+        # So both of this level's files go, whatever they hold.
         for _partial in (f"field_level{LEVEL}.csv", f"interface_level{LEVEL}.csv"):
             try:
-                if Path(_partial).is_file() and len(
-                        Path(_partial).read_text().splitlines()) <= 1:
-                    Path(_partial).unlink()
+                Path(_partial).unlink(missing_ok=True)
             except OSError:
                 pass
         print(f"[kratos_neumann per-level dump] level {LEVEL} dump failed: "

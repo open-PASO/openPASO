@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { clock, tidy } from '../api'
 import type { Ev } from '../types'
 import Markdown from './Markdown'
+import StepOutputs, { stepFolder } from './StepOutputs'
 
 /* The run, in the order it happened.
 
@@ -17,6 +18,15 @@ const SHELL_TOOLS = new Set(['run_bash', 'Bash'])
 
 /** The text inside MCP's content blocks, escapes turned back into characters. */
 function readable(raw: string): string {
+  // Claude Code hands an MCP tool's reply back as {"result": "<the reply>"}: read the
+  // reply, not the wrapper (read as it was, a finished run's verdict came out "failed")
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{"result"')) {
+    try {
+      const w = JSON.parse(trimmed) as Record<string, unknown>
+      if (typeof w.result === 'string' && Object.keys(w).length === 1) return readable(w.result)
+    } catch { /* a shortened copy is not whole JSON: its escapes are read below */ }
+  }
   // MCP hands a result over as a Python repr of text blocks, whose escapes are
   // the wrapper's. Undo those only where the wrapper really is: a result that
   // is plain text keeps its backslashes, so a command or a formula containing
@@ -59,8 +69,14 @@ function solverVerdict(raw: string): { verdict: 'verified' | 'unverified' | 'fai
       const top = verdictOf(doc)
       if (top === 'verified') return { verdict: 'verified', reason: '' }
       if (top) {
-        const why = typeof doc.verification === 'string' ? doc.verification
-          : typeof doc.error === 'string' ? doc.error : ''
+        const err = typeof doc.error === 'string' ? doc.error : ''
+        const named = typeof doc.what_the_error_is === 'string' ? doc.what_the_error_is : ''
+        const note = typeof doc.verification === 'string' ? doc.verification : ''
+        // a failed run is explained by what broke, not by the verification sentence
+        // every failure shares (the server's rule: verdict_reason in webui/outcome.py)
+        const why = top === 'failed'
+          ? (err ? (troubleOf(err) || err) + (named ? ` -- ${named}` : '') : '') || note
+          : note || err
         return { verdict: top, reason: cut(why || (top === 'failed' ? 'the solver reported a failure'
                  : 'ran, but openPASO did not verify the result'), 160) }
       }
@@ -69,10 +85,17 @@ function solverVerdict(raw: string): { verdict: 'verified' | 'unverified' | 'fai
   // Two shapes, the same two the server reads (webui/outcome.py): a run reports
   // "status" plus the verification gate's "trustworthy_result"; a coupling
   // reports no status at all, only the gate's verdict beside "converged".
-  const trusted = /"trustworthy_result"\s*:\s*true/.test(t)
-  const untrusted = /"trustworthy_result"\s*:\s*false/.test(t)
-  const st = t.match(/"status"\s*:\s*"([A-Za-z_]+)"/)
-  const status = st?.[1].toLowerCase() ?? ''
+  // The same rule the server applies to a record it cannot parse: these
+  // matches may belong to different objects, so a mixture is never verified —
+  // pairing a healthy participant with a failed report once read as "Finished".
+  // the quotes may be escaped: a shortened copy of a reply wrapped as {"result": "..."}
+  const flags = [...t.matchAll(/\\?"trustworthy_result\\?"\s*:\s*(true|false)/g)].map((m) => m[1])
+  const trusted = flags.length > 0 && flags.every((f) => f === 'true')
+  const untrusted = flags.includes('false')
+  const statuses = [...t.matchAll(/\\?"status\\?"\s*:\s*\\?"([A-Za-z_]+)\\?"/g)].map((m) => m[1].toLowerCase())
+  // one status in the whole text can only be this report's own; several, and
+  // there is no way to tell whose, so none of them speaks for the whole
+  const status = statuses.length === 1 ? statuses[0] : ''
   const err = t.match(/"(?:error|message)"\s*:\s*"([^"\n]{1,140})/)
   const unverified = { verdict: 'unverified' as const, reason: 'ran, but openPASO did not verify the result' }
   // The status decides first, exactly as the server does. Checking the
@@ -143,7 +166,11 @@ function argLine(tool: string, a?: Record<string, unknown>): string {
     case 'discover': case 'knowledge': case 'examples': case 'web_search': case 'WebSearch': out = s('query'); break
     case 'prepare_simulation': out = [s('solver'), s('physics')].filter(Boolean).join(' · '); break
     default: {
-      const k = Object.keys(a).filter((x) => typeof a[x] !== 'object')
+      // critic_approved and critic_token are what the model claimed, and openPASO does not take
+      // them as evidence: shown in the step line they read as "the critic approved" beside a
+      // verdict that says no review matches
+      const k = Object.keys(a).filter((x) => typeof a[x] !== 'object'
+                                              && x !== 'critic_approved' && x !== 'critic_token')
       out = k.map((x) => `${x}=${String(a[x])}`).join('  ')
     }
   }
@@ -192,15 +219,16 @@ type CallState = 'waiting' | 'running' | 'done' | 'unverified' | 'failed' | 'ski
 type Call = {
   kind: 'call'; id: string; tool: string; agent: string; args?: Record<string, unknown>
   state: CallState; detail: string; result?: string; t0?: number; t1?: number; ending?: boolean
-  /** a review of the work, filed by the one who did the work */
-  selfReview?: boolean
+  /** a review of the work, filed by the one who did the work: no critic came back since the
+      last filed review, or the critic that did said the opposite */
+  selfReview?: 'no critic' | 'overrules the critic'
 }
 type Tally = { tools: number; shell: number; verified: boolean; unverified: boolean
-               solverFailed: string | null; said: boolean }
+               solverFailed: string | null; said: boolean; why: string }
 type Entry =
   | { kind: 'turn' }
   | { kind: 'you'; text: string; files: string[] }
-  | { kind: 'thought'; text: string; final: boolean; outcome?: string }
+  | { kind: 'thought'; text: string; final: boolean; outcome?: string; typed?: string[] }
   | Call
   | { kind: 'aside'; id: string; role: string; task: string; returned: boolean }
   | { kind: 'verdict'; role: string; text: string; reached: boolean }
@@ -208,6 +236,32 @@ type Entry =
   | { kind: 'upload'; name: string; bytes: number }
   | { kind: 'mode'; mode: string }
   | { kind: 'end'; outcome: string; tally: Tally; message?: string; traceback?: string; seconds?: number; left?: number }
+
+/** APPROVED or REJECTED, as a review states it: its VERDICT line first, else the first line
+    that opens with one of the two words. Anything else is neither. */
+function reviewWord(text: string): 'approved' | 'rejected' | null {
+  const t = text || ''
+  const m = t.match(/VERDICT\W{0,4}(APPROVED|REJECTED)/i) || t.match(/^\W{0,4}(APPROVED|REJECTED)\b/im)
+  return m ? (m[1].toUpperCase() === 'APPROVED' ? 'approved' : 'rejected') : null
+}
+
+/** Steps a reply wrote out as text ("[step] tool {...}" then "→ result"). None of them ran.
+    The server's rule (webui/outcome.py typed_steps), mirrored for records it did not stamp. */
+export function typedSteps(text: string): string[] {
+  return Array.from((text || '').matchAll(/^\[(?:[\w/-]+ )?step\] ([\w.-]+)/gm), m => m[1])
+}
+
+/** Was a filed review put on record? Refused filings (by openPASO, or by this interface, which
+    lets only the critic file one) recorded nothing. */
+function reviewReply(raw: string): { accepted: boolean; error: string; rejection: boolean } {
+  const t = readable(raw || '')
+  try {
+    const j = JSON.parse(t)
+    return { accepted: j?.accepted === true, error: String(j?.error || ''), rejection: j?.recorded === 'rejection' }
+  } catch {
+    return { accepted: /"accepted":\s*true/.test(t), error: '', rejection: /"recorded":\s*"rejection"/.test(t) }
+  }
+}
 
 /** Did a sub-agent actually reach a conclusion, or only stop? */
 function concluded(text: string): boolean {
@@ -218,7 +272,7 @@ function concluded(text: string): boolean {
 }
 
 const tally0 = (): Tally => ({ tools: 0, shell: 0, verified: false, unverified: false,
-                               solverFailed: null, said: false })
+                               solverFailed: null, said: false, why: '' })
 
 function build(events: Ev[], live: boolean): Entry[] {
   const out: Entry[] = []
@@ -228,7 +282,9 @@ function build(events: Ev[], live: boolean): Entry[] {
   let stream = ''
   let turns = 0, turnT = 0
   let tally = tally0()
-  let criticSpoke = false      // did a sub-agent actually reach a verdict this turn
+  // did a critic reach a verdict since the last review was filed, and which one
+  let criticSpoke = false
+  let criticSaid: 'approved' | 'rejected' | null = null
   let lastError: Ev | null = null
   const attachedLater = new Set<string>()
   events.forEach((e) => { if (e.type === 'user_msg') (e.attachments || []).forEach((a) => attachedLater.add(a)) })
@@ -236,7 +292,7 @@ function build(events: Ev[], live: boolean): Entry[] {
   for (const e of events) {
     switch (e.type) {
       case 'turn_start':
-        turns += 1; turnT = e.t || 0; lastError = null; tally = tally0(); criticSpoke = false
+        turns += 1; turnT = e.t || 0; lastError = null; tally = tally0(); criticSpoke = false; criticSaid = null
         if (turns > 1) out.push({ kind: 'turn' })
         break
       case 'user_msg':
@@ -272,13 +328,26 @@ function build(events: Ev[], live: boolean): Entry[] {
       case 'tool_result': {
         const c = calls.get(e.call_id || '')
         if (!c) break
-        if (c.tool === 'submit_critic_review' && c.agent === 'main' && !criticSpoke) {
-          // openPASO's gate looks up a review rather than trusting a flag, but
-          // the review it finds is whatever was submitted. Here the model wrote
-          // the review of its own work and filed it — after its critic had
-          // returned nothing at all. The step succeeded; what it means is the
-          // point, and nobody reading this should take it for a second opinion.
-          c.selfReview = true
+        // Claude Code runs its critic with its own sub-agent tool (Agent / Task), not with
+        // openPASO's spawn_subagent: a conclusion that came back that way is a critic's too.
+        // Missing this, a Claude Code run whose critic reviewed twice was told it had
+        // reviewed its own work.
+        if ((c.tool === 'Agent' || c.tool === 'Task') && /critic|review/i.test(JSON.stringify(c.args || {}))
+            && concluded(readable(e.result || ''))) {
+          criticSpoke = true
+          criticSaid = reviewWord(readable(e.result || ''))
+        }
+        if (c.tool === 'submit_critic_review' && c.agent === 'main' && reviewReply(e.result || '').accepted) {
+          // Measured 2026-09-29: the critic came back REJECTED, and the model then filed
+          // "VERDICT: APPROVED" five times, rewriting its script in between, with no critic
+          // run after the first. A filed review is the critic's only when a critic came back
+          // since the last one was filed, and only if it does not say the opposite. (Since
+          // 2026-09-30 this interface refuses the main agent's filing; this is for records
+          // written before, and for Claude Code runs, whose calls it does not carry.)
+          const filed = reviewWord(String(c.args?.findings ?? ''))
+          if (!criticSpoke) c.selfReview = 'no critic'
+          else if (filed === 'approved' && criticSaid === 'rejected') c.selfReview = 'overrules the critic'
+          criticSpoke = false
         }
         c.result = e.result || ''; c.t1 = e.t
         if (c.ending || c.result.startsWith('[The user ended this step')) {
@@ -292,12 +361,23 @@ function build(events: Ev[], live: boolean): Entry[] {
           // for a record written before the server stamped its verdict
           const stamped = e.verdict as 'verified' | 'unverified' | 'failed' | undefined
           const own = solverVerdict(c.result)
-          const v = stamped ? { verdict: stamped, reason: stamped === own.verdict ? own.reason
-                                : stamped === 'verified' ? '' : own.reason } : own
+          const said = typeof e.why === 'string' ? e.why.trim() : ''
+          const v = stamped
+            ? { verdict: stamped, reason: said || (stamped === own.verdict ? own.reason
+                : stamped === 'verified' ? '' : own.reason) }
+            : own
+          if (said) tally.why = said
           c.detail = v.reason
           if (v.verdict === 'verified') { c.state = 'done'; tally.verified = true }
           else if (v.verdict === 'unverified') { c.state = 'unverified'; tally.unverified = true }
           else { c.state = 'failed'; tally.solverFailed = tally.solverFailed ?? v.reason }
+        } else if (c.tool === 'submit_critic_review' && reviewReply(c.result).rejection) {
+          // a critic's rejection is on record: it blocks that exact text until it changes
+          c.state = 'unverified'
+          c.detail = 'the critic rejected this setup, and the rejection is on record'
+        } else if (c.tool === 'submit_critic_review' && !reviewReply(c.result).accepted) {
+          c.state = 'failed'
+          c.detail = cut(tidy('not recorded: ' + (reviewReply(c.result).error || 'the review was refused')), 160)
         } else {
           const bad = troubleOf(c.result)
           c.state = bad === 'you skipped this step' ? 'skipped' : bad ? 'failed' : 'done'
@@ -333,12 +413,20 @@ function build(events: Ev[], live: boolean): Entry[] {
         // returned nothing, not an error, and not a researcher's summary
         if (asides.get(e.sa_id || '')?.role === 'critic' && concluded(e.result || '')) {
           criticSpoke = true
+          criticSaid = reviewWord(e.result || '')
         }
         // shown where it came back, after the sub-agent's own steps
         const a = asides.get(e.sa_id || '')
         const text = (e.result || '').trim()
         const reached = concluded(text)
         if (a) a.returned = true
+        // the sub-agent's last message IS what it returns: shown once, as its conclusion
+        // (it was printed twice, as a message and again under "What the critic concluded")
+        for (let j = out.length - 1; j >= 0; j--) {
+          const x = out[j]
+          if (x.kind === 'thought' && x.text.trim() === text) { out.splice(j, 1); break }
+          if (x.kind === 'aside' || x.kind === 'turn' || x.kind === 'you') break
+        }
         out.push({ kind: 'verdict', role: a?.role || 'sub-agent', text, reached })
         break
       }
@@ -379,7 +467,11 @@ function build(events: Ev[], live: boolean): Entry[] {
           for (let i = out.length - 1; i >= 0; i--) {
             const x = out[i]
             if (x.kind === 'call' || x.kind === 'turn' || x.kind === 'you' || x.kind === 'verdict') break
-            if (x.kind === 'thought') { x.final = true; x.outcome = outcome; break }
+            if (x.kind === 'thought') {
+              x.final = true; x.outcome = outcome
+              x.typed = e.typed_steps && e.typed_steps.length ? e.typed_steps : typedSteps(x.text)
+              break
+            }
           }
         }
         out.push({ kind: 'end', outcome, tally: { ...tally },
@@ -410,7 +502,12 @@ function endText(x: Extract<Entry, { kind: 'end' }>): string {
     case 'completed':
       return `Finished${x.seconds ? ` in ${clock(x.seconds)}` : ''}. An openPASO solver ran and openPASO verified its result.`
     case 'unverified':
-      return `Ended${after}. A solver ran, but openPASO did not verify its result. Check the numbers before you rely on them.`
+      // the solver's own account of what it checked and what it found: a ladder
+      // whose levels are each sound but whose mesh never refined needs that
+      // distinction, not a sentence that fits every unverified result alike
+      return t.why
+        ? `Ended${after}. A solver ran, but openPASO did not verify its result. What it reported:`
+        : `Ended${after}. A solver ran, but openPASO did not verify its result. Check the numbers before you rely on them.`
     case 'failed':
       return `Failed${after}.`
     case 'interrupted':
@@ -431,9 +528,9 @@ const GLYPH: Record<CallState, string> = {
   waiting: '▷', running: '◐', done: '✓', unverified: '△', failed: '✕', skipped: '⊘', abandoned: '■',
 }
 
-function CallRow({ c, onDecide, onEndStep, othersRunning, now }: {
+function CallRow({ c, onDecide, onEndStep, othersRunning, now, runId }: {
   c: Call; onDecide?: (id: string, ok: boolean) => void; onEndStep?: (id: string) => void
-  othersRunning?: boolean; now: number
+  othersRunning?: boolean; now: number; runId?: string
 }) {
   const [open, setOpen] = useState(false)
   const [full, setFull] = useState(false)
@@ -460,8 +557,9 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now }: {
       </div>
       {c.selfReview && (
         <p className="pl-7 mt-1.5 text-[14px] text-coral">
-          The model wrote this review of its own work and filed it. No critic reached a verdict in this
-          turn, so nothing here is a second opinion.
+          {c.selfReview === 'no critic'
+            ? 'The model wrote this review of its own work and filed it. No critic reached a verdict since the last review was filed, so nothing here is a second opinion.'
+            : 'The critic’s last verdict was REJECTED. This review says APPROVED, and the model wrote it: it overrules the critic, it is not a second opinion.'}
         </p>
       )}
       {sub
@@ -520,6 +618,11 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now }: {
           {readable(c.result)}
         </pre>
       )}
+      {runId && c.result && SOLVER_TOOLS.has(c.tool) && (c.state === 'done' || c.state === 'unverified' || c.state === 'failed') && (() => {
+        const folder = stepFolder(readable(c.result), runId)
+        return folder ? <StepOutputs runId={runId} sub={folder}
+                                     verdict={c.state === 'done' ? 'verified' : c.state} /> : null
+      })()}
     </div>
   )
 }
@@ -582,9 +685,10 @@ function activity(entries: Entry[], events: Ev[], now: number): { text: string; 
   return { text: `${inAside ? 'The sub-agent is thinking…' : 'Thinking about the next step…'} ${clock(lastT)}`, warn: false }
 }
 
-export default function Transcript({ events, live, showReasoning, onDecide, onEndStep, modelKind, now = Date.now() }: {
+export default function Transcript({ events, live, showReasoning, onDecide, onEndStep, modelKind, now = Date.now(), runId }: {
   events: Ev[]; live: boolean; showReasoning: boolean
   onDecide?: (id: string, ok: boolean) => void; onEndStep?: (id: string) => void; modelKind?: string; now?: number
+  runId?: string
 }) {
   const entries = useMemo(() => build(events, live), [events, live])
   const running = entries.filter((e) => e.kind === 'call' && e.state === 'running').length
@@ -646,6 +750,14 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
                           : "no solver result in this turn — any numbers below are the model's own"}
                       </span>
                     )}
+                    {e.typed && e.typed.length > 0 && (
+                      // a step typed into the reply looks like one that ran, result and all
+                      <span className="text-[13px] text-coral basis-full">
+                        {e.typed.length === 1
+                          ? `This turn wrote a ${e.typed[0]} step out as text. It never ran; the result shown with it came from no tool.`
+                          : `This turn wrote ${e.typed.length} steps out as text (${Array.from(new Set(e.typed)).join(', ')}). None of them ran; the results shown with them came from no tool.`}
+                      </span>
+                    )}
                   </div>
                 )}
                 <Fold text={e.text} lines={e.final ? 40 : 4}
@@ -656,7 +768,7 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
             return (
               <li key={e.id || i}>
                 <CallRow c={e} onDecide={onDecide} onEndStep={live ? onEndStep : undefined}
-                         othersRunning={running > 1} now={now} />
+                         othersRunning={running > 1} now={now} runId={runId} />
               </li>
             )
           case 'aside':
@@ -701,6 +813,14 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
             return (
               <li key={i} className={`mt-2 mb-2 rounded-[8px] px-5 py-3.5 border ${bad ? 'border-bad/40 bg-bad/[0.06]' : warn ? 'border-coral/40 bg-coral/[0.04]' : 'line bg-soft'}`}>
                 <p className={`text-[15px] ${bad ? 'text-ink' : 'text-ink2'}`}>{endText(e)}</p>
+                {e.tally.why && (
+                  // the solver's own account, whole and folded rather than cut
+                  // to a first sentence: the finding that explains a ladder
+                  // ("your own logs imply a mesh ladder that was not halved")
+                  // sat three thousand characters in, and an excerpt lost it
+                  <Fold text={e.tally.why} lines={3}
+                        className="mt-2 text-[15px] leading-[1.55] text-ink2" />
+                )}
                 {bad && e.message && <p className="mt-2 text-[15px] text-body break-words">{tidy(e.message)}</p>}
                 {advice && <p className="mt-2 text-[15px] text-ink2">{advice}</p>}
                 {e.left ? <p className="mt-2 text-[14px] text-bad">{e.left} process{e.left > 1 ? 'es' : ''} could not be ended; check the machine.</p> : null}

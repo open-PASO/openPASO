@@ -169,11 +169,22 @@ PER_CODE_SIGNATURES = {
     ],
     # dealii::LogStream's `DEAL:` sigil plus the `::`-delimited prefix stack.
     # The wording is "Convergence step N value X", not "converged in N".
+    # THE LIBRARY'S VERSION LINE. The deal.II programs openPASO serves print, before
+    # anything else, deal.II's package name, version and git revision from the
+    # library's own headers through its log stream, at the empty prefix:
+    #     DEAL::deal.II 9.8.0-pre, git revision 87abfb5eef18ca4ff650c61fa1e0b1db10174765
+    # (measured on this install). With a direct solve that is the only line of
+    # deal.II's own in the console, and without this pattern such a side was
+    # proven by the code-agnostic NDOF line alone (measured on a steady coupled
+    # round: five of five cells). Narration does not take the form: the `DEAL::`
+    # sigil at the start of the line, the library's own spelling, and a hex
+    # revision of 7 to 40 digits.
     "dealii": [
         r"^DEAL:\w+::Convergence step (\d+) value [-\d.eE+]+$",
         r"^DEAL:\w+::Check (\d+)\t[-\d.eE+]+$",
         r"^DEAL:\w+::Starting value [-\d.eE+]+$",
         r"^\| Section\s+\| no\. calls \|\s+wall time \| % of total \|$",
+        r"^DEAL::deal\.II (\d+\.\d+\.\d+[\w.+-]*), git revision ([0-9a-f]{7,40})[ \t]*$",
     ],
     # 4C: pipe-delimited fixed field order with its own abbreviations
     # (nlniter/wct), Teuchos TimeMonitor rows labelled with 4C C++ namespace
@@ -626,10 +637,9 @@ def per_level_field_state(work: Path) -> dict:
     C2_27b_MCP_seed502 and C2_27b_BARE_seed502 are the pair that forced this.
     Both wrote fifty rows of exactly 1.0 at all three levels and both were
     graded FABRICATED_NO_RUN. The bare one's fields are identically zero at
-    every level. The openPASO one's side A peaks at 1.265e-01, 1.320e-01,
-    1.323e-01 and its side B at 2.280e-03, 2.334e-03, 2.342e-03 -- three
-    distinct, monotonically settling values per side, within a few percent of
-    an independently computed reference. It ran. What it invented was one
+    every level. The openPASO one's side peaks took three distinct, monotonically
+    settling values per side, within a few percent of an independently
+    computed reference. It ran. What it invented was one
     required file.
 
     The run still fails: inventing a deliverable is an integrity violation
@@ -946,7 +956,10 @@ def coupling_evidence(work: Path, iface_tol: float = 1e-6,
     if claimed_iterations is not None and hist:
         finest = max(hist)
         got = len(hist[finest])
-        if got != claimed_iterations:
+        # THE DRIVER WRITES NO ROW FOR ITS FIRST ITERATION (there is no previous exchange to
+        # measure against), so N iterations leave N - 1 rows. Measured: every correct cell of
+        # one round drew "claims 19 but ... has 18 rows".
+        if got not in (claimed_iterations, claimed_iterations - 1):
             count_note = (
                 f"RESULT.txt claims COUPLING_ITERATIONS={claimed_iterations} "
                 f"but the finest-level history has {got} rows — recorded as a "

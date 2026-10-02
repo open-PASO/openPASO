@@ -18,7 +18,7 @@ python check_install.py
 
 ## What openPASO knows for NGSolve
 
-21 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
+22 kinds of problem. Ask for any of them in plain words; the names below are what the model uses internally.
 
 | Physics | Description | Dimensions | Templates |
 |---|---|---|---|
@@ -39,6 +39,7 @@ python check_install.py
 | `phase_field` | Phase-field: Allen-Cahn (interface motion) and fracture (Bourdin staggered scheme) | 2-D | `2d`, `fracture_2d` |
 | `plasticity` | Elasto-plasticity with isotropic hardening (J2/von Mises) | 2-D | `2d` |
 | `poisson` | Poisson equation -Δu = f with arbitrary-order H1 elements | 2-D, 3-D | `2d`, `3d` |
+| `space_survey` | Assemble a mass form on every NGSolve space and verify it is symmetric positive definite | 2-D | `2d` |
 | `stokes` | Stokes flow with Taylor-Hood P2/P1 or HDG | 2-D, 3-D | `2d`, `2d_hdg` |
 | `surface_pde` | PDE on curved surface manifold (Laplace-Beltrami) | 3-D | `3d` |
 | `thermal_structural` | Coupled thermal-structural (heat -> elasticity with thermal strain) | 2-D | `2d` |
