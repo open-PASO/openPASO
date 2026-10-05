@@ -38,10 +38,30 @@ class TestResolveDottedPath(unittest.TestCase):
         self.assertTrue(resolve_dotted_path("numpy.linalg.norm", "numpy"))
 
     def test_lazy_submodule_fallback(self):
-        # numpy.fft is a submodule not guaranteed to be exposed as an
-        # attribute by numpy.__init__ on every version -- this is the
-        # exact getattr-then-import_module path the PR-#7 fix added.
-        self.assertTrue(resolve_dotted_path("numpy.fft.fft", "numpy"))
+        # A package whose __init__ does not import its child: the child is
+        # NOT an attribute until imported, so only the getattr-then-
+        # import_module fallback (the PR-#7 fix) can resolve the path.
+        # numpy.fft could not show this: where numpy exposes fft, getattr
+        # resolves it and the test passed with the fallback removed.
+        import importlib
+        import tempfile
+        import uuid
+        name = f"lazy_pkg_{uuid.uuid4().hex}"
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / name
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text("")
+            (pkg / "child.py").write_text("def leaf():\n    return 1\n")
+            sys.path.insert(0, tmp)
+            try:
+                root = importlib.import_module(name)
+                self.assertFalse(hasattr(root, "child"))
+                self.assertTrue(resolve_dotted_path(f"{name}.child.leaf", name))
+                self.assertFalse(resolve_dotted_path(f"{name}.child.missing", name))
+            finally:
+                sys.path.remove(tmp)
+                for mod in [m for m in sys.modules if m == name or m.startswith(name + ".")]:
+                    del sys.modules[mod]
 
     def test_bare_root(self):
         self.assertTrue(resolve_dotted_path("numpy", "numpy"))

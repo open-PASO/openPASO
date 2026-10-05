@@ -115,7 +115,9 @@ def _fourc_env() -> str:
     the caller's LD_LIBRARY_PATH holds the directory, and then the command
     clears it the way the backend's own runs do. A Spack set to
     `shared_linking: runpath` would otherwise load the source build's
-    libraries; the RPATH build measured here loads none of them either way."""
+    libraries; the RPATH build measured here loads none of them either way. A
+    source build's command carries the same library path its runs get: the
+    dependency directory first, then what the caller's LD_LIBRARY_PATH holds."""
     try:
         from backends.fourc.backend import FOURC_DEPENDENCY_LIB, fourc_library_env
     except Exception:                                  # noqa: BLE001
@@ -123,11 +125,14 @@ def _fourc_env() -> str:
     binary = _resolve_one("{FOURC_BINARY}")
     if os.path.isfile(binary):
         needed = fourc_library_env(binary).get("LD_LIBRARY_PATH", "")
-        if FOURC_DEPENDENCY_LIB not in needed.split(":"):
-            inherited = [p.rstrip("/") for p in os.environ.get("LD_LIBRARY_PATH", "").split(":")]
-            if FOURC_DEPENDENCY_LIB not in inherited:
-                return ""
-            return f"LD_LIBRARY_PATH={shlex.quote(needed)} " if needed else "env -u LD_LIBRARY_PATH "
+        if FOURC_DEPENDENCY_LIB in needed.split(":"):
+            # A source build: its runs' library path, the dependency directory first and the
+            # inherited directories after it, so a build that also needs those starts here too.
+            return f"LD_LIBRARY_PATH={shlex.quote(needed)} "
+        inherited = [p.rstrip("/") for p in os.environ.get("LD_LIBRARY_PATH", "").split(":")]
+        if FOURC_DEPENDENCY_LIB not in inherited:
+            return ""
+        return f"LD_LIBRARY_PATH={shlex.quote(needed)} " if needed else "env -u LD_LIBRARY_PATH "
     return f"LD_LIBRARY_PATH={FOURC_DEPENDENCY_LIB} "
 
 
