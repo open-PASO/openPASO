@@ -91,12 +91,26 @@ class LowMachGenerator(BaseGenerator):
                             ),
                             "range": "> 0",
                         },
+                        "SHC": {
+                            "description": (
+                                "Specific heat capacity at constant "
+                                "pressure c_p [J/(kg K)]; required"
+                            ),
+                            "range": "> 0",
+                        },
                         "PRANUM": {
                             "description": (
                                 "Prandtl number Pr = mu * c_p / k "
                                 "(ratio of momentum to thermal diffusivity)"
                             ),
                             "range": "> 0 (air ~0.71, water ~7)",
+                        },
+                        "THERMPRESS": {
+                            "description": (
+                                "(Initial) thermodynamic pressure "
+                                "[J/m^3]; required"
+                            ),
+                            "range": "> 0",
                         },
                         "GASCON": {
                             "description": (
@@ -407,7 +421,9 @@ class LowMachGenerator(BaseGenerator):
                   REFVISC: <reference_viscosity>
                   REFTEMP: <reference_temperature>
                   SUTHTEMP: <sutherland_temperature>
+                  SHC: <specific_heat_capacity_cp>
                   PRANUM: <prandtl_number>
+                  THERMPRESS: <initial_thermodynamic_pressure>
                   GASCON: <specific_gas_constant>
 
             # == Initial condition functions ====================================

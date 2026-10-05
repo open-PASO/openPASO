@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -96,11 +97,21 @@ def _find_sparta_binary() -> Optional[str]:
                 cand = child / leaf
                 if cand.is_file():
                     return str(cand)
+    # Spack. Upstream Spack's `sparta` is an unrelated bioinformatics tool;
+    # openPASO ships the DSMC recipe as `sparta-dsmc` (data/spack).
+    from core.spack import installed_prefix   # noqa: PLC0415
+    prefix = installed_prefix("sparta-dsmc")
+    if prefix is not None:
+        for name in ("spa_serial", "spa_mpi"):
+            cand = prefix / "bin" / name
+            if cand.is_file():
+                return str(cand)
     return None
 
 
 def _sparta_data_dirs(binary: Optional[str] = None,
-                      extra_dirs: tuple | list = ()) -> list[Path]:
+                      extra_dirs: tuple | list = (),
+                      example: Optional[str] = None) -> list[Path]:
     """Candidate dirs holding SPARTA data files (*.species, *.vss, data.*).
 
     The bundled example decks reference data files (`species ar.species Ar`,
@@ -109,7 +120,8 @@ def _sparta_data_dirs(binary: Optional[str] = None,
     JSON. Without staging them the deck dies with e.g.
     'Cannot open species file ar.species' (verified on a macOS build).
     We locate the distribution relative to the binary
-    (src/spa_serial -> repo root) plus SPARTA_ROOT.
+    (src/spa_serial -> repo root; bin/spa_serial -> share/sparta in an
+    installed prefix) plus SPARTA_ROOT.
 
     Search ORDER matters: explicit per-call ``extra_dirs`` (a task's own
     data dir) come first, then SPARTA_DATA_DIR (colon-separated env, same
@@ -127,18 +139,46 @@ def _sparta_data_dirs(binary: Optional[str] = None,
     for d in data_env.split(os.pathsep):
         if d and Path(d).is_dir() and Path(d) not in dirs:
             dirs.append(Path(d))
-    root_env = os.environ.get("SPARTA_ROOT", "")
-    if root_env and Path(root_env).is_dir():
-        dirs.append(Path(root_env))
+
+    def _has_data(repo: Path) -> bool:
+        return (repo / "data").is_dir() or (repo / "examples").is_dir()
+
+    # An installed prefix (openPASO's Spack recipe) ships the data of exactly
+    # this binary under share/sparta: <prefix>/bin/spa_serial ->
+    # <prefix>/share/sparta. It goes before SPARTA_ROOT, which may name an
+    # older checkout whose species and surface files do not belong to this
+    # binary.
+    parent: Optional[Path] = None
     if binary:
         try:
-            # <repo>/src/spa_serial -> <repo>
-            repo = Path(binary).resolve().parent.parent
-            if ((repo / "data").is_dir() or (repo / "examples").is_dir()) \
-                    and repo not in dirs:
-                dirs.append(repo)
+            parent = Path(binary).resolve().parent.parent
         except OSError:
-            pass
+            parent = None
+    dist: list[Path] = []
+    if parent is not None and _has_data(parent / "share" / "sparta") \
+            and parent / "share" / "sparta" not in dirs:
+        dist.append(parent / "share" / "sparta")
+    root_env = os.environ.get("SPARTA_ROOT", "")
+    if root_env and Path(root_env).is_dir() and Path(root_env) not in dirs \
+            and Path(root_env) not in dist:
+        dist.append(Path(root_env))
+    # <repo>/src/spa_serial -> <repo>
+    if parent is not None and _has_data(parent) and parent not in dirs \
+            and parent not in dist:
+        dist.append(parent)
+    # A deck that IS one of SPARTA's own examples names its files relative to
+    # that example's directory, and some of them differ from the same-named file
+    # in data/: examples/surf_react_heatflux/air.surf comments out reactions
+    # that data/air.surf keeps, and with data/air.surf the deck stops with
+    # "Surface reaction probability for a species > 1.0". So the example's own
+    # directory goes before the distribution's generic files (not before a
+    # task's own data dirs).
+    if example:
+        for d in dist:
+            ex = d / "examples" / example
+            if ex.is_dir() and ex not in dirs:
+                dirs.append(ex)
+    dirs.extend(dist)
     return dirs
 
 
@@ -162,6 +202,13 @@ def _deck_data_refs(deck: str) -> set[str]:
             wanted.add(toks[1])
         elif toks[0] == "react" and len(toks) >= 3:
             wanted.add(toks[2])
+        elif toks[0] == "fix" and len(toks) >= 6 and toks[2] == "emit/face/file":
+            # `fix ID emit/face/file mix-ID face filename section-ID ...`: the
+            # inflow file (fix_emit_face_file.cpp reads arg[4]). Its name carries
+            # no data-file suffix (data.beam, flow.face), so nothing below finds
+            # it; measured: the served surf_collide deck stopped with "Cannot
+            # open inflow file data.beam" (fix_emit_face_file.cpp:520) (line 733 in 27Aug2026).
+            wanted.add(toks[5])
         elif toks[0] == "surf_react" and len(toks) >= 4 and toks[2] in ("prob", "adsorb"):
             # `surf_react ID prob <file>` / `surf_react ID adsorb ... <file>`: the surface
             # reaction file. Measured 2026-09-24: a served deck's `surf_react srprob prob air.surf`
@@ -181,6 +228,26 @@ def _looks_like_data_file(tok: str) -> bool:
     return tok.lower().endswith(_DATA_FILE_SUFFIXES) and not tok.startswith(("v_", "c_", "f_", "${"))
 
 
+# The first line generate_input puts on a deck it takes from SPARTA's own
+# examples; a deck that keeps it is staged from that example's directory first.
+_EXAMPLE_MARKER = "# SPARTA example deck examples/{example}/{name}"
+_EXAMPLE_MARKER_RE = re.compile(r"^#\s*SPARTA example deck examples/([^/\s]+)/\S+")
+
+
+def _deck_origin_example(deck: str) -> Optional[str]:
+    """The upstream examples/<dir> a deck comes from: named by the marker line,
+    or recognised as one of the bundled example decks verbatim; else None."""
+    for line in deck.splitlines():
+        m = _EXAMPLE_MARKER_RE.match(line.strip())
+        if m:
+            return m.group(1)
+    text = deck.strip()
+    for example, decks in _KB.get("example_templates", {}).items():
+        if any(text == d.strip() for d in decks.values()):
+            return example
+    return None
+
+
 def stage_deck_data_files(deck: str, work_dir: Path,
                           binary: Optional[str] = None,
                           extra_dirs: tuple | list = ()) -> dict:
@@ -190,15 +257,17 @@ def stage_deck_data_files(deck: str, work_dir: Path,
     (SpartaBackend.run) AND by the coupled path (the couple() tool),
     which previously did NO staging at all: a SPARTA participant deck
     run by the coupling driver in a fresh work_dir died with
-    'Cannot open species file ar.species' (../particle.cpp:711).
+    'Cannot open species file ar.species' (../particle.cpp:711) (line 791 in 27Aug2026).
 
     Resolution per reference:
       1. already present in work_dir -> keep (never overwrite),
       2. the reference itself is an existing path (absolute or relative
          to a search dir) -> copy it,
       3. basename lookup through ``extra_dirs`` (task data dir),
-         SPARTA_DATA_DIR, SPARTA_ROOT, then the distribution's data/ and
-         examples/ trees.
+         SPARTA_DATA_DIR, then -- for a deck that is one of SPARTA's own
+         examples (marker line or verbatim) -- that example's directory,
+         then SPARTA_ROOT and the distribution's data/ and examples/
+         trees.
 
     Returns {"staged": {name: source_path}, "missing": [refs]}.
     """
@@ -209,7 +278,8 @@ def stage_deck_data_files(deck: str, work_dir: Path,
     wanted = _deck_data_refs(deck)
     if not wanted:
         return {"staged": staged, "missing": missing}
-    search_dirs = _sparta_data_dirs(binary, extra_dirs=extra_dirs)
+    search_dirs = _sparta_data_dirs(binary, extra_dirs=extra_dirs,
+                                    example=_deck_origin_example(deck))
     for ref in wanted:
         name = Path(ref).name
         dest = work_dir / name
@@ -311,7 +381,7 @@ _TALLY_SAMPLING = (
     "ARGUMENT LIST: `fix ave/grid` and `fix ave/surf` take a group ID; "
     "`fix ave/time` DOES NOT — `fix <ID> ave/time <Nevery> <Nrepeat> <Nfreq> "
     "c_<C>[*] mode vector`. A group there fails with 'ERROR: No values in fix "
-    "ave/time command (../fix_ave_time.cpp:69)'."
+    "ave/time command (../fix_ave_time.cpp:69)' (line 70 in 27Aug2026)."
 )
 
 _SEQUENCE_FIRST = """\
@@ -574,7 +644,10 @@ class SpartaBackend(SolverBackend):
             deck = decks[primary]
             for k, v in (params or {}).items():
                 deck = deck.replace(f"${{{k}}}", str(v))
-            return deck
+            # The marker tells run() which example directory to stage the
+            # deck's data files from (see _sparta_data_dirs).
+            return (_EXAMPLE_MARKER.format(example=variant, name=primary)
+                    + "\n" + deck)
         available = ", ".join(sorted(
             k for k in GENERATORS if k.startswith(physics + "_")))
         raise ValueError(f"Unknown variant '{variant}' for physics "
@@ -601,13 +674,13 @@ class SpartaBackend(SolverBackend):
             # A '&' with no line after it leaves the last command incomplete.
             # SPARTA does NOT wave this through: 'run 10 &' as the final line
             # of an otherwise valid deck aborts with
-            # 'ERROR: Illegal run command (../run.cpp:103)'. Joining without
+            # 'ERROR: Illegal run command (../run.cpp:103)' (line 152 in 27Aug2026). Joining without
             # this check turned that abort into a silent validate_input pass.
             errors.append(
                 "Deck ends with a dangling '&' line continuation — the last "
                 "command is never completed. SPARTA aborts on this (e.g. "
                 "'run 10 &' as the final line gives 'ERROR: Illegal run "
-                "command (../run.cpp:103)').")
+                "command (../run.cpp:103)', line 152 in 27Aug2026).")
             joined.append(buf.rstrip())
         nonblank = joined
         if not nonblank:
@@ -616,7 +689,7 @@ class SpartaBackend(SolverBackend):
         # The parser surface is the 66 commands the BUILD accepts, NOT the 121
         # documentation-page names in _KB['commands'] — 55 of those (compute_grid,
         # fix_ave_surf, dump_image, surf_react_adsorb, suffix, ...) are doc filenames
-        # that the binary rejects with "ERROR: Unknown command: ... (../input.cpp:244)".
+        # that the binary rejects with "ERROR: Unknown command: ... (../input.cpp:244) (line 247 in 27Aug2026)".
         # Validating against the doc index waved those through. (Fixed 2026-08-03 after
         # feeding each form to spa_serial.)
         surface = _KB.get("command_surface", {})
@@ -658,7 +731,9 @@ class SpartaBackend(SolverBackend):
         # make libprecice visible for coupled runs (harmless otherwise)
         env["LD_LIBRARY_PATH"] = _PRECICE_LIB + ":" + env.get("LD_LIBRARY_PATH", "")
         if "mpi" in Path(binary).name and np > 1:
-            cmd = ["mpirun", "-np", str(np), binary, "-in", str(script_path)]
+            # A Spack build starts with the launcher of the MPI it links against.
+            from core.spack import mpi_launcher   # noqa: PLC0415
+            cmd = [mpi_launcher(binary) or "mpirun", "-np", str(np), binary, "-in", str(script_path)]
         else:
             cmd = [binary, "-in", str(script_path)]
 

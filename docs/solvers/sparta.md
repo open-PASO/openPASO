@@ -10,6 +10,15 @@ export SPARTA_BINARY=/path/to/spa_serial
 
 Built from source: <https://sparta.github.io/>. You do not need it to start.
 
+Or let Spack build it from the recipe openPASO ships. It is found without `SPARTA_BINARY`, unless
+another SPARTA comes first (the command then names the variable to set). Spack
+builds SPARTA's current release (27 Aug 2026), which rejects a wildcard that two templates use
+(`rarefied_flow/channel_2d` and `collision_relaxation/box_2d`); the other 13 run on it.
+
+```bash
+openpaso install sparta --via spack
+```
+
 Then check that openPASO sees it:
 
 ```bash

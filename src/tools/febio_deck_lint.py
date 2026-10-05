@@ -12,6 +12,7 @@ away from a running one (tests/test_a_febio_deck_defect_febio_accepts_silently_i
   silent    one dof held by two bcs with different values       prescribed beats zero; of two
                                                                 prescribed, the later one
   silent    a NodeSet whose ids are separated by spaces         the first number of each piece only
+  crashes   an <elem> whose node ids are separated by spaces    SIGSEGV after 'Reading file', no message
   silent    a scalar NodeData entry carrying several numbers    the first number only
   silent    a body_load that is 0 in every component            it applies nothing
   misleads  a lid outside 1..N of its node set                  'invalid value for attribute "lid"'
@@ -19,6 +20,10 @@ away from a running one (tests/test_a_febio_deck_defect_febio_accepts_silently_i
   misleads  lc="k" with no load_controller k                    'Invalid load curve ID'
   misleads  <Control> with no <solver>                          'needs to have property "solver"'
   misleads  <MeshData> inside <Mesh>                            'unrecognized tag'
+  misleads  a load outside <Loads>, or a top-level <BodyLoad>   'unrecognized tag'
+  misleads  a <bc> whose type is a load                         'invalid value for attribute "type"'
+  misleads  a load_controller of type "linear" or with none     'invalid value' / 'missing attribute'
+  misleads  <elem_data> in a <logfile>                          'unrecognized tag'
   misleads  a section never closed                              a message about a later tag
 
 What FEBio names itself (an unknown node set, an unknown tag, a bad attribute) is left to FEBio.
@@ -72,6 +77,7 @@ class _Deck:
         self.sets = {}           # name -> (ordered ids, True when the order is FEBio's own)
         self.spaced = {}         # NodeSet name -> (ids FEBio keeps, numbers written)
         self.elems = []          # (type, [ids])
+        self.spaced_elems = []   # ids of the <elem> entries whose node ids are separated by spaces
         self.surfaces = {}
         self.childed = []        # NodeSets written as child tags
         mesh = root.find("Mesh")
@@ -91,7 +97,10 @@ class _Deck:
                     self.sets[nb.get("name")] = (block, True)
             for eb in mesh.findall("Elements"):
                 for e in eb.findall("elem"):
-                    self.elems.append(((eb.get("type") or "").lower(), _id_list(e.text)[0]))
+                    ids, lost = _id_list(e.text)
+                    self.elems.append(((eb.get("type") or "").lower(), ids))
+                    if lost:
+                        self.spaced_elems.append(e.get("id") or "?")
             for ns in mesh.findall("NodeSet"):
                 if len(ns):
                     self.childed.append(ns.get("name") or "")      # FEBio refuses it; no set is made
@@ -248,6 +257,15 @@ def lint_deck(text: str) -> list:
         out.append(f"NodeSet '{name}' lists its ids as child tags: FEBio 4 reads a NodeSet as one comma-separated "
                    f"id list and stops with 'tag \"NodeSet\" (line N) : invalid value:' ({_MEASURED}).")
 
+    # An <elem> written with spaces: FEBio 4.12 crashes while it reads the deck and prints nothing more.
+    if deck.spaced_elems:
+        k = len(deck.spaced_elems)
+        out.append(f"{k} <elem> entr{'y' if k == 1 else 'ies'} (id {deck.spaced_elems[0]}"
+                   + (f" to {deck.spaced_elems[-1]}" if k > 1 else "") + ") separate their node ids by spaces: "
+                   f"FEBio 4 reads an element's nodes as one comma-separated list, and FEBio crashes while it "
+                   f"reads such a deck (SIGSEGV, nothing printed after 'Reading file ...'; {_MEASURED}). Write "
+                   f"them comma-separated.")
+
     # A NodeSet written with spaces: FEBio keeps the first number between two commas.
     for name, (kept, written) in deck.spaced.items():
         out.append(f"NodeSet '{name}' separates its ids by spaces: FEBio reads the ids between commas "
@@ -397,6 +415,38 @@ def lint_deck(text: str) -> list:
     if mesh is not None and mesh.find("MeshData") is not None:
         out.append("<MeshData> sits inside <Mesh>: FEBio stops with 'tag \"MeshData\" (line N) : unrecognized "
                    "tag'. It is a section of its own after <MeshDomains> (" + _MEASURED + ").")
+    # A load placed where FEBio does not read one: its message names the tag, not where it belongs.
+    _LOADS = ("nodal_load", "surface_load", "body_load")
+    for sec in root:
+        if sec.tag in ("BodyLoad", "BodyLoads", "Load", "NodalLoad", "NodalLoads"):
+            out.append(f"<{sec.tag}> is no section of a FEBio 4 deck: FEBio stops with 'tag \"{sec.tag}\" (line N) : "
+                       f"unrecognized tag'. Loads are <nodal_load>, <surface_load> or <body_load> inside one "
+                       f"<Loads> section after <Boundary> ({_MEASURED}).")
+        elif sec.tag != "Loads":
+            for el in sec.iter():
+                if el.tag in _LOADS:
+                    out.append(f"<{el.tag}> sits inside <{sec.tag}>: FEBio reads loads only inside <Loads>, a "
+                               f"section after <Boundary>, and stops elsewhere with 'tag \"{el.tag}\" (line N) : "
+                               f"unrecognized tag' ({_MEASURED}).")
+                    break
+    for bc in root.iter("bc"):
+        ty = (bc.get("type") or "").strip()
+        if ty.replace(" ", "_") in ("nodal_load", "nodal_force", "body_load", "body_force", "surface_load"):
+            out.append(f"<bc type=\"{ty}\">: a <bc> takes a boundary condition type (\"zero displacement\", "
+                       f"\"prescribed displacement\"), and FEBio stops with 'invalid value for attribute \"type\"'. "
+                       f"A load is a <nodal_load>, <surface_load> or <body_load> inside <Loads> ({_MEASURED}).")
+    for lc in root.iter("load_controller"):
+        ty = lc.get("type")
+        if ty is None or ty.strip().lower() == "linear":
+            out.append(f"<load_controller id=\"{lc.get('id')}\"> " + ("has no type" if ty is None else
+                       f"has type=\"{ty}\"") + ": FEBio stops with '" + ("missing attribute" if ty is None else
+                       "invalid value for attribute") + " \"type\"'. A load curve is type=\"loadcurve\" with "
+                       f"<interpolate>LINEAR</interpolate> and its <points> ({_MEASURED}).")
+    for lf in root.iter("logfile"):
+        if lf.find("elem_data") is not None:
+            out.append(f"<elem_data> in <logfile>: FEBio stops with 'tag \"elem_data\" (line N) : unrecognized "
+                       f"tag'. The element log is <element_data data=\"...\" file=\"...\"/> ({_MEASURED}).")
+            break
     return out
 
 

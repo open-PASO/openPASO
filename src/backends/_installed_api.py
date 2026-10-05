@@ -131,16 +131,18 @@ INSTALLED_API = {
     "# FEBio writes results from the DECK, not from a Python API.\n"
     "# <Output>\n"
     "#   <logfile>\n"
-    "#     <node_data file='u.csv' format='%i,%.15g,%.15g' data='ux;uy'/>\n"
+    "#     <node_data file='u.csv' delim=',' data='ux;uy'/>\n"
+    "#     (no format=: FEBio then writes id,ux,uy with 12 significant digits;\n"
+    "#      printf specifiers such as %.15g are not supported)\n"
     "#   </logfile>\n"
     "# </Output>\n"),
   "gotchas": [
     "NO ARBITRARY-POINT EVALUATION INSIDE FEBio. It exposes NODAL output and no user-facing shape-function interpolation, so the interpolation is YOURS to do afterwards: export node_data, and evaluate at your target points in Python from the nodal values and the element they fall in. On a structured mesh that is bilinear (2-D) or trilinear (3-D) interpolation inside the containing cell — locate the cell from the mesh spacing, then weight its corner values.",
     "DO NOT MOVE THE MESH TO THE PROBE POINTS. If a task prescribes BOTH a mesh sequence and a probe grid, the mesh is part of the problem and refitting it to make probes land on nodes is solving a different problem — it reads as not following the prescribed sequence. Probe grids are commonly chosen to be deliberately off-node precisely so that interpolation is exercised.",
     "A deck with only <plotfile> writes a binary .xplt and nothing readable. Add <logfile> with node_data or you have no numbers to deliver.",
-    "The logfile format string sets precision: use %.15g.",
+    "The logfile format string cannot set precision: it only knows %i/%l/%g/%t/%n, %.15g is printed literally and the values are lost, and %g gives 6 significant digits. Omit format= (use delim=',') to get 12 significant digits.",
     "A log accumulates one block per step: parse the LAST block.",
-    "This build has no pardiso; leave the solver at its default.",
+    "This build has no pardiso; the default is skyline, which takes only symmetric matrices. That is fine for a default (symmetric) solid deck, but the solvers of the other modules (biphasic, solute, multiphasic and the fluid modules) default to a non-symmetric stiffness and abort with 'The selected linear solver does not support the requested matrix format': put <linear_solver type=\"bicgstab\"/> inside <solver>.",
   ],
  },
  # ── SPARTA ─────────────────────────────────────────────────────────────
@@ -153,11 +155,12 @@ INSTALLED_API = {
     "# SPARTA is an input-script code and OUTPUT PRECISION is the trap:\n"
     "#   dump_modify  1 format float %20.15g\n"
     "#   stats_modify format float %20.15g\n"
-    "# A compute produces NOTHING by itself: a fix ave/time, dump or print\n"
-    "# must reference it as c_<id> for any number to be written at all.\n"),
+    "# A compute produces NOTHING by itself: stats_style, a fix ave/time, a dump\n"
+    "# or a print must reference it (c_<id>; a print as $(c_<id>)) for any\n"
+    "# number to be written at all.\n"),
   "gotchas": [
     "OUTPUT PRECISION: `dump_modify <id> format float %20.15g` and `stats_modify format float %20.15g`. The defaults are far too coarse to compare against a reference.",
-    "A `compute` writes nothing on its own; it must be referenced as c_<id> by a fix ave/time, a dump or a print.",
+    "A `compute` writes nothing on its own; something that writes must reference it: stats_style (c_<id>), a fix such as ave/time, a dump, or a print ($(c_<id>), or ${v} of an equal-style variable v = c_<id>).",
     "DSMC is STOCHASTIC: one run is a sample. Average over enough steps after the flow is established, and say which window you averaged.",
     "THERE IS NO POINT EVALUATION, and that is the physics, not a gap: DSMC "
     "carries no continuous field to interpolate. Output is per surface "
@@ -187,7 +190,7 @@ INSTALLED_API = {
     "Dirichlet BC goes on the SPACE: H1(mesh, order=1, dirichlet='.*'); '.*' matches all (unnamed) boundaries robustly.",
     "Trial/test: `u, v = fes.TnT()`. Forms: `a += grad(u)*grad(v)*dx` then `a.Assemble()` (explicit).",
     "Solve: `gfu.vec.data = a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky') * f.vec` — FreeDofs() enforces the Dirichlet constraint.",
-    "Point eval: `gfu(mesh(0.5,0.5))` — the coords MUST go through mesh(...); `gfu(0.5,0.5)` does NOT work.",
+    "Point eval: `gfu(mesh(0.5,0.5))` (canonical). A plain GridFunction also accepts `gfu(0.5,0.5)` (same value), but a general CoefficientFunction such as `2*gfu` must go through mesh(...): `cf(0.5,0.5)` returns a PointEvaluationFunctional, not a number.",
     "Writing results: numpy.savetxt(..., fmt='%.15e'). str(float) and '%.6f' throw away digits a convergence study needs.",
     "Integrate(cf*dx, mesh) is a SEPARATE functional, not how you assemble forms.",
   ],
@@ -237,7 +240,7 @@ INSTALLED_API = {
     "CRITICAL: DEAL_II_DIR must be the BUILD tree `{DEALII_BUILD}` (config at .../build/lib/cmake/deal.II). Pointing at `{DEALII_ROOT}` SILENTLY falls back to the OLD system install (9.1.1 at /usr) with no error — check cmake's `-- Using the deal.II-X found at ...` line.",
     "Runtime needs `LD_LIBRARY_PATH=/opt/4C-dependencies/lib` (shared TBB/etc).",
     "CMake order: FIND_PACKAGE(deal.II 9.0 REQUIRED HINTS ${DEAL_II_DIR}) -> DEAL_II_INITIALIZE_CACHED_VARIABLES() -> PROJECT() -> DEAL_II_SETUP_TARGET(<tgt>). INITIALIZE must precede PROJECT().",
-    "Use modern idioms: fe_values.quadrature_point_indices(), fe_values.dof_indices(), fe.n_dofs_per_cell() (data member fe.dofs_per_cell is deprecated).",
+    "Use modern idioms: fe_values.quadrature_point_indices(), fe_values.dof_indices(), fe.n_dofs_per_cell() (preferred accessor; the public member fe.dofs_per_cell still exists and is not deprecated).",
     "Functions::ZeroFunction<dim>() (namespaced; bare ZeroFunction removed). Header <deal.II/base/function.h>.",
     "Sparsity needs both <.../dynamic_sparsity_pattern.h> and <.../sparsity_pattern.h>; BCs need <.../numerics/vector_tools.h> + <.../numerics/matrix_tools.h>.",
     "Evaluate: VectorTools::point_value(dof_handler, solution, Point<dim>(...)); solution.linfty_norm() for the max. This works at ARBITRARY points, not just nodes — it locates the cell and applies the shape functions. Functions::FEFieldFunction is the batch version.",
@@ -246,7 +249,7 @@ INSTALLED_API = {
  },
  "fourc": {
   "version": "build at {FOURC_BINARY}",
-  "run": "LD_LIBRARY_PATH=/opt/4C-dependencies/lib {FOURC_BINARY} <input>.4C.yaml <output_prefix>",
+  "run": "{FOURC_ENV}{FOURC_BINARY} <input>.4C.yaml <output_prefix>",
   "verified_smoke_test": (
     "# Minimal single HEX8 linear-elastic cube (fixed at x=0, pulled at x=1), Statics, 2 steps.\n"
     "# Started from {FOURC_ROOT}/tests/input_files/solid_runtime_material_element_id.4C.yaml\n"
@@ -263,7 +266,7 @@ INSTALLED_API = {
     "NODE COORDS: ['NODE 1 COORD 0.0 0.0 0.0', ...8 nodes...]\n"
     "STRUCTURE ELEMENTS: ['1 SOLID HEX8 1 5 6 2 3 7 8 4 MAT 1 KINEM nonlinear']\n"),
   "gotchas": [
-    "Run: `LD_LIBRARY_PATH=/opt/4C-dependencies/lib {FOURC_BINARY} <in>.4C.yaml <output_prefix>` — the output prefix is MANDATORY.",
+    "Run: `{FOURC_ENV}{FOURC_BINARY} <in>.4C.yaml <output_prefix>` — the output prefix is MANDATORY.",
     "File is one YAML map; keys are section names with spaces/slashes (e.g. 'STRUCTURAL DYNAMIC', 'IO/RUNTIME VTK OUTPUT/STRUCTURE').",
     "Required minimal: PROBLEM TYPE, SOLVER 1, STRUCTURAL DYNAMIC, MATERIALS, mesh sections, conditions.",
     "Time integrator references the linear solver via LINEAR_SOLVER: 1 (-> 'SOLVER 1').",
@@ -286,7 +289,7 @@ INSTALLED_API = {
     ]},
    {"name": "2D structural element + EDGE (line) traction",
     "facts": [
-     "2D element: `<id> WALL QUAD4 <4 CCW node ids> MAT <id> KINEM linear EAS none THICK <t> STRESS_STRAIN plane_stress GP 2 2`. Missing/garbled tail params abort at input parse.",
+     "2D element before 4C 2026.2.0: `<id> WALL QUAD4 <4 CCW node ids> MAT <id> KINEM linear EAS none THICK <t> STRESS_STRAIN plane_stress GP 2 2`. From 4C 2026.2.0 on (no WALL): `<id> SOLID QUAD4 <4 CCW node ids> MAT <id> KINEM linear THICKNESS <t> PLANE_ASSUMPTION plane_stress`. Missing/garbled tail params abort at input parse.",
      "EDGE traction in 2D attaches to LINES, not surfaces: use `DESIGN LINE NEUMANN CONDITIONS` (E: d) + a `DLINE-NODE TOPOLOGY` block ('NODE n DLINE d') for the loaded edge; clamp via `DESIGN LINE DIRICH CONDITIONS` + its own DLINE. NUMDOF 6, ONOFF[0]=1 turns on x-traction, VAL is traction per unit edge length (x THICK).",
      "ZERO-DISPLACEMENT GOTCHA (the classic 2D trap): if you attach the load to a DSURFACE in 2D, or DLINE-NODE TOPOLOGY is missing/points at the wrong nodes, 4C STILL runs and exits 0 but the load set is EMPTY -> displacement is zero everywhere. Always confirm every loaded-edge node appears under the Neumann DLINE.",
      "Dirichlet on the clamped edge must constrain BOTH dofs (ONOFF [1,1]) or the body is under-constrained.",
@@ -305,9 +308,9 @@ INSTALLED_API = {
    {"name": "Locking-free 2D element (avoid volumetric locking at nu -> 0.5)",
     "facts": [
      "Standard QUAD4 (`EAS none`) volumetrically LOCKS at nearly-incompressible nu (e.g. 0.4999) and in bending -> displacement grossly under-predicted (verified: tip uy was 75x too small with EAS none).",
-     "Fix: use Enhanced Assumed Strain -> element line `... WALL QUAD4 <nodes> MAT <id> KINEM nonlinear EAS full THICK <t> STRESS_STRAIN plane_strain GP 2 2`. `EAS full` (Q1E4, 4 enhanced modes) recovers the correct flexible response.",
-     "GOTCHA: EAS REQUIRES `KINEM nonlinear`. `KINEM linear EAS full` errors 'No EAS for geometrically linear WALL element'. For small-strain use KINEM nonlinear with a small load (geometrically ~linear).",
-     "WALL exposes only `EAS none|full` (no mild/F-bar); EAS is QUAD4-only (rejected for TRI6). The 3D SOLID element family offers additional F-bar/EAS variants.",
+     "Fix: use Enhanced Assumed Strain. Before 4C 2026.2.0 -> `... WALL QUAD4 <nodes> MAT <id> KINEM nonlinear EAS full THICK <t> STRESS_STRAIN plane_strain GP 2 2`; 4C 2026.2.0 and later -> `... SOLID QUAD4 <nodes> MAT <id> KINEM nonlinear THICKNESS <t> PLANE_ASSUMPTION plane_strain TECH eas_full`. Both recover the flexible response, and give the same deflection (verified: nu 0.4999 cantilever, 20x2 QUAD4, tip uy 3.9e-5 without EAS and 2.92e-3 with it on a WALL build, on 2026.2.0 and on 2026.3.0, against 3.04e-3 from beam theory).",
+     "GOTCHA: EAS REQUIRES `KINEM nonlinear`. Before 4C 2026.2.0 `KINEM linear EAS full` errors 'No EAS for geometrically linear WALL element'; from 4C 2026.2.0 on `KINEM linear ... TECH eas_full` stops with 'Your element formulation with cell type QUAD4, kinematic type linear, element technology eas_full and prestress type none does not exist'. For small-strain use KINEM nonlinear with a small load (geometrically ~linear).",
+     "WALL (before 4C 2026.2.0) exposes only `EAS none|full` (no mild/F-bar); EAS is QUAD4-only (rejected for TRI6). The 2D SOLID of 4C 2026.2.0 and later likewise: QUAD4 alone takes TECH, and only none|eas_full (eas_mild and fbar give the same 'does not exist' message). The 3D SOLID element family offers additional F-bar/EAS variants.",
      "Use EAS full whenever nu -> 0.5 (incompressible: rubber, J2 plasticity flow, biomechanics) or for thin/bending-dominated low-order meshes.",
     ]},
   ],

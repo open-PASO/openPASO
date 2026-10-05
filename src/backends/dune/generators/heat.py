@@ -54,7 +54,10 @@ KNOWLEDGE = {
     "heat": {
         "description": "Heat conduction: steady and transient (backward Euler, Crank-Nicolson)",
         "solver": "Same galerkin scheme; for transient, use time-stepping loop",
-        "time_stepping": "Backward Euler, Crank-Nicolson, DIRK23, DIRK34, SDIRK22, Heun",
+        "time_stepping": (
+            "Backward Euler, Crank-Nicolson (write the time loop "
+            "yourself); dune-fem's Python has no ready-made "
+            "Runge-Kutta stepper"),
         "required_vs_optional": {
             "REQUIRED": [
                 "a mass term u*v/dt on the LEFT and the old solution "
@@ -62,20 +65,45 @@ KNOWLEDGE = {
                 "loop around it just re-solves the steady problem",
                 "ONE scheme built OUTSIDE the loop; rebuilding it "
                 "inside costs a C++ compile per step",
-                "solve into a function that is NOT the one appearing "
-                "in the right-hand side, then copy back",
             ],
             "OPTIONAL": [
+                "solving into a function that is NOT the one appearing "
+                "in the right-hand side, then copying back. For this "
+                "LINEAR implicit-Euler scheme dune-fem 2.12.0.2 reads "
+                "the right-hand side once, before it overwrites the "
+                "target, so solve(target=u_n) gives the same step "
+                "(measured 2026-09-30: 5.8e-16 apart after 5 steps). "
+                "It is NOT optional when the Dirichlet data change in "
+                "time (the target's boundary dofs are set to the new "
+                "values before the right-hand side is read: 6.8e-4 "
+                "apart after 5 steps) or when the form is nonlinear "
+                "(Newton re-reads the overwritten target: on a (1+u^2) "
+                "diffusion step with nonlinear.maxiterations=50 the "
+                "aliased solve returned converged=False after 50 "
+                "iterations, where the separate-target solve converged "
+                "in 4)",
                 "dune.ufl.Constant for dt — then changing dt does NOT "
                 "trigger a JIT rebuild, whereas a bare float literal "
                 "in the form does",
                 "solver='cg' — the implicit-Euler heat matrix is SPD",
             ],
             "NOT AVAILABLE": [
-                "the DIRK/SDIRK/SSP-RK families named in older catalog "
-                "text: they live in dune-fem-dg, which is NOT "
-                "importable from a plain dune-fem install (executed "
-                "2026-08-03). Write the stepper yourself.",
+                "ready-made Runge-Kutta steppers from Python. dune-fem "
+                "2.12.0.2 implements its Runge-Kutta ODE solvers only in "
+                "C++ (dune/fem/solver/rungekutta: explicit Euler, TVD2 "
+                "(Heun), TVD3, RK4 and a 6th-order table; implicit "
+                "Euler, Gauss2 (selected as CrankNicolson), DIRK23, "
+                "DIRK34; plus semi-implicit and ROW variants; SDIRK22 "
+                "is accepted by the name selector but has no table, so "
+                "selecting it throws NotImplemented) and has no Python "
+                "binding for them. The "
+                "Python wrappers (the rk module of dune.femdg with "
+                "Heun/ssp2/ssp3, femdgStepper, rungeKuttaSolver) are in "
+                "dune-fem-dg, a "
+                "separate package that a plain dune-fem install does "
+                "not include: import dune.femdg raises "
+                "ModuleNotFoundError (executed 2026-08-03, re-checked "
+                "2026-09-30). Write the stepper yourself.",
             ],
         },
         "verification_you_can_run": (

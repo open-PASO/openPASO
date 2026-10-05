@@ -149,17 +149,15 @@ def why_4c_did_not_finish(tag=""):
                     _why.append(f"{_deck}: Scalar_Transport needs `SCALAR TRANSPORT DYNAMIC`, not `THERMAL DYNAMIC`")
                 if "CALCFLUX_BOUNDARY" not in _txt or "FLUX CALC" not in _txt:
                     _why.append(f"{_deck}: needs CALCFLUX_BOUNDARY \"diffusive\" AND a `SCATRA FLUX CALC LINE CONDITIONS` entry on the interface DLINE")
-                if re.search(r"^IO:\s*$", _txt, re.M):
-                    _why.append(f"{_deck}: an `IO:` section in a Scalar_Transport deck is rejected; the VTU appears without it")
-            _badkw = sorted({w for w in re.findall(r'"NODE\s+\d+\s+(D[A-Z]+)\s+\d+"', _txt) if w not in ("DNODE", "DLINE", "DSURFACE", "DVOL")})
+            _badkw = sorted({w for w in re.findall(r'"NODE\s+\d+\s+(D[A-Z]+)\s+\d+"', _txt) if w not in ("DNODE", "DLINE", "DSURFACE", "DSURF", "DVOL", "DVOLUME")})
             if _badkw:
-                _why.append(f"{_deck}: topology entries use {', '.join(_badkw)} -- the entity words are DNODE, DLINE, DSURFACE, DVOL (anything else defines nothing and the conditions on it are silently dropped); section `DSURF-NODE TOPOLOGY` takes entries `NODE <n> DSURFACE <id>` (section word DSURF, entry word DSURFACE)")
-            _topo = set(re.findall(r"\b(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)", _txt))
+                _why.append(f"{_deck}: topology entries use {', '.join(_badkw)} -- 4C takes DNODE in DNODE-NODE TOPOLOGY, DLINE in DLINE-NODE TOPOLOGY, DSURF or DSURFACE in DSURF-NODE TOPOLOGY and DVOL or DVOLUME in DVOL-NODE TOPOLOGY; any other word stops 4C with 'Wrong design node name: <word>. Expected <section word>.'")
+            _topo = set(re.findall(r"\b(DNODE|DLINE|DSURF|DVOL)\w*\s+(\d+)", _txt))   # DSURF(ACE), DVOL(UME)
             for _b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", _txt, flags=re.M):
                 _head = _b.split(":", 1)[0].strip()
                 _kw = re.search(r"\b(POINT|LINE|SURF|VOL)\b", _head) if _head.endswith("CONDITIONS") else None
                 if _kw:   # every condition family with a geometry word (SCATRA FLUX CALC LINE CONDITIONS too)
-                    _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURFACE", "VOL": "DVOL"}[_kw.group(1)]
+                    _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURF", "VOL": "DVOL"}[_kw.group(1)]
                     _missing = sorted({x for x in re.findall(r"\bE:\s*(\d+)", _b) if (_kind, x) not in _topo}, key=int)
                     if _missing:
                         _why.append(f"{_deck}: {_head} names E id(s) {', '.join(_missing[:6])} that no *-NODE TOPOLOGY section defines -- E is the design-entity id of a topology line (`NODE <n> DNODE <E>`), never a node number")
@@ -227,13 +225,13 @@ for _lg in sorted(glob.glob("*.log")):
 #    section defines and RUNS THE WRONG PROBLEM to 'finished normally' (measured). Refused here.
 for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yaml")) if "monitor_dbc" not in p]:
     _txt = Path(_dk).read_text(errors="ignore")
-    _topo = set(re.findall(r"\b(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)", _txt))
+    _topo = set(re.findall(r"\b(DNODE|DLINE|DSURF|DVOL)\w*\s+(\d+)", _txt))   # DSURF(ACE), DVOL(UME)
     _lost = []
     for _b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", _txt, flags=re.M):
         _head = _b.split(":", 1)[0].strip()
         _kw = re.search(r"\b(POINT|LINE|SURF|VOL)\b", _head) if _head.endswith("CONDITIONS") else None
         if _kw:   # every condition family with a geometry word (SCATRA FLUX CALC LINE CONDITIONS too)
-            _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURFACE", "VOL": "DVOL"}[_kw.group(1)]
+            _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURF", "VOL": "DVOL"}[_kw.group(1)]
             _lost += [f"{_head} E {x}" for x in re.findall(r"\bE:\s*(\d+)", _b) if (_kind, x) not in _topo]
     if _lost:
         raise SystemExit(f"DECK CHECK: {_dk} puts conditions on E ids that no *-NODE TOPOLOGY section defines "
@@ -274,7 +272,7 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
     # Dirichlet on EVERY node of a field leaves nothing to solve: the field is the prescribed data (measured)
     _nodes = {int(a) for a in re.findall(r'"NODE\s+(\d+)\s+COORD\b', _txt)}
     _tp = {}
-    for _n, _k, _e in re.findall(r'"NODE\s+(\d+)\s+(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)"', _txt):
+    for _n, _k, _e in re.findall(r'"NODE\s+(\d+)\s+(DNODE|DLINE|DSURF|DVOL)\w*\s+(\d+)"', _txt):
         _tp.setdefault((_k, int(_e)), set()).add(int(_n))
     _cov = {}
     for _b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", _txt, flags=re.M):
@@ -288,7 +286,7 @@ for _dk in sorted(glob.glob("*.4C.yaml")) or [p for p in sorted(glob.glob("*.yam
             _fl = [x.strip() for x in _on.group(1).split(",")] if _on else ["1"]
             _inpl = any(f == "1" for f in _fl[:2]) if _fam == "displacement" else _fl[0] == "1"
             if _e and _inpl:
-                _cov.setdefault(_fam, set()).update(_tp.get(({"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURFACE", "VOL": "DVOL"}[_kw.group(1)], int(_e.group(1))), set()))
+                _cov.setdefault(_fam, set()).update(_tp.get(({"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURF", "VOL": "DVOL"}[_kw.group(1)], int(_e.group(1))), set()))
     for _fam, _s in _cov.items():
         if len(_nodes) >= 4 and _s >= _nodes:
             raise SystemExit(f"DECK CHECK: {_dk} pins EVERY node of the {_fam} field with Dirichlet conditions ({len(_nodes)} of {len(_nodes)}): "

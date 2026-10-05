@@ -125,8 +125,10 @@ KNOWLEDGE = {
                          "in the a-d plane. Two symmetric families at "
                          "+gamma and -gamma.",
                 "k": "Bulk modulus (penalises near-incompressibility). "
-                     "OPTIONAL only in the sense that it has a "
-                     "default; in practice set k/c between 100 and "
+                     "REQUIRED for a top-level HGO material: the "
+                     "default is 0, and a deck without <k> is rejected "
+                     "at initialisation with `K must be a positive "
+                     "number.`; set k/c between 100 and "
                      "1000 — see the [Numerical] pitfall, both ends "
                      "of the range bite.",
                 "mat_axis": "Material orientation frame: <a> = the "

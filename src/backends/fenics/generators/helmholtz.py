@@ -28,9 +28,17 @@ KNOWLEDGE = {
         "complex": "Same — complex PETSc build required",
     },
     "pitfalls": [
-        "[Numerical] System is INDEFINITE — CG diverges. Use GMRES or direct. "
-        "Signal: SolverCG fails with 'breakdown' / 'NaN residual' after a "
-        "few iterations on a Helmholtz problem.",
+        "[Numerical] System is INDEFINITE (once k^2 exceeds the lowest "
+        "Laplacian eigenvalue), so CG fails. Use GMRES or direct. "
+        "Signal: PETSc KSP 'cg' stops after a few iterations, usually with a "
+        "negative getConvergedReason(): -10 DIVERGED_INDEFINITE_MAT, or -8 "
+        "DIVERGED_INDEFINITE_PC with some preconditioners (seen with gamg). "
+        "LinearProblem.solve() does not raise unless "
+        "ksp_error_if_not_converged is set, and the returned field is "
+        "unconverged. With pc_type 'hypre' CG can instead report 2 "
+        "(CONVERGED_RTOL) after 1-2 iterations while the true residual "
+        "||b - A x|| / ||b|| stays near 1, and ksp_error_if_not_converged "
+        "does not fire then: check the true residual, not only the reason.",
         "[Numerical] Resolution rule: ~10 DOFs per wavelength minimum. "
         "Pollution effect grows with k — high-k problems need 20+ DOFs/wavelength. "
         "Signal: the dolfinx Function solution amplitude in the XDMFFile output "

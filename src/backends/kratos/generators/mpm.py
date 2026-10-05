@@ -57,16 +57,22 @@ WHY NOTHING CAUGHT THE OLD ONE, measured 2026-08-07:
     of them: it imports KratosMultiphysics and runs MPMApplication.
 """
 
-# Material-point counts MPMApplication 10.4.3 accepts, keyed by the geometry of
-# the BACKGROUND GRID — not of the body. Anything else is rejected by name (see
-# pitfall 3). The generator builds a quadrilateral grid, so it validates against
-# the Quadrilateral row before emitting anything.
+# Material-point counts MPMApplication 10.4.2 and 10.4.3 accept, keyed by the
+# geometry of the BACKGROUND GRID — not of the body. On those releases anything
+# else is rejected by name (see pitfall 3). Kratos 10.3.0 and 10.4.0 do not use
+# this table: they accept 1, 4, 9 and 16 per quadrilateral and only WARN on any
+# other count, seeding the default 4 per element instead. Measured on 10.3.0:
+# 25 per quadrilateral ran rc 0 with 'Available options are: 1, 4, 9, 16.' and
+# 'The default number of material points: 4 is currently assumed.', 80 material
+# points on 20 body elements. The generator builds a quadrilateral grid, so it
+# validates against the quadrilateral counts BOTH release lines accept.
 _MATERIAL_POINTS_PER_ELEMENT = {
     "Triangular": (1, 3, 4, 6, 12),
     "Quadrilateral": (1, 4, 9, 16, 25),
     "Tetrahedral": (1, 4, 8, 14, 24),
     "Hexahedral": (1, 8, 27, 64, 125),
 }
+_QUADRILATERAL_COUNTS_BEFORE_10_4_2 = (1, 4, 9, 16)
 
 
 def _mpm_2d_kratos(params: dict) -> str:
@@ -87,15 +93,19 @@ def _mpm_2d_kratos(params: dict) -> str:
     # and PARTICLES_PER_ELEMENT is still Kratos's own deprecated spelling.
     mppe = int(params.get("material_points_per_element",
                           params.get("particles_per_cell", 4)))
-    allowed = _MATERIAL_POINTS_PER_ELEMENT["Quadrilateral"]
+    allowed = tuple(n for n in _MATERIAL_POINTS_PER_ELEMENT["Quadrilateral"]
+                    if n in _QUADRILATERAL_COUNTS_BEFORE_10_4_2)
     if mppe not in allowed:
         raise ValueError(
             f"material_points_per_element={mppe} is not available for "
-            f"Quadrilateral elements, and the background grid this template "
-            f"builds is quadrilateral. Available options are: "
+            f"Quadrilateral elements on every Kratos release, and the "
+            f"background grid this template builds is quadrilateral. "
+            f"Available options are: "
             f"{', '.join(str(a) for a in allowed[:-1])} and {allowed[-1]}. "
-            f"Kratos raises the same refusal at solver Initialize; refusing "
-            f"here means the deck is never written.")
+            f"Kratos 10.4.2 and 10.4.3 also accept 25 and refuse any other "
+            f"count at solver Initialize; 10.3.0 and 10.4.0 only warn and "
+            f"seed 4 per element instead. Refusing here means the deck is "
+            f"never written.")
     E = params.get("E", 1.0e4)
     nu = params.get("nu", 0.3)
     density = params.get("density", 1000.0)
@@ -139,9 +149,11 @@ E, nu, density = {E}, {nu}, {density}
 gravity = {gravity}
 dt, T_end = {dt}, {T_end}
 
-# Drawn from the GRID geometry's allowed set: this grid is QUADRILATERAL, so
-# the accepted counts are 1, 4, 9, 16, 25. Any other value is rejected at
-# solver Initialize with a message that names the geometry.
+# Drawn from the GRID geometry's allowed set: this grid is QUADRILATERAL.
+# Kratos 10.4.2 and 10.4.3 accept 1, 4, 9, 16 and 25 and reject any other
+# value at solver Initialize with a message that names the geometry. Kratos
+# 10.3.0 and 10.4.0 accept 1, 4, 9 and 16 and only WARN on any other value,
+# seeding 4 per element instead.
 material_points_per_element = {mppe}
 
 # The fully-qualified registered law name. "LinearElasticPlaneStrain2DLaw" and
@@ -238,9 +250,10 @@ with open("grid.mdpa", "w") as _f:
 with open("body.mdpa", "w") as _f:
     _f.write(body_mdpa)
 
-# MATERIAL_POINTS_PER_ELEMENT is MANDATORY and lives HERE, in the materials
-# json under properties[i].Material.Variables — not in ProjectParameters. Its
-# absence is a hard error, not a defaulted warning.
+# MATERIAL_POINTS_PER_ELEMENT lives HERE, in the materials json under
+# properties[i].Material.Variables — not in ProjectParameters. On Kratos
+# 10.4.2 and 10.4.3 its absence is a hard error; 10.3.0 and 10.4.0 only warn
+# and assume 1 material point per element.
 #
 # The body is addressed through Initial_MPM_Material.<SubModelPart>: at
 # materials-reading time the body sub model parts only exist under Initial_.
@@ -459,8 +472,8 @@ KNOWLEDGE = {
         "pitfalls": [
             "[API] Kratos MPM element names ALL start with the literal prefix \"MPM\": MPMUpdatedLagrangian2D4N, MPMUpdatedLagrangian3D8N, MPMUpdatedLagrangianAxisymmetry2D4N, MPMUpdatedLagrangianPQ, MPMUpdatedLagrangianUP, etc. The prior catalog listed UpdatedLagrangianPQ2D / UpdatedLagrangianAxisym (without the MPM prefix) — none of those are registered. Signal: model_part.CreateNewElement(\"UpdatedLagrangian2D3N\", ...) raises 'is not registered!' and lists the registered elements; the full line is Error: The Element \"UpdatedLagrangian2D3N\" is not registered! — Error:, the word Element and the name are all inserted at runtime around the literal, which is the trailing clause. Prepending MPM makes the identical call succeed. Beware grepping for the bare name — it matches as a substring of the MPM-prefixed one, so only element creation settles it. (Verified by execution 2026-08-07.)",
             "[Input] MPM reads TWO mdpa files, and the background grid has its own key: solver_settings.grid_model_import_settings.input_filename. Omitting that block does not raise a missing-key error — the default filename is used and the failure surfaces as a missing file. Signal: RuntimeError 'Error opening mdpa file : \"unknown_name_Grid.mdpa\"' — the literal string unknown_name_Grid is the giveaway that the grid import block is absent rather than the file being misnamed. (Verified by execution 2026-08-07.)",
-            "[Input] MATERIAL_POINTS_PER_ELEMENT is mandatory and lives in the MATERIALS json, under properties[i].Material.Variables — not in ProjectParameters. On the installed 10.4.3 build its absence is a hard error, not a defaulted warning. Signal: RuntimeError '\"MATERIAL_POINTS_PER_ELEMENT\" is not specified in Properties' raised from MaterialPointGeneratorUtility during solver Initialize. (Verified by execution 2026-08-07.)",
-            "[Input] The number of material points per element is drawn from a fixed set that depends on the GRID element geometry, and the sets are NOT the same across geometries: Triangular 1/3/4/6/12, Quadrilateral 1/4/9/16/25, Tetrahedral 1/4/8/14/24, Hexahedral 1/8/27/64/125. Anything else is rejected on 10.4.3. Signal: RuntimeError 'The input number of MATERIAL_POINTS_PER_ELEMENT (5) is not available for Quadrilateral elements' followed by 'Available options are: 1, 4, 9, 16 and 25.' — the message names the GRID geometry, so it is also how you discover your background grid is quads when you assumed triangles. (Verified by execution 2026-08-07; the allowed sets were read back from the installed libKratosMPMCore. Kratos master after this release downgrades this to a warning that silently clamps to the geometry default, so on a newer build the same mistake yields a different material-point count instead of an error.)",
+            "[Input] MATERIAL_POINTS_PER_ELEMENT lives in the MATERIALS json, under properties[i].Material.Variables — not in ProjectParameters. On Kratos 10.4.2 and 10.4.3 its absence is a hard error; on 10.3.0 and 10.4.0 it is only a warning, and 1 material point per element is assumed. Signal: on 10.4.2/10.4.3 RuntimeError '\"MATERIAL_POINTS_PER_ELEMENT\" is not specified in Properties' raised from MaterialPointGeneratorUtility during solver Initialize; on 10.3.0 the run completes with the warning 'MATERIAL_POINTS_PER_ELEMENT is not specified in Properties, ' followed by '1 material point per element is assumed.' (Verified by execution 2026-08-07 on 10.4.3; the 10.3.0 warning re-measured by execution, the 10.4.0 and 10.4.2 behaviour read from their sources.)",
+            "[Input] The number of material points per element is drawn from a fixed set that depends on the GRID element geometry, and the sets are NOT the same across geometries: Triangular 1/3/4/6/12, Quadrilateral 1/4/9/16/25, Tetrahedral 1/4/8/14/24, Hexahedral 1/8/27/64/125 on Kratos 10.4.2 and 10.4.3, where anything else is rejected. Signal: RuntimeError 'The input number of MATERIAL_POINTS_PER_ELEMENT (5) is not available for Quadrilateral elements' followed by 'Available options are: 1, 4, 9, 16 and 25.' — the message names the GRID geometry, so it is also how you discover your background grid is quads when you assumed triangles. (Verified by execution 2026-08-07 on 10.4.3; the allowed sets were read back from the installed libKratosMPMCore. Kratos 10.3.0 and 10.4.0 only warn and fall back to the geometry default, 4 for quadrilaterals ('The default number of material points: 4 is currently assumed.') and 3 for triangles, and their sets differ (quadrilateral 1, 4, 9, 16), so on those releases the same mistake yields a different material-point count instead of an error; the 10.3.0 quadrilateral case was re-measured by execution.)",
             "[Input] The legacy spelling PARTICLES_PER_ELEMENT still works, and the solver REWRITES YOUR MATERIALS FILE ON DISK to the new name as a side effect of running. Signal: the run prints '\\'PARTICLES_PER_ELEMENT\\' is deprecated; use \\'MATERIAL_POINTS_PER_ELEMENT\\' instead.' and completes normally, after which the materials json in the working directory no longer contains the string PARTICLES_PER_ELEMENT — a version-controlled input file is modified by a simulation run. (Verified by execution 2026-08-07.)",
             "[Input] Materials entries address the BODY through 'Initial_MPM_Material.<SubModelPart>'. Using the MPM_Material root instead fails, because at materials-reading time the body sub model parts only exist under Initial_. Signal: RuntimeError 'There is no sub model part with name \"Parts_Parts_Auto1\" in model part \"MPM_Material\"' followed by the list of sub model parts that DO exist. (Verified by execution 2026-08-07.)",
             "[BC] Boundary conditions attach to sub model parts of Background_Grid, never of MPM_Material — the material points move, the grid does not, so the constrained set has to be a grid region. Signal: pointing a constraints_process_list entry at 'MPM_Material.<name>' raises RuntimeError 'There is no sub model part with name \"DISPLACEMENT_Displacement_Auto1\" in model part \"MPM_Material\"'; the same block with 'Background_Grid.<name>' runs. (Verified by execution 2026-08-07.)",
@@ -473,7 +486,7 @@ KNOWLEDGE = {
         ],
         "guidance": [
             "[Numerical] The background grid must enclose the whole TRAJECTORY of the body, not just its initial position — points that exit are erased (see pitfalls).",
-            "[Numerical] Penalty Dirichlet conditions take penalty_coefficient (the older name penalty_factor is auto-renamed). It defaults to 0, which silently disables the constraint; shipped tests use 1e10 to 1e12, i.e. two to three orders above YOUNG_MODULUS.",
+            "[Numerical] Penalty Dirichlet conditions take penalty_coefficient on Kratos 10.4.2 and 10.4.3 (the older name penalty_factor is auto-renamed there); 10.3.0 and 10.4.0 know only penalty_factor and reject penalty_coefficient with 'is present in this Parameters but NOT in the default values'. It defaults to 0, which silently disables the constraint; shipped tests use 1e10 to 1e12, i.e. two to three orders above YOUNG_MODULUS.",
             "[Numerical] Cell-crossing instability: Kratos MPM does NOT implement GIMP or CPDI — both strings appear in zero files of MPMApplication, so advice to 'use GIMP or CPDI shape functions' cannot be acted on here. The mitigation Kratos does provide is PQMPM (partitioned-quadrature MPM), switched on with \"is_pqmpm\": true in solver_settings, which makes the generator build MPMUpdatedLagrangianPQ elements instead.",
             "[Numerical] Material points per cell: 4-16 typical, but only from the geometry's allowed set (see pitfalls).",
             "[Numerical] Time step: dt < h/c where h=cell size, c=wave speed.",

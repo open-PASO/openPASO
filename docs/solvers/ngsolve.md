@@ -24,7 +24,7 @@ python check_install.py
 |---|---|---|---|
 | `contact` | Unilateral contact / obstacle problem via penalty method on elastic domain | 2-D | `2d` |
 | `convection_diffusion` | Convection-diffusion with DG upwind stabilization | 2-D | `2d_dg` |
-| `dg_methods` | Interior-penalty DG (SIPG) for advection-diffusion using L2 dglagrange space | 2-D | `2d` |
+| `dg_methods` | Interior-penalty DG (SIPG) for advection-diffusion using the L2(mesh, order=k, dgjumps=True) space | 2-D | `2d` |
 | `eigenvalue` | Eigenvalue problems (Laplace, elasticity) via ArnoldiSolver | 2-D | `2d` |
 | `hdivdiv` | HDivDiv Hellan-Herrmann-Johnson for Kirchhoff plate bending / biharmonic | 2-D | `2d` |
 | `heat` | Heat conduction (steady and transient with implicit Euler) | 2-D, 3-D | `2d`, `2d_steady`, `2d_transient` |

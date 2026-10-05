@@ -273,7 +273,7 @@ class NgsolveBackend(SolverBackend):
             ),
             PhysicsCapability(
                 name="dg_methods",
-                description="Interior-penalty DG (SIPG) for advection-diffusion using L2 dglagrange space",
+                description="Interior-penalty DG (SIPG) for advection-diffusion using the L2(mesh, order=k, dgjumps=True) space",
                 spatial_dims=[2],
                 element_types=["L2-DG-Pk"],
                 template_variants=["2d"],

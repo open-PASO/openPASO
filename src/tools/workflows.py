@@ -358,7 +358,12 @@ def register_workflow_tools(mcp: FastMCP):
         agent has explicitly approved the setup. Skipping this step is the
         most common source of wrong simulation results.
 
-        Currently supported for 4C backend (uses RESTARTFROMSTEP).
+        Currently supported for 4C backend: sets PROBLEM TYPE RESTART to the
+        last step of the finished run; 4C reads that restart from the run's own
+        output and writes the continuation under the prefix output-1. The
+        finished run must have written a restart at that step (RESTARTEVERY in
+        its dynamics section decides that; Scalar_Transport's default is every
+        step).
         For FEniCS/deal.II: re-run with modified parameters.
 
         Args:
@@ -393,8 +398,10 @@ def register_workflow_tools(mcp: FastMCP):
                 timestep = sec.get("TIMESTEP", 1.0)
                 sec["NUMSTEP"] = old_numstep + additional_steps
                 sec["MAXTIME"] = sec.get("MAXTIME", 0) + additional_steps * timestep
-                data.setdefault("IO", {})["RESTARTEVRY"] = old_numstep
-                sec["RESTARTFROMSTEP"] = old_numstep
+                # 4C has no RESTARTEVRY or RESTARTFROMSTEP key (a deck with them
+                # stops with "Could not match this input"); PROBLEM TYPE RESTART
+                # is the step to restart from when no --restart flag is given.
+                data.setdefault("PROBLEM TYPE", {})["RESTART"] = old_numstep
                 break
         else:
             return "Could not find dynamics section to modify for restart."

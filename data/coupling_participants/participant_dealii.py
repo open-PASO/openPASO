@@ -210,8 +210,11 @@ if _src.is_file() and (not _exe.is_file() or _exe.stat().st_mtime < max(
                         "names, and keep deal_ii_setup_target in CMakeLists.txt." if _usr else
                         "The LINK failed: the first 'undefined reference' names a call that compiled "
                         "and that deal.II defines for other arguments." if "undefined reference" in "".join(_err) else
-                        "Fix the FIRST one; it names the line of dealii_side.cc. A hole left empty "
-                        "fails exactly so." if " error: " in "".join(_err) else
+                        "Fix the FIRST one; it names the line of dealii_side.cc."
+                        + (" A name a hole leaves, missing where the lines after it use it (the hole left "
+                           "empty, or the name declared inside a { } block), fails exactly so."
+                           if "was not declared" in "".join(_err) else "")
+                        if " error: " in "".join(_err) else
                         "If cmake did not find deal.II, set DEAL_II_DIR above to the build or "
                         "install tree discover(query='list') names."))
 if not _exe.is_file():

@@ -1,8 +1,9 @@
 """scikit-fem adaptive Poisson (h-adaptive) generator and knowledge.
 
-Mirrors scikit-fem upstream ex11 (adaptive Poisson) and ex22 (residual
-estimator). The backend previously had `poisson` (uniform mesh) but no
-adaptive h-refinement loop, leaving a clear gap relative to upstream.
+Mirrors scikit-fem upstream ex22 (adaptive Poisson on an L-shaped domain
+with a residual estimator). The backend previously had `poisson` (uniform
+mesh) but no adaptive h-refinement loop, leaving a clear gap relative to
+upstream.
 
 The residual error estimator (Babuška-Rheinboldt) for -Δu = f on P1 is
 
@@ -187,8 +188,9 @@ KNOWLEDGE: dict = {
             "h-adaptive Poisson with the Babuška-Rheinboldt "
             "residual estimator on triangular P1, driven by an "
             "L-shaped re-entrant-corner test case. Matches "
-            "scikit-fem upstream ex11 (adaptive Poisson) + ex22 "
-            "(residual estimator) — the backend previously had "
+            "scikit-fem upstream ex22 (adaptive Poisson on an "
+            "L-shaped domain with a residual estimator) — the "
+            "backend previously had "
             "only uniform Poisson, so this fills the canonical "
             "h-adaptive gap."
         ),
@@ -351,8 +353,8 @@ KNOWLEDGE: dict = {
             "refined-mesh region does not cluster around (0,0).",
         ],
         "references": [
-            "scikit-fem examples: ex11 (adaptive Poisson), "
-            "ex22 (residual estimator)",
+            "scikit-fem examples: ex22 (adaptive Poisson, "
+            "residual estimator)",
             "Babuška, I. & Rheinboldt, W. (1978) — "
             "'Error estimates for adaptive finite element "
             "computations'",

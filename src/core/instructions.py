@@ -102,7 +102,7 @@ INSTRUCTIONS = (
         "- **NGSolve**: Python. Maxwell, Helmholtz, DG/HDG, high-order, eigenvalues, symbolic PDE.\n"
         "- **scikit-fem**: Pure Python. Assembly-level control, 50+ element types, Stokes, biharmonic.\n"
         "- **Kratos Multiphysics**: Python/JSON. Structural, fluid, FSI, DEM, MPM, CoSimulation (39 catalog physics rows on this install).\n"
-        "- **DUNE-fem**: Python/UFL. Shares UFL with FEniCS, DG methods, VEM, h/p-adaptivity (install: `pip install dune-fem mpi4py` — PyPI is the working source; conda-forge has NO dune-fem package, and mpi4py is an undeclared dependency without which the first import stops. DUNE compiles C++ on demand, so the first solve is slow. See knowledge(topic='install', solver='dune')).\n"
+        "- **DUNE-fem**: Python/UFL. Shares UFL with FEniCS, DG methods, VEM, h/p-adaptivity (install: `pip install dune-fem mpi4py` — PyPI is the working source; conda-forge has NO dune-fem package, and mpi4py is an undeclared dependency that a DUNE built against MPI needs: without it the first import stops. DUNE compiles C++ on demand, so the first solve is slow. See knowledge(topic='install', solver='dune')).\n"
         "- **SPARTA**: input deck. Direct Simulation Monte Carlo for rarefied gas flow -- a PARTICLE method, not a mesh solver: it needs its own data directory and binary (set SPARTA_BINARY), and its deck grammar is served with its coupling contract.\n"
         "- **FEBio**: XML. Biomechanics (biphasic / multiphasic tissue, active contraction). Install the binary from https://febio.org/downloads/ or set the FEBIO_BINARY env var.\n\n"
         "## Workflow\n"

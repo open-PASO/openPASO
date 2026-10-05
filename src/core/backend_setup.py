@@ -99,10 +99,18 @@ def _current_os() -> str:
 # the first route whose `os_support` covers the current OS.
 #
 # Schema per route:
-#   kind:        "pip" | "conda" | "binary" | "source"
+#   kind:        "pip" | "conda" | "binary" | "source" | "spack"
 #   description: one line
 #   commands:    list of argv lists (pip/conda routes only — source
 #                routes delegate to source_orchestrator)
+#   spec:        spack routes only — the exact spec `spack install` gets;
+#                an `openpaso.` prefix names a recipe openPASO ships
+#                (data/spack), handed to Spack for that call only (-C scope)
+#   installed_as, override:
+#                spack routes only — how to find the result
+#                (core.spack.installed_prefix) and the variable, with the path
+#                inside the prefix, that makes openPASO use it when another
+#                build of the solver comes earlier in the finder
 #   os_support:  {os_key: {"verified": bool,
 #                          "system_deps": [...],   # apt / brew names
 #                          "notes": [...]}}        # human guidance
@@ -110,6 +118,19 @@ def _current_os() -> str:
 #
 # The darwin "notes" lists are the landing zone for the user's Mac
 # compile findings (e.g. the 4C discussion-thread settings).
+
+# A serial deal.II with what the served templates use (UMFPACK, LAPACK,
+# Kokkos, METIS, muParser, GSL). Upstream's default turns on MPI, PETSc,
+# Trilinos, p4est, SLEPc, VTK and more, and takes hours. Every pin below
+# answers a failure measured on Ubuntu 20.04; the route notes quote them.
+# `openpaso.dealii` is upstream's recipe plus two fixes (data/spack).
+DEALII_SPACK_SPEC = (
+    "openpaso.dealii@9.7.1 build_type=Release ~mpi ~examples ~adol-c ~arborx ~arpack "
+    "~assimp ~cgal ~ginkgo ~gmsh ~hdf5 ~netcdf ~opencascade ~p4est ~petsc "
+    "~python ~scalapack ~slepc ~sundials ~symengine ~taskflow ~threads "
+    "~trilinos ~vtk +gsl +kokkos +metis +muparser ^kokkos@4 ^cmake@3.31:")
+SPARTA_SPACK_SPEC = "openpaso.sparta-dsmc@2026.08.27 ~mpi"
+FOURC_SPACK_SPEC = "openpaso.4c@2026.3.0"
 
 SETUP_ROUTES: dict[str, list[dict[str, Any]]] = {
     "skfem": [
@@ -333,6 +354,94 @@ SETUP_ROUTES: dict[str, list[dict[str, Any]]] = {
                            "notes": []},
             },
         },
+        {
+            "kind": "spack",
+            "description": "spack install deal.II 9.7.1, serial, with the "
+                           "features the templates use",
+            "spec": DEALII_SPACK_SPEC,
+            "installed_as": "openpaso.dealii",
+            "override": ("DEAL_II_DIR", ""),
+            "commands": [],
+            "typical_minutes": 45,
+            "os_support": {
+                "linux": {"verified": True,
+                          "system_deps": ["spack", "g++", "gfortran", "make",
+                                          "cmake 3.13 or newer (compiles the "
+                                          "templates; Spack's own cmake is only a "
+                                          "build dependency, and `spack gc` removes it)"],
+                          "notes": [
+                              "Needs Spack: git clone --depth=2 --branch=v1.2.2 "
+                              "https://github.com/spack/spack.git ~/spack "
+                              "(`openpaso install` offers to run it). The first "
+                              "install also bootstraps Spack's solver and clones "
+                              "its package repository, a few minutes.",
+                              "Spack uses what the system has only when it is "
+                              "registered: `spack external find` registers cmake, "
+                              "perl, openssl, Open MPI and the like, and Spack "
+                              "builds whatever is not. The times here were measured "
+                              "with those registered.",
+                              "The spec is the serial deal.II the served "
+                              "templates were verified with. Upstream's default "
+                              "turns on MPI, PETSc, Trilinos, p4est, SLEPc, VTK "
+                              "and more, which takes hours and is not what the "
+                              "templates need.",
+                              "The recipe is openPASO's `dealii` (data/spack): "
+                              "upstream's plus two fixes. Upstream leaves Spack's "
+                              "compiler wrapper in deal.IIConfig.cmake, so every "
+                              "program built against it outside Spack stops at "
+                              "CMake's compiler check with `Spack compiler must "
+                              "be run from Spack! Input "
+                              "'SPACK_COMPILER_WRAPPER_PATH' is missing.`; and "
+                              "it passes DEAL_II_WITH_OPENCASCADE only with "
+                              "+opencascade, so ~opencascade let deal.II link "
+                              "Ubuntu's OpenCASCADE 7.3.0 from /usr.",
+                              "Spack's recipe refuses +arpack without MPI (`To "
+                              "enable arpack it is necessary to build deal.II "
+                              "with MPI support enabled`), so the spec turns it "
+                              "off; no served template uses ArpackSolver.",
+                              "Taskflow is off. deal.II 9.7 asks for taskflow "
+                              "3.10 or newer, Spack's taskflow recipe has no "
+                              "release past 3.7.0, so the concretizer takes "
+                              "taskflow@master, which needs C++20 and fails "
+                              "against deal.II's C++17: `'iter_value_t' in "
+                              "namespace 'std' does not name a template type`.",
+                              "TBB is off too, so this deal.II has no task-based "
+                              "multithreading; the served templates do not need "
+                              "it. deal.II 9.7.1 looks for the old "
+                              "header tbb/tbb_stddef.h before oneTBB's, Spack's "
+                              "TBB is oneTBB, so on a machine with an old system "
+                              "TBB (Ubuntu's libtbb-dev) it takes the system "
+                              "headers with Spack's library: `VERSION: 2020.1 "
+                              "... LINK_LIBRARIES: .../intel-tbb-2023.0.0/lib/"
+                              "libtbb.so ... INCLUDE_DIRECTORIES: /usr/include`.",
+                              "CMake must be 3.31 or newer. With the system "
+                              "CMake 3.16.3 deal.II's Boost probe asks for the "
+                              "`system` component, which Boost 1.90 no longer "
+                              "ships: `Could NOT find Boost: missing: system`. "
+                              "The same Boost passes with CMake 3.31.11.",
+                              "Kokkos is pinned to the 4.x line (verified with "
+                              "4.6.02). Left free, Spack picks Kokkos 5.1.1 "
+                              "built with C++20 against deal.II's C++17; that "
+                              "combination was not tried.",
+                              "openPASO finds the result through Spack itself "
+                              "(`spack find openpaso.dealii`). A deal.II that "
+                              "comes earlier in the search (DEAL_II_DIR, a conda "
+                              "env, a build in ~/dealii) still wins; `openpaso "
+                              "install` then prints the DEAL_II_DIR that selects "
+                              "the Spack build.",
+                              "Measured on Ubuntu 20.04 (gcc 13.1): 35 of the "
+                              "36 served templates compile and run on it. The "
+                              "element survey names FE_NedelecNodal, which "
+                              "deal.II added after 9.7.1: `error: "
+                              "'FE_NedelecNodal' was not declared in this "
+                              "scope`. It runs on the development tree (9.8.0-"
+                              "pre).",
+                          ]},
+                "darwin": {"verified": False, "system_deps": ["spack"],
+                           "notes": ["EXTENSION POINT — not verified on "
+                                     "macOS."]},
+            },
+        },
     ],
     "fourc": [
         {
@@ -384,6 +493,91 @@ SETUP_ROUTES: dict[str, list[dict[str, Any]]] = {
                                "the verified step list: brew deps, "
                                "CMake cache entries, and any source "
                                "patches."]},
+            },
+        },
+        {
+            "kind": "spack",
+            "description": "spack install 4C 2026.3.0 with its whole "
+                           "dependency tree, from openPASO's recipe "
+                           "(upstream Spack has none)",
+            "spec": FOURC_SPACK_SPEC,
+            "installed_as": "openpaso.4c",
+            "override": ("FOURC_BINARY", "bin/4C"),
+            "commands": [],
+            "typical_minutes": 90,
+            "os_support": {
+                "linux": {"verified": True,
+                          "system_deps": ["spack", "g++ 13 or newer",
+                                          "gfortran", "an MPI, registered with "
+                                          "`spack external find openmpi` (else "
+                                          "Spack builds one)"],
+                          "notes": [
+                              "Needs Spack: git clone --depth=2 --branch=v1.2.2 "
+                              "https://github.com/spack/spack.git ~/spack "
+                              "(`openpaso install` offers to run it). The first "
+                              "install also bootstraps Spack's solver and clones "
+                              "its package repository, a few minutes.",
+                              "Spack uses what the system has only when it is "
+                              "registered: `spack external find` registers cmake, "
+                              "perl, openssl, Open MPI and the like, and Spack "
+                              "builds whatever is not. The times here were measured "
+                              "with those registered.",
+                              "openPASO's `4c` recipe (data/spack) builds 4C "
+                              "2026.3.0 and everything under it from source: "
+                              "Trilinos 16.2.1 with the packages 4C uses, "
+                              "SuperLU_dist 9.2.1, SuiteSparse 5.4.0, HDF5, "
+                              "MUMPS, Boost, CLN and ParMETIS. The three "
+                              "libraries 4C fetches while configuring (ryml, "
+                              "magic_enum, CLI11) come in as pinned Spack "
+                              "resources. From scratch it took 72 minutes on a "
+                              "loaded 32-core machine, most of it Trilinos.",
+                              "4C 2026.3.0 pins a Trilinos development commit; "
+                              "the recipe uses the release 16.2.1 and tells 4C "
+                              "its internal Trilinos version. 4C builds against "
+                              "it and passes its own test "
+                              "ale2d_solid_lin.4C.yaml.",
+                              "The binary carries an RPATH to every library it "
+                              "loads, so none of the LD_LIBRARY_PATH directories "
+                              "the source build needs apply here. The recipe "
+                              "also builds post_processor (4C leaves it out of "
+                              "its default build) and installs it beside 4C, "
+                              "which is where openPASO looks for it to turn "
+                              "native output into VTU. Of the 9 served "
+                              "templates that write only native output, 5 "
+                              "convert. 2026.3.0's post_processor has no case "
+                              "for the thermo problem type (`problem type "
+                              "thermo not yet supported`), so the three thermo "
+                              "templates finish but stay unreadable; the March "
+                              "2026 development tree still converted them. "
+                              "reduced_airways/airways_1d gives no VTU in either "
+                              "build.",
+                              "openPASO finds it through `spack find 4c` when no "
+                              "other 4C comes earlier in the search "
+                              "(FOURC_BINARY, FOURC_ROOT, ~/4C/build); `openpaso "
+                              "install` then prints the FOURC_BINARY that "
+                              "selects the Spack build.",
+                              "Measured on Ubuntu 20.04 (gcc 13.1): 68 of the "
+                              "69 served templates run on it, each on the rank "
+                              "count its header names (the LES channel needs "
+                              "4). The 69th, the input-format stub, is not "
+                              "meant to run. openPASO serves each template in "
+                              "the input form of the 4C it finds, and the same "
+                              "68 run on a development build from before "
+                              "2026.2.0 and on 4C 2026.2.0. FS3I and FE2 "
+                              "multiscale read files from a 4C source tree: "
+                              "for those two, point FOURC_ROOT at the 2026.3.0 "
+                              "sources.",
+                              "The recipe builds 4C with ArborX (variant "
+                              "arborx, on by default; 4C's own CMake default is "
+                              "off). From 2026.3.0 on, beam interaction always "
+                              "searches with ArborX, and a 4C built without it "
+                              "stops every beam-interaction run with `The struct "
+                              "'Core::GeometricSearch::BoundingVolume' can only "
+                              "be used with ArborX`.",
+                          ]},
+                "darwin": {"verified": False, "system_deps": ["spack"],
+                           "notes": ["EXTENSION POINT — not verified on "
+                                     "macOS."]},
             },
         },
     ],
@@ -480,6 +674,72 @@ SETUP_ROUTES: dict[str, list[dict[str, Any]]] = {
                                      "macOS."]},
             },
         },
+        {
+            "kind": "spack",
+            "description": "spack install sparta-dsmc, openPASO's recipe "
+                           "(upstream Spack's `sparta` is a different "
+                           "program)",
+            "spec": SPARTA_SPACK_SPEC,
+            "installed_as": "openpaso.sparta-dsmc",
+            "override": ("SPARTA_BINARY", "bin/spa_serial"),
+            "commands": [],
+            "typical_minutes": 5,
+            "os_support": {
+                "linux": {"verified": True,
+                          "system_deps": ["spack", "g++"],
+                          "notes": [
+                              "Needs Spack: git clone --depth=2 --branch=v1.2.2 "
+                              "https://github.com/spack/spack.git ~/spack "
+                              "(`openpaso install` offers to run it). The first "
+                              "install also bootstraps Spack's solver and clones "
+                              "its package repository, a few minutes.",
+                              "Spack uses what the system has only when it is "
+                              "registered: `spack external find` registers cmake, "
+                              "perl, openssl, Open MPI and the like, and Spack "
+                              "builds whatever is not. The times here were measured "
+                              "with those registered.",
+                              "Upstream Spack's package named `sparta` is sPARTA, "
+                              "an unrelated bioinformatics tool. openPASO ships "
+                              "the DSMC recipe as `sparta-dsmc` in its data/spack "
+                              "repository. `openpaso install sparta --via spack` "
+                              "hands that repository to Spack for the install "
+                              "alone (`spack -C <scope>`); the repository is "
+                              "not added to your Spack configuration. Spack "
+                              "itself writes there as for any command: where "
+                              "no compiler is configured yet, the first "
+                              "concretization records the ones it finds in "
+                              "~/.spack.",
+                              "`~mpi` builds spa_serial and needs no MPI; the "
+                              "recipe's default `+mpi` builds spa_mpi against "
+                              "the MPI Spack finds. Both built and ran "
+                              "examples/free (1000 steps) on Ubuntu 20.04 with "
+                              "gcc 13.1.",
+                              "The route builds SPARTA's current release, 27 Aug "
+                              "2026. Of the 15 served templates, 13 run on it. "
+                              "rarefied_flow/channel_2d and "
+                              "collision_relaxation/box_2d stop at `compute "
+                              "lambda/grid f_fnr[*]` on a one-species average: "
+                              "`ERROR: Cannot use wildcard with f_fnr[*] because "
+                              "it does not produce multiple values`. All 15 run "
+                              "on SPARTA's development tree of 26 Jun 2026 "
+                              "(d9e963a), which still reports itself as 24 Sep "
+                              "2025. The 24 Sep 2025 release itself has no `fix "
+                              "controller`, which capability_survey/box uses.",
+                              "The recipe uses SPARTA's CMake build (the cmake/ "
+                              "subdirectory) and enables no optional package: "
+                              "`spa_serial -kokkos on` answers `ERROR: Cannot "
+                              "use -kokkos on without KOKKOS installed`.",
+                              "openPASO finds the executable through Spack "
+                              "(`spack find sparta-dsmc`) when no other SPARTA "
+                              "comes earlier in the search (SPARTA_BINARY, PATH, "
+                              "a checkout build); `openpaso install` then prints "
+                              "the SPARTA_BINARY that selects the Spack build.",
+                          ]},
+                "darwin": {"verified": False, "system_deps": ["spack"],
+                           "notes": ["EXTENSION POINT — not verified on "
+                                     "macOS."]},
+            },
+        },
     ],
 }
 
@@ -554,6 +814,29 @@ def plan_setup(backend: str, prefer: str | None = None) -> dict:
                 "error": f"No setup route for {backend} on {osk}."}
 
     os_meta = chosen["os_support"][osk]
+    commands = [" ".join(c) for c in chosen["commands"]]
+    if chosen["kind"] == "spack":
+        # Shown, not run inline: a Spack build takes minutes to hours.
+        # setup_backend(action='install', route='spack') starts it in the
+        # background; `openpaso install <solver> --via spack` in the foreground.
+        import shlex
+        from core.spack import (default_clone_target, install_command,
+                                needs_recipe_repository, recipe_repository,
+                                recipe_scope_path, usable_spack, RECIPE_NAMESPACE)
+        commands.append(f"openpaso install {backend} --via spack")
+        if needs_recipe_repository(chosen["spec"]):
+            # What openpaso writes before it calls Spack, so the Spack line
+            # below also works when run by hand. printf '%s\n' with quoted
+            # arguments, and a JSON-escaped YAML value, keep any path intact.
+            import json
+            scope = recipe_scope_path()
+            line = f"  {RECIPE_NAMESPACE}: {json.dumps(str(recipe_repository()))}"
+            commands.append(f"mkdir -p {shlex.quote(str(scope))} && printf '%s\\n' "
+                            f"{shlex.quote('repos:')} {shlex.quote(line)} > "
+                            f"{shlex.quote(str(scope / 'repos.yaml'))}")
+        # The Spack that would run it, by path: the clone below ~/spack is not on PATH.
+        spack_exe = usable_spack()[0] or str(default_clone_target() / "bin" / "spack")
+        commands.append(shlex.join(install_command(spack_exe, chosen["spec"])))
     return {
         "backend": backend,
         "os": osk,
@@ -562,11 +845,17 @@ def plan_setup(backend: str, prefer: str | None = None) -> dict:
         "route": {
             "kind": chosen["kind"],
             "description": chosen["description"],
-            "commands": [" ".join(c) for c in chosen["commands"]],
+            "commands": commands,
             "system_deps": os_meta.get("system_deps", []),
             "notes": os_meta.get("notes", []),
             "verified_on_this_os": os_meta.get("verified", False),
             "typical_minutes": chosen["typical_minutes"],
+            **({"spec": chosen["spec"],
+                "how_to_run": ("Either the first command alone (openpaso writes "
+                               "the scope, runs Spack and checks the result; add "
+                               "--yes where there is no terminal to answer its "
+                               "question), or the other commands by hand, in order.")}
+               if chosen["kind"] == "spack" else {}),
         },
         "alternatives": [
             {"kind": r["kind"], "description": r["description"]}
@@ -606,7 +895,8 @@ def execute_setup(backend: str, route_kind: str | None = None,
             t0 = time.time()
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True,
-                                      timeout=timeout, stdin=subprocess.DEVNULL)
+                                      timeout=timeout,
+                                      stdin=subprocess.DEVNULL)
                 result["steps"].append({
                     "step": " ".join(cmd)[:120],
                     "rc": proc.returncode,
@@ -638,6 +928,8 @@ def execute_setup(backend: str, route_kind: str | None = None,
                           "Re-run setup_backend(action='verify', "
                           f"solver='{backend}') when it finishes.")
         return result
+    elif route["kind"] == "spack":
+        return _start_spack_build(backend, route, result)
     elif route["kind"] == "binary":
         result["status"] = "manual_step_required"
         result["note"] = route["description"]
@@ -650,6 +942,55 @@ def execute_setup(backend: str, route_kind: str | None = None,
     return result
 
 
+def _start_spack_build(backend: str, route: dict, result: dict) -> dict:
+    """Start `spack install <spec>` detached, the way source builds run.
+
+    A Spack build takes minutes to hours, far past what an MCP call should
+    block for; the log path lets the caller watch it, and verify afterwards
+    finds the result through Spack (core.spack.installed_prefix; verify drops
+    its remembered answers first)."""
+    import shlex
+    from core import spack as sp
+    from core.session_journal import state_dir
+    spec = route["spec"]
+    exe, passed_over = sp.usable_spack()
+    if exe is None and passed_over:
+        result["status"] = "tool_missing"
+        result["note"] = ("; ".join(passed_over) + ". " + sp.clone_advice()
+                          + ", then call this again.")
+        return result
+    if exe is None:
+        result["status"] = "tool_missing"
+        result["note"] = ("Spack is not installed. Get it with: "
+                          f"{shlex.join(sp.SPACK_CLONE)} {sp.default_clone_target()} "
+                          f"-- or run `openpaso install {backend} --via spack`, "
+                          "which offers to do that.")
+        return result
+    try:
+        if sp.needs_recipe_repository(spec):
+            sp.write_recipe_scope()
+        logs = state_dir("spack-builds")
+        logs.mkdir(parents=True, exist_ok=True)
+        log = logs / f"{backend}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{time.time_ns() % 10**6}.log"
+        command = sp.install_command(exe, spec)
+        with open(log, "w") as handle:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=handle,
+                             stderr=subprocess.STDOUT, start_new_session=True,
+                             env=sp.spack_env(loads_recipes=True))
+    except (OSError, RuntimeError) as exc:
+        result["status"] = "install_failed"
+        result["note"] = f"could not start the Spack build: {exc}"
+        return result
+    sp.remember_executable(exe)
+    result["steps"].append({"step": shlex.join(command), "log": str(log)})
+    result["status"] = "build_started_background"
+    result["note"] = (f"Spack builds in the background (typically "
+                      f"~{route['typical_minutes']} min); the log is {log}. Re-run "
+                      f"setup_backend(action='verify', solver='{backend}') when "
+                      "its last line reads `[+] ...` for the package itself.")
+    return result
+
+
 def _verify_and_persist(backend: str) -> dict:
     """Smoke-test the backend; on success persist paths to sources.json.
 
@@ -658,6 +999,12 @@ def _verify_and_persist(backend: str) -> dict:
     'installed_unverified' if detection says they are actually
     available — otherwise 'not_installed', and nothing is persisted."""
     out: dict[str, Any] = {}
+    # A build may have finished since the last lookup (setup_backend starts
+    # Spack builds in the background); ask Spack afresh.
+    from core import host_paths
+    from core.spack import forget
+    forget()
+    host_paths.forget()
     try:
         from core.smoke_tests import SMOKE_TESTS
         fn = SMOKE_TESTS.get(backend)
@@ -696,7 +1043,39 @@ def _verify_and_persist(backend: str) -> dict:
             out["persisted"] = f"{path} updated for {backend}"
         except Exception as e:
             out["persisted"] = f"persist skipped: {e}"
+    shadowed = _spack_build_shadowed(backend)
+    if shadowed:
+        out["spack_build_not_used"] = shadowed
     return out
+
+
+def _spack_build_shadowed(backend: str) -> str | None:
+    """Say so when a Spack build of `backend` exists but openPASO uses another.
+
+    The finders try an explicit variable and the usual build places before
+    Spack, so an older install found earlier wins over a new Spack build. The
+    CLI prints the variable that selects the Spack build; this is the same
+    answer for an agent that installed through setup_backend."""
+    route = next((r for r in SETUP_ROUTES.get(backend, []) if r.get("kind") == "spack"), None)
+    if route is None:
+        return None
+    try:
+        from core import spack as sp  # noqa: PLC0415
+        prefix = sp.installed_prefix(route["spec"])
+    except Exception:  # noqa: BLE001 -- a lookup that fails says nothing
+        return None
+    if prefix is None:
+        return None
+    details = detect_backend(backend).get("details", "")
+    if sp.names_prefix(details, prefix):
+        return None
+    variable, inside = route["override"]
+    target = prefix / inside if inside else prefix
+    if not target.exists():
+        return None
+    return (f"A Spack build is installed at {prefix}, but openPASO uses another "
+            f"install ({details}). To use the Spack build, set {variable}={target} "
+            "in the environment openPASO starts in.")
 
 
 # ── Rendering ────────────────────────────────────────────────────────────

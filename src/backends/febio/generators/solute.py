@@ -7,7 +7,7 @@ case that sits between 'biphasic' (fluid, no solute) and 'multiphasic'
 with its own solver, not a configuration of either neighbour.
 
 Derived from the working multiphasic template and verified by execution on
-FEBio 4.12.0: NORMAL TERMINATION, 21 converged steps, results written. The
+FEBio 4.12.0: NORMAL TERMINATION, 10 converged time steps, results written. The
 three errors it took to get there are the knowledge below -- each one is a
 thing FEBio refuses that reads as though the deck is malformed.
 """

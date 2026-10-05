@@ -24,6 +24,7 @@ from core.backend import (
     PhysicsCapability, JobHandle,
 )
 from core.registry import register_backend
+from backends.fourc.grammar_dialect import LEGACY
 
 logger = logging.getLogger("openpaso.fourc")
 
@@ -158,7 +159,7 @@ def _identifies_as_fourc(binary) -> tuple[bool, str]:
         # failed open. Under an MCP stdio server the parent's stdin is the
         # JSON-RPC stream, so an identity probe could eat the protocol.
         r = subprocess.run([key], capture_output=True, timeout=20,
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, env=fourc_library_env(key))
         blob = (r.stdout + r.stderr).decode("utf-8", errors="replace").lower()
         # 4C's banner names itself in full. The first version matched "4c",
         # "dat file" and "input file", all of which are far too weak: "4c" is
@@ -173,8 +174,9 @@ def _identifies_as_fourc(binary) -> tuple[bool, str]:
         # `FourC::Core::Exception` with "Please provide both <input> and
         # <output> arguments." and aborts. An audit recommended matching the
         # project's full name, "Comprehensive Computational Community Code" —
-        # that appears in the banner on a successful start, NOT on this path, so
-        # matching it refused the real binary. Both the first token set and its
+        # 4C prints that only in its `--help` text, not in the banner of a run
+        # (which shows "4C", the version and the git SHA1) and NOT on this path,
+        # so matching it refused the real binary. Both the first token set and its
         # proposed replacement were wrong in opposite directions, which is why
         # this now uses strings taken from the observed output.
         #
@@ -201,6 +203,36 @@ def _identifies_as_fourc(binary) -> tuple[bool, str]:
 
     _FOURC_IDENT_CACHE[key] = verdict
     return verdict
+
+
+FOURC_DEPENDENCY_LIB = "/opt/4C-dependencies/lib"
+
+
+def fourc_library_env(binary) -> dict:
+    """The environment a 4C binary (or its post_processor) runs in.
+
+    A source build of 4C finds Trilinos and the rest in
+    /opt/4C-dependencies/lib, where 4C's dependency scripts install them, so
+    that directory goes first on LD_LIBRARY_PATH. A Spack build carries its
+    own search path to every library it loads and must NOT see that directory:
+    Spack links with RPATH by default, which beats LD_LIBRARY_PATH (measured:
+    0 of the 93 libraries the Spack 4C loads came from there even with it
+    forced first), but a Spack set to `shared_linking: runpath` would let it
+    win and load another Trilinos. A binary counts as a Spack build when its
+    prefix holds Spack's .spack/spec.json; for it the directory is removed,
+    also when inherited from the caller's environment."""
+    from core.spack import build_prefix   # noqa: PLC0415
+    env = os.environ.copy()
+    parts = [p for p in env.get("LD_LIBRARY_PATH", "").split(":") if p]
+    if build_prefix(binary) is not None:
+        parts = [p for p in parts if p.rstrip("/") != FOURC_DEPENDENCY_LIB]
+    elif FOURC_DEPENDENCY_LIB not in parts:
+        parts.insert(0, FOURC_DEPENDENCY_LIB)
+    if parts:
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 
 def _find_fourc_binary() -> Optional[Path]:
@@ -241,6 +273,12 @@ def _find_fourc_binary() -> Optional[Path]:
         p = Path(cand).expanduser()
         if p.is_file():
             return p
+    # A 4C built by `openpaso install fourc --via spack` (openPASO ships the
+    # recipe as `4c`) sits in a hashed prefix; Spack knows where.
+    from core.spack import installed_prefix   # noqa: PLC0415
+    prefix = installed_prefix("4c")
+    if prefix is not None and (prefix / "bin" / "4C").is_file():
+        return prefix / "bin" / "4C"
     p = shutil.which("4C")
     return Path(p) if p else None
 
@@ -367,15 +405,26 @@ class FourcBackend(SolverBackend):
         return InputFormat.YAML
 
     def get_version(self) -> Optional[str]:
+        # 4C has no --version option: it exits 109 with "The following argument
+        # was not expected: --version" on stderr and nothing on stdout. `4C -p`
+        # prints the input grammar with a top-level `metadata:` block whose
+        # `version:` entry is the version the build reports (measured on a
+        # development build before 2026.2.0, on 4C 2026.2.0 and on 4C 2026.3.0).
         binary = _find_fourc_binary()
         if not binary:
             return None
         import subprocess
         try:
-            r = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+            r = subprocess.run([str(binary), "-p"], capture_output=True, text=True, timeout=20,
+                               stdin=subprocess.DEVNULL, env=fourc_library_env(binary))
+            in_metadata = False
             for line in r.stdout.splitlines():
-                if "version" in line.lower():
-                    return line.strip()
+                if line.startswith("metadata:"):
+                    in_metadata = True
+                elif in_metadata and line and not line.startswith(" "):
+                    break
+                elif in_metadata and line.strip().startswith("version:"):
+                    return line.split(":", 1)[1].strip().strip('"') or None
         except Exception:
             pass
         return None
@@ -463,7 +512,7 @@ class FourcBackend(SolverBackend):
                               ["FLUID HEX8", "BEAM3R LINE2"],
                               ["penalty_3d"]),
             PhysicsCapability("fpsi", "Fluid-porous-structure interaction", [3],
-                              ["FLUID HEX8", "SOLIDPORO HEX8"],
+                              ["FLUID HEX8", "SOLIDPORO_PRESSURE_VELOCITY_BASED HEX8"],
                               ["monolithic_3d"]),
             PhysicsCapability("pasi", "Particle-structure interaction", [3],
                               ["SOLID HEX8", "particle"],
@@ -475,7 +524,7 @@ class FourcBackend(SolverBackend):
                               ["TRANSP HEX8"],
                               ["monodomain_3d"]),
             PhysicsCapability("arterial_network", "Arterial network (1-D blood flow)", [1],
-                              ["ARTERY LINE2"],
+                              ["ART LINE2"],
                               ["single_artery_1d"]),
             PhysicsCapability("xfem_fluid", "XFEM fluid (embedded interfaces)", [3],
                               ["FLUID HEX8"],
@@ -490,7 +539,7 @@ class FourcBackend(SolverBackend):
                               ["LUBRICATION QUAD4", "SOLID HEX8"],
                               ["ehl_3d"]),
             PhysicsCapability("reduced_airways", "Reduced-dimensional airways (lung)", [1],
-                              ["REDAIRWAY LINE2"],
+                              ["RED_AIRWAY LINE2", "RED_ACINUS LINE2"],
                               ["airways_1d"]),
             PhysicsCapability("beam_interaction", "Beam interaction (contact/meshtying)", [3],
                               ["BEAM3R LINE2", "SOLID HEX8"],
@@ -535,13 +584,15 @@ class FourcBackend(SolverBackend):
                               ["HEX27", "HEX8"],
                               ["monolithic_3d"]),
             PhysicsCapability("porous_media", "Poroelasticity (Biot/mixture theory, consolidation)", [2, 3],
-                              ["WALLQ4PORO", "WALLQ9PORO", "SOLIDH8PORO", "SOLIDT4PORO"],
+                              ["SOLIDPORO_PRESSURE_VELOCITY_BASED", "WALLQ4PORO (4C before 2026.2.0)",
+                               "WALLQ9PORO (4C before 2026.2.0)"],
                               ["single_phase_3d", "terzaghi_2d", "consolidation_3d"]),
             # New physics
             PhysicsCapability("membrane", "Membrane elements (inflatable, fabric, tissue)", [2, 3],
-                              ["MEMBRANE TRI3", "MEMBRANE QUAD4"], ["membrane_2d"]),
+                              ["MEMBRANE3 TRI3", "MEMBRANE4 QUAD4"], ["membrane_2d"]),
             PhysicsCapability("shell", "Shell elements (Kirchhoff-Love, Reissner-Mindlin)", [3],
-                              ["SHELL REISSNER QUAD4", "SHELL KIRCHHOFF TRI3", "SOLIDSHELL HEX8"], ["shell_3d"]),
+                              ["SHELL7P QUAD4", "SHELL7P TRI3", "SHELL_KIRCHHOFF_LOVE_NURBS NURBS9",
+                               "SOLID HEX8 with TECH shell_ans / shell_eas / shell_eas_ans"], ["shell_3d"]),
             PhysicsCapability("thermo", "Pure thermal analysis (standalone heat conduction)", [2, 3],
                               ["THERMO QUAD4", "THERMO HEX8"], ["thermo_2d", "thermo_3d"]),
             PhysicsCapability("thermo_transient_mms",
@@ -558,9 +609,9 @@ class FourcBackend(SolverBackend):
                               ["BEAM3R LINE2"], ["brownian_3d"]),
             PhysicsCapability("cardiovascular0d", "0-D cardiovascular: windkessel, closed-loop circulation, heart models", [3],
                               ["coupled to 3D fluid/structure"], ["windkessel_3d"]),
-            PhysicsCapability("reduced_lung", "Reduced lung model: 1D airways + 0D alveoli + optional 3D parenchyma", [1, 3],
-                              ["REDAIRWAY LINE2 + 0D acini"], ["lung_1d"]),
-            PhysicsCapability("fluid_turbulence", "Fluid turbulence: LES (Smagorinsky, dynamic, WALE) and DNS", [2, 3],
+            PhysicsCapability("reduced_lung", "Reduced lung: 1-D compliant-tube airway flow (Reduced_Lung_1D_Pipe_Flow)", [1],
+                              ["ART LINE2 (PROBLEMTYPE Reduced_Lung_1D_Pipe_Flow)"], ["lung_1d"]),
+            PhysicsCapability("fluid_turbulence", "Fluid turbulence: LES (Smagorinsky, Dynamic_Smagorinsky, Vreman, Dynamic_Vreman, Multifractal_Subgrid_Scales) and DNS", [2, 3],
                               ["FLUID QUAD4", "FLUID HEX8"], ["les_channel_3d"]),
             # ── 2026-06-01: umbrella catalogs from data/fourc_knowledge.py
             #    that aggregate pitfalls across families of specific
@@ -584,7 +635,7 @@ class FourcBackend(SolverBackend):
                 "structural_dynamics, beams, contact). For "
                 "specific physics use linear_elasticity / "
                 "plasticity / structural_dynamics directly.",
-                [2, 3], ["SOLID HEX8", "SOLID QUAD4"],
+                [2, 3], ["SOLID HEX8", "SOLID QUAD4 (4C 2026.2.0 and later)", "WALL QUAD4 (4C before 2026.2.0)"],
                 ["umbrella"]),
             PhysicsCapability(
                 "thermal",
@@ -756,14 +807,20 @@ class FourcBackend(SolverBackend):
         # branch below offers,
         # and the pairs it covers are exactly the ones that used to fall
         # through to the "Not a runnable input" stub.
+        #
+        # 4C's input format moves between releases: a template is served in
+        # the form of the grammar the 4C found here reads (grammar_dialect;
+        # the WALL grammar, LEGACY, when there is no 4C or it cannot be asked).
         from backends.fourc import decks as _decks
-        _deck = _decks.render(physics, variant)
+        from backends.fourc.grammar_dialect import dialect_of
+        dialect = dialect_of(_find_fourc_binary())
+        _deck = _decks.render(physics, variant, dialect)
         if _deck is not None:
             return _deck
 
         # First try inline mesh generators (self-contained, no external files)
         try:
-            return self._generate_inline(physics, variant, params)
+            return self._generate_inline(physics, variant, params, dialect)
         except ValueError:
             pass
 
@@ -886,10 +943,11 @@ class FourcBackend(SolverBackend):
         meta-reference physics (scalar_transport,
         structural_mechanics, thermal, particles, input_format).
         These aren't runnable physics inputs — they're a
-        catalog cross-reference. The returned YAML is parseable
-        and validates against 4C 2026.3 (no PROBLEM TYPE means
-        4C reports a 'PROBLEMTYPE missing' diagnostic, but the
-        file itself is valid YAML)."""
+        catalog cross-reference. The returned YAML is parseable,
+        but it has no PROBLEM TYPE, so 4C stops at "Required
+        section 'PROBLEM TYPE' not found in input file." (the
+        same on the WALL development build, 4C 2026.2.0 and
+        4C 2026.3.0)."""
         family_redirects = {
             "scalar_transport": ("poisson, heat, "
                                  "electrochemistry, level_set, "
@@ -978,7 +1036,8 @@ class FourcBackend(SolverBackend):
                     # An external mesh reference makes the template unrunnable
                     # for anyone who does not have that file. `\bFILE:` matches
                     # the mesh-file key and deliberately NOT TEKO_XML_FILE /
-                    # MICROFILE, which resolve through FOURC_ROOT and are
+                    # PRECONDITIONER_XML_FILE / MICROFILE, which resolve through
+                    # FOURC_ROOT and are
                     # documented on the two decks that need them.
                     if re.search(r"\bFILE:", child):
                         continue
@@ -993,8 +1052,13 @@ class FourcBackend(SolverBackend):
         return (f"# ---- concrete child, shown in full: "
                 f"{name} / {variant} ----\n" + child)
 
-    def _generate_inline(self, physics: str, variant: str, params: dict) -> str:
-        """Generate self-contained input with inline mesh (no external files)."""
+    def _generate_inline(self, physics: str, variant: str, params: dict,
+                         dialect: str = LEGACY) -> str:
+        """Generate self-contained input with inline mesh (no external files).
+
+        `dialect` is the input grammar of the 4C that will run it
+        (grammar_dialect); the 2-D structural element and the mixture
+        constituent are written in its form."""
         from backends.fourc.inline_mesh import (
             matched_poisson_input, matched_heat_input,
             matched_elasticity_input, matched_poisson_3d_input,
@@ -1032,7 +1096,7 @@ class FourcBackend(SolverBackend):
             return matched_elasticity_input(
                 nx=p.get("nx", 40), ny=p.get("ny", 4),
                 E=p.get("E", 1000.0), nu=p.get("nu", 0.3),
-                lx=p.get("lx", 10.0), ly=p.get("ly", 1.0))
+                lx=p.get("lx", 10.0), ly=p.get("ly", 1.0), dialect=dialect)
 
         inline_generators = {
             "poisson_2d": lambda p: matched_poisson_input(
@@ -1095,7 +1159,7 @@ class FourcBackend(SolverBackend):
                     E=p.get("E", 1000.0), nu=p.get("nu", 0.3),
                     dens=p.get("dens", 1.0),
                     numstep=p.get("numstep", 10),
-                    timestep=p.get("timestep", 0.05)),
+                    timestep=p.get("timestep", 0.05), dialect=dialect),
             # low_mach/heated_channel_2d fell through to the generator
             # template with <placeholder> scalars + an external Exodus
             # mesh (probe 2026-06-12: MatchTree abort). Route to the
@@ -1175,13 +1239,13 @@ class FourcBackend(SolverBackend):
             # UMFPACK). Mesh capped at 8^3: the probe passes nx=ny=nz=16
             # and a 16^3 monolithic SOLIDSCATRA solve is too big.
             # tsi/plane_strain_2d: pseudo-2D thin-slab route for 2D
-            # plane-strain thermo-mechanics. 4C has NO 2D TSI elements
-            # (module solid_scatra_3D_ele; every TSI corpus test is 3D)
-            # and the 2D structural eletypes both dead-end with the
-            # thermo material on current builds (WALL QUAD4 -> "Invalid
-            # type of material law for wall element"; SOLID QUAD4 ->
-            # "Element 'SOLID' does not seem to know cell type
-            # 'quad4'"). One SOLIDSCATRA HEX8
+            # plane-strain thermo-mechanics. 4C runs no 2D TSI: every
+            # TSI corpus test is 3D, a 4C before 2026.2.0 refuses the 2D
+            # elements (WALL QUAD4 -> "Unsupported solid element type!";
+            # SOLID QUAD4 -> "Element 'SOLID' does not seem to know cell
+            # type 'quad4'"), and 4C 2026.2.0 and 2026.3.0 accept a 2D
+            # SOLIDSCATRA or SOLID and then stop at "Unsupported solid
+            # element type!" too. One SOLIDSCATRA HEX8
             # layer with u_z fixed everywhere is exact plane strain;
             # temp_expr imposes a (partner-computed) temperature field.
             "tsi_plane_strain_2d":
@@ -1340,7 +1404,7 @@ class FourcBackend(SolverBackend):
             "mixture_mixture_3d": lambda p: matched_mixture_3d_input(
                 n=min(int(p.get("n", 4)), 6),
                 E=p.get("E", 1000.0), nu=p.get("nu", 0.3),
-                density=p.get("rho", 0.1)),
+                density=p.get("rho", 0.1), dialect=dialect),
             # constraint/constraint_3d previously returned a one-line
             # comment ("# Constraint template ...") — not a YAML dict, so
             # validate_input failed with "Input is not a YAML
@@ -1606,9 +1670,14 @@ class FourcBackend(SolverBackend):
 
         output_prefix = str(work_dir / "output")
 
-        mpirun = shutil.which("mpirun")
         max_procs = int(os.environ.get("FOURC_MAX_PROCS", "4"))
         np = min(np, max_procs)
+        # A Spack build starts with the launcher of the MPI it links against,
+        # any other build with the mpirun on PATH.
+        mpirun = None
+        if np > 1:
+            from core.spack import mpi_launcher   # noqa: PLC0415
+            mpirun = mpi_launcher(binary) or shutil.which("mpirun")
 
         # Wrap with stdbuf -oL to force line-buffered stdout.
         # 4C writes errors to stdout (buffered) then calls MPI_Abort which
@@ -1628,13 +1697,8 @@ class FourcBackend(SolverBackend):
         start = time.time()
         job.started_at = start
         try:
-            env = os.environ.copy()
-            # Ensure 4C dependencies are on the library path
-            ld_path = env.get("LD_LIBRARY_PATH", "")
-            dep_lib = "/opt/4C-dependencies/lib"
-            if dep_lib not in ld_path:
-                ld_path = f"{dep_lib}:{ld_path}" if ld_path else dep_lib
-            env["LD_LIBRARY_PATH"] = ld_path
+            # a source build's dependency libraries, never for a Spack build
+            env = fourc_library_env(binary)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1790,12 +1854,8 @@ class FourcBackend(SolverBackend):
                            "PATH: the native result files could not be converted to VTU\n")
             logger.warning("4C run wrote only native output and no post_processor was found; result stays unreadable")
             return
-        env = os.environ.copy()
+        env = fourc_library_env(tool)                  # post_processor sits beside its 4C
         env.pop("DISPLAY", None)                      # the converter links VTK; a stray X display only adds noise
-        dep_lib = "/opt/4C-dependencies/lib"
-        ld = env.get("LD_LIBRARY_PATH", "")
-        if dep_lib not in ld:
-            env["LD_LIBRARY_PATH"] = f"{dep_lib}:{ld}" if ld else dep_lib
         for ctrl in controls:
             prefix = str(ctrl)[: -len(".control")]
             args = [str(tool), f"--file={prefix}"]

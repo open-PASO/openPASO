@@ -149,8 +149,11 @@ int main() {{
   // Solve with MinRes (symmetric indefinite saddle-point system).
   // SparseDirectUMFPACK is the obvious direct choice but conda-forge
   // deal.II ships WITHOUT UMFPACK (config.h '#undef
-  // DEAL_II_WITH_UMFPACK') — the class compiles, then throws
-  // ExcNeedsUMFPACK at runtime in sparse_direct.cc. MinRes with the
+  // DEAL_II_WITH_UMFPACK') — the class compiles, then
+  // initialize()/factorize()/solve() throw ExcMessage("To call this
+  // function you need UMFPACK, but you configured deal.II without passing
+  // the necessary switch to 'cmake'. ...") at runtime in sparse_direct.cc.
+  // MinRes with the
   // identity preconditioner is slow but portable; for production use
   // the step-22 block Schur preconditioner.
   SolverControl solver_control(20000, 1e-8 * system_rhs.l2_norm());
@@ -184,7 +187,7 @@ int main() {{
 KNOWLEDGE = {
     "description": "Stokes flow (step-22, step-55 parallel, step-56 GMG)",
     "tutorial_steps": ["step-22 (basic, block system)", "step-55 (MPI parallel)",
-                      "step-56 (geometric multigrid with Vanka smoother)"],
+                      "step-56 (geometric multigrid on the velocity block, SOR smoother, inside a block Schur preconditioner)"],
     "function_space": "FESystem<dim>(FE_Q<dim>(2), dim, FE_Q<dim>(1), 1) — Taylor-Hood Q2/Q1",
     "solver": "Block Schur complement: A*u = f - B^T*p, then S*p = B*A^{-1}*f - g",
     "block_system": "GMRES with Schur complement preconditioner, or direct UMFPACK for small",
@@ -229,7 +232,7 @@ KNOWLEDGE = {
             "with Taylor-Hood at low p.",
         "FE_DGP":
             "Pressure component of MINI / RT/DGP / BDM/DGP. "
-            "Discontinuous monomial basis; one degree less than "
+            "Discontinuous P_k space with a Legendre basis; one degree less than "
             "the velocity (so pair FE_Q_Bubbles(1) + FE_DGP(0), "
             "RT(k) + DGP(k), BDM(k) + DGP(k-1)).",
         "FE_DGQ":
@@ -258,8 +261,8 @@ KNOWLEDGE = {
     ],
     "preconditioners": [
         "BlockSchurPreconditioner (step-22 §) — the textbook approach; A_inv via inner CG on the velocity block, S_inv via the pressure mass matrix scaled by 1/viscosity.",
-        "PreconditionAMG / BoomerAMG on the velocity block — TrilinosWrappers; needed to scale beyond ~10^5 DoFs.",
-        "Vanka smoother for the FULL block system in geometric multigrid (step-56) — point Jacobi DOES NOT work because the saddle-point structure has zero diagonal in the pressure block.",
+        "PreconditionAMG / BoomerAMG on the velocity block — TrilinosWrappers::PreconditionAMG (Trilinos ML) or PETScWrappers::PreconditionBoomerAMG (hypre via PETSc); needed to scale beyond ~10^5 DoFs.",
+        "Geometric multigrid on the velocity block only (step-56: mg::SmootherRelaxation with PreconditionSOR, inside BlockSchurPreconditioner) — point Jacobi / Gauss-Seidel cannot be applied to the full block system because the pressure block has a zero diagonal; Vanka-type preconditioners for the full system exist as SparseVanka / SparseBlockVanka, but no tutorial uses them.",
     ],
     "pitfalls": [
         "[Numerical] The Stokes system is INDEFINITE (saddle "
@@ -316,8 +319,10 @@ KNOWLEDGE = {
         "`solution.block(0).l2_norm()` (velocity) converges "
         "normally; SolverGMRES iteration count grows each outer "
         "step as the null space pollutes the Krylov basis.",
-        "[Numerical] For geometric multigrid: Vanka-type smoothers "
-        "needed (step-56), NOT point Jacobi. Point Jacobi diverges "
+        "[Numerical] For geometric multigrid: apply it to the "
+        "velocity block only, as step-56 does (SOR smoother inside a "
+        "block Schur preconditioner), NOT point Jacobi on the full "
+        "saddle-point system. Point Jacobi diverges "
         "on saddle-point systems because the pressure block has "
         "zero diagonal. Signal: MGSmootherRelaxation with point "
         "Jacobi — SolverGMRES residual norm stagnates at ~1e-2 "

@@ -383,7 +383,7 @@ eps = {eps}    # diffusion coefficient (0 = pure advection)
 m = MeshQuad.init_tensor(
     np.linspace(0, 1, {nx + 1}),
     np.linspace(0, 1, {nx + 1}),
-).to_meshtri()   # skfem 12: to_simplex was renamed to to_meshtri
+).to_meshtri()   # MeshQuad -> MeshTri split (to_meshtri, available since scikit-fem 1.2.0)
 
 # DG element: discontinuous P1 on triangles
 e = ElementDG(ElementTriP1())
@@ -667,7 +667,8 @@ K = laplace.assemble(ib)
 M = mass.assemble(ib)
 
 # Absorbing BC: i*k*(u, v) on right boundary
-@BilinearForm
+# dtype=complex is required: the default float64 form discards the imaginary part
+@BilinearForm(dtype=complex)
 def absorbing_bc(u, v, w):
     return 1j * k * u * v
 
@@ -675,7 +676,7 @@ A_abc = asm(absorbing_bc, fb_right)
 
 # System: (K - k^2*M + A_abc) * u = f
 # Use complex128 arithmetic
-A = K.astype(complex) - k**2 * M.astype(complex) + A_abc.astype(complex)
+A = K.astype(complex) - k**2 * M.astype(complex) + A_abc
 
 # Source: point-like load at center (Gaussian approximation)
 @LinearForm
@@ -1262,12 +1263,13 @@ KNOWLEDGE = {
                 "frozen state. (Verified 2026-08-06 on skfem "
                 "12.0.1 — the NameError signal is falsified.)"
             ),
-            "[API] skfem 12 renamed MeshQuad.to_simplex() → "
-            "MeshQuad.to_meshtri() (returns a MeshTri with each "
-            "quad split into two triangles). Legacy templates that "
-            "call .to_simplex() on a MeshQuad raise AttributeError: "
-            "'MeshQuad1' object has no attribute 'to_simplex'. The "
-            "modern call is .to_meshtri(). Signal: hasattr("
+            "[API] MeshQuad.to_meshtri() (present since "
+            "scikit-fem 1.2.0) returns a MeshTri with each "
+            "quad split into two triangles. No scikit-fem release "
+            "has a MeshQuad.to_simplex() method, so calling "
+            ".to_simplex() on a MeshQuad raises AttributeError: "
+            "'MeshQuad1' object has no attribute 'to_simplex'. "
+            "Use .to_meshtri(). Signal: hasattr("
             "skfem.MeshQuad.init_tensor([0,1],[0,1]), 'to_meshtri') "
             "is True; hasattr(..., 'to_simplex') is False. "
             "(Verified empirically 2026-06-01 — Layer F catch.)",
@@ -1551,8 +1553,13 @@ KNOWLEDGE = {
             (
                 "[API] Module-level skfem.project() and "
                 "skfem.projection() are DEPRECATED and emit "
-                "DeprecationWarning('will be removed in the "
-                "next release'). Source: "
+                "DeprecationWarning: projection() -> "
+                "'projection is deprecated in favor of "
+                "Basis.project.'; project() -> 'project is "
+                "deprecated in favor of Basis.project (will be "
+                "removed in the next release).' project() calls "
+                "projection() internally, so it also emits the "
+                "projection warning. Source: "
                 "skfem/__init__.py top-level __all__ flags "
                 "both with `# TODO remove due to deprecation`. "
                 "Signal: existing DG-to-P1 visualization "
@@ -1824,9 +1831,11 @@ KNOWLEDGE = {
                 "the rejected type quoted after it, so the line "
                 "reads float() argument must be a string or a real "
                 "number, not 'complex'.) The SHIPPED "
-                "helmholtz_2d template currently trips exactly "
-                "this trap — its absorbing-BC block assembles to "
-                "zero, so it has no ABC at all while still "
+                "helmholtz_2d template declares its absorbing-BC "
+                "form with @BilinearForm(dtype=complex) for "
+                "exactly this reason — with a plain @BilinearForm "
+                "that block assembles to zero, so the script has "
+                "no ABC at all while still "
                 "exiting rc=0. (Verified empirically 2026-08-03 "
                 "on skfem 12.0.1 — catalog-drift correction + "
                 "gap.)"

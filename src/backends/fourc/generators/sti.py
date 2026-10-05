@@ -346,6 +346,9 @@ class STIGenerator(BaseGenerator):
     def _template_monolithic_3d() -> str:
         return textwrap.dedent("""\
             # FORMAT TEMPLATE — all numerical values are placeholders.
+            # Written in the input grammar of 4C before 2026.3.0 (the 2026.2.0 release
+            # included); 4C 2026.3.0 renamed some of the keys below. The decks openPASO runs are served in the grammar of the
+            # 4C it finds.
             # ---------------------------------------------------------------
             # 3-D Monolithic Scalar-Thermo Interaction (STI)
             #

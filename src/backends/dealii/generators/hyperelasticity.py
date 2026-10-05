@@ -316,9 +316,9 @@ int main()
 # ── Knowledge ────────────────────────────────────────────────────────────
 
 KNOWLEDGE = {
-    "description": "Finite-strain hyperelasticity (step-44, step-72 with AD)",
+    "description": "Finite-strain hyperelasticity (step-44; AD constitutive laws: step-71)",
     "tutorial_steps": ["step-44 (three-field formulation, Neo-Hookean)",
-                      "step-72 (automatic differentiation for tangent)",
+                      "step-72 (AD-computed Newton tangent, shown on the scalar minimal-surface problem of step-15, not elasticity)",
                       "step-18 (quasi-static, updated Lagrangian)"],
     "function_space": "FESystem<dim>(FE_Q<dim>(1), dim) for displacement-only",
     "solver": "Newton-Raphson with line search, CG + SSOR for linear sub-problems",
@@ -338,13 +338,13 @@ KNOWLEDGE = {
     "elements": {
         "FESystem":
             "Vector wrapper for displacement-only formulations "
-            "(step-18, step-72): FESystem<dim>(FE_Q<dim>(degree), "
+            "(step-18): FESystem<dim>(FE_Q<dim>(degree), "
             "dim). Or the three-field (u, p̃, J̃) composition per "
             "step-44 for nearly-incompressible problems.",
         "FE_Q":
             "Displacement field; degree=2 typical to mitigate "
             "volumetric locking at small compressibility. Pair "
-            "with FE_DGP(degree-1) + FE_DGP(degree-2) inside "
+            "with FE_DGP(degree-1) + FE_DGP(degree-1) inside "
             "FESystem for step-44 three-field hyperelasticity.",
         "FE_Q_Bubbles":
             "Improved volumetric behaviour over plain FE_Q "
@@ -361,9 +361,9 @@ KNOWLEDGE = {
             "solution.",
         "FE_DGP":
             "Pressure and dilation fields in the step-44 "
-            "three-field formulation. FE_DGP(degree-1) for the "
-            "pressure-like field, FE_DGP(degree-2) for the "
-            "Jacobian-like field.",
+            "three-field formulation. FE_DGP(degree-1) for both the "
+            "pressure-like and the Jacobian-like (dilatation) "
+            "field.",
     },
     "mesh_generators": {
         "subdivided_hyper_rectangle": "Anisotropic beams / slabs. colorize=true REQUIRED for per-face BC distinction (else all faces share boundary_id=0).",
@@ -441,7 +441,7 @@ KNOWLEDGE = {
         "displacement locks at the volumetric limit. Signal: tip "
         "deflection on a Cook membrane differs from reference by "
         "30-50% as nu approaches 0.5; switching to the three-field "
-        "FESystem(FE_Q(2), dim, FE_DGP(1), 1, FE_DGP(0), 1) "
+        "FESystem(FE_Q(2), dim, FE_DGP(1), 1, FE_DGP(1), 1) "
         "recovers convergence to within 5%.",
         "[Physics] Saint-Venant-Kirchhoff unstable in compression. "
         "Use Neo-Hookean instead for any compression > ~30%. "
@@ -474,9 +474,13 @@ KNOWLEDGE = {
         "Without it, DataOut shows the reference configuration "
         "with the displacement field overlaid as colour — "
         "misleading for large-deformation problems. Signal: "
-        "DataOut.build_patches() called without "
-        "DataOut::set_mapping(MappingQEulerian) writes a .vtu "
-        "whose geometry is the undeformed reference triangulation; "
+        "DataOut::build_patches() called without a mapping "
+        "argument writes a .vtu "
+        "whose geometry is the undeformed reference triangulation "
+        "(DataOut has no set_mapping; build a const "
+        "MappingQEulerian<dim> q_mapping(degree, dof_handler, "
+        "solution) and call build_patches(q_mapping, degree), as "
+        "step-44 does); "
         "the displacement field appears only as colour overlay, "
         "not as actual node motion, even when "
         "solution.linfty_norm() is comparable to the domain size.",

@@ -163,9 +163,6 @@ KNOWLEDGE = {
         "required_vs_optional": {
             "REQUIRED": [
                 "dt <= cfl*h/((2*order+1)*|b|) with cfl <= 1",
-                "a SEPARATE stage function for the right-hand side: "
-                "scheme.solve(target=un) while un also appears in the "
-                "right-hand side form is an aliasing bug",
                 "dS (capital S) for the interior-facet flux — ds is "
                 "the domain boundary and silently drops the coupling",
                 "at least SSP-RK2 in time for anything but a short "
@@ -176,6 +173,16 @@ KNOWLEDGE = {
                 "ONE scheme built OUTSIDE the time loop",
             ],
             "OPTIONAL": [
+                "a separate output function uh for each stage solve. "
+                "This scheme is LINEAR, and for a linear scheme "
+                "dune-fem 2.12.0.2 reads the right-hand side once, "
+                "before it overwrites the target, so solving each stage "
+                "into the stage coefficient w itself gives the same "
+                "answer (measured 2026-09-30: mass change, centroid "
+                "error and peak identical to every printed digit). Keep "
+                "the output separate for a nonlinear form or for "
+                "Dirichlet data that change in time, where the solve "
+                "re-reads or pre-sets its target",
                 "the inflow term — leaving it out means u=0 flows in",
                 "a limiter, needed only for discontinuous data",
                 "dgonb / dglegendre instead of dglagrange for a modal "
@@ -229,17 +236,31 @@ KNOWLEDGE = {
                 "wording in an earlier revision to be a noisy proxy.)"
             ),
             (
-                "[API] Calling scheme.solve(target=un) when un also "
-                "appears in the scheme's right-hand side form aliases "
-                "the input to the output. Signal: the solve overwrites "
-                "un while the right-hand side still refers to it, so "
-                "the step is neither explicit nor implicit; nothing "
-                "crashes, the answer is simply wrong and the profile "
-                "travels at the wrong speed. Solve into a separate "
-                "function and copy back. (Executed 2026-08-03 — the "
-                "previous version of this template did exactly that "
-                "and never finished, which hid the aliasing behind a "
-                "1800 s timeout.)"
+                "[API] Solving into the function the right-hand side "
+                "reads — scheme.solve(target=w) with w in the form — is "
+                "harmless for a scheme that is LINEAR in the trial "
+                "function, as this one is: dune-fem 2.12.0.2 evaluates "
+                "the residual once from the current target, takes one "
+                "Newton step and stops, so the result equals the "
+                "separate-target solve (measured 2026-09-30: this "
+                "template with both stages solved into w printed the "
+                "same mass, centroid and peak to every digit). It is "
+                "WRONG for a nonlinear form, because Newton "
+                "re-evaluates the residual after each update and the "
+                "right-hand side then reads the iterate instead of the "
+                "old state, and for a strong DirichletBC whose data "
+                "change in time, because the target's boundary dofs "
+                "are set to the new data before the right-hand side is "
+                "read. Signal: measured on a (1+u^2) implicit-Euler "
+                "diffusion step with nonlinear.maxiterations=50, the "
+                "aliased solve returned converged=False after 50 "
+                "iterations with max|u| near 1e-4, while the "
+                "separate-target solve converged in 4 iterations to "
+                "max|u| 0.79; the time-dependent Dirichlet case reports "
+                "nothing (measured: 6.8e-4 away from the "
+                "separate-target answer after 5 implicit-Euler heat "
+                "steps). Solve into a separate function and copy back "
+                "to stay safe in both cases."
             ),
             (
                 "[Performance] Rebuilding the scheme inside the time "

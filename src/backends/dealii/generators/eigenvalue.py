@@ -218,7 +218,9 @@ KNOWLEDGE = {
     "function_space": "FE_Q<dim>(1)",
     "solver": ("Template: deflated inverse power iteration "
                "(CG + SSOR inner solves). With SLEPc available: "
-               "Krylov-Schur (default), Arnoldi, Lanczos, LOBPCG"),
+               "Krylov-Schur (default), Arnoldi, Lanczos, Power, Generalized "
+               "Davidson, Jacobi-Davidson or LAPACK (the SLEPcWrappers "
+               "classes; deal.II has no LOBPCG wrapper)"),
     "elements": {
         "FE_Q":
             "degree=1 for Laplace eigenproblems on a unit square / "
@@ -248,11 +250,11 @@ KNOWLEDGE = {
         "cheese": "Domain with holes; spectrum exhibits localised modes.",
     },
     "solvers": [
-        "SLEPc::SolverKrylovSchur     — default; robust for the largest or smallest few eigenpairs",
-        "SLEPc::SolverArnoldi         — fallback when Krylov-Schur stalls (rare; usually a sign of ill-conditioning)",
-        "SLEPc::SolverLanczos         — symmetric problems only; faster than Krylov-Schur for SPD A and M",
-        "SLEPc::SolverLOBPCG          — block locally-optimal CG; competitive for many eigenpairs of SPD problems",
-        "SLEPc::SolverGeneralizedDavidson — for interior eigenvalues without an explicit shift-and-invert factorisation",
+        "SLEPcWrappers::SolverKrylovSchur     — default; robust for the largest or smallest few eigenpairs",
+        "SLEPcWrappers::SolverArnoldi         — fallback when Krylov-Schur stalls (rare; usually a sign of ill-conditioning)",
+        "SLEPcWrappers::SolverLanczos         — symmetric problems only; faster than Krylov-Schur for SPD A and M",
+        "SLEPcWrappers::SolverPower, SolverJacobiDavidson, SolverLAPACK — the remaining wrappers; deal.II has no LOBPCG wrapper",
+        "SLEPcWrappers::SolverGeneralizedDavidson — for interior eigenvalues without an explicit shift-and-invert factorisation",
     ],
     "preconditioners": [
         "ST (spectral transform) shift-and-invert — required for interior eigenvalues; combine with direct solver inside the shift",
@@ -263,28 +265,24 @@ KNOWLEDGE = {
         "[Integration] conda-forge deal.II ships WITHOUT PETSc and "
         "WITHOUT SLEPc in every version (verified on 9.1.1 and 9.3.2, "
         "config.h has '#undef DEAL_II_WITH_PETSC' and "
-        "'#undef DEAL_II_WITH_SLEPC'). SLEPcWrappers code cannot even "
-        "compile there — the slepc_solver.h include fails before any "
-        "link step. Use the catalog template's deflated inverse power "
+        "'#undef DEAL_II_WITH_SLEPC'). SLEPcWrappers code cannot "
+        "compile there, although the slepc_solver.h include itself "
+        "succeeds (see below). Use the catalog template's deflated inverse power "
         "iteration (built-in SparseMatrix + SolverCG, works on every "
         "build) or compile deal.II from source with "
         "-DDEAL_II_WITH_PETSC=ON -DDEAL_II_WITH_SLEPC=ON for the "
         "SLEPc path. Signal: grep "
         "$DEAL_II_DIR/include/deal.II/base/config.h for "
-        "'/* #undef DEAL_II_WITH_SLEPC */'. The COMPILER error "
-        "depends on how deal.II was installed, and the two differ: "
-        "(a) on a conda-forge PACKAGE the "
-        "header is absent -> 'fatal error: "
-        "deal.II/lac/slepc_solver.h: No such file or directory'; "
-        "(b) on a SOURCE build configured without SLEPc (the case "
-        "here) the header IS installed and includes cleanly — the "
+        "'/* #undef DEAL_II_WITH_SLEPC */'. The COMPILER error is "
+        "the same on a conda-forge PACKAGE (the 9.1.1 and 9.3.2 "
+        "packages ship slepc_solver.h, and it includes cleanly) and "
+        "on a SOURCE build configured without SLEPc: the "
         "whole file body sits behind `#ifdef DEAL_II_WITH_SLEPC`, "
         "so the failure only appears when you name a class: "
         "\"error: 'dealii::SLEPcWrappers' has not been declared\". "
-        "Verified on deal.II 9.8. Do not use a header-not-found "
-        "compiler error as the availability test — that text would "
-        "come from the preprocessor, not from deal.II, and on a "
-        "source install it never appears; grep "
+        "Verified on deal.II 9.1.1 and 9.3.2 (conda-forge headers), "
+        "9.7.1 and 9.8. Do not expect a header-not-found "
+        "compiler error; grep "
         "$DEAL_II_DIR/include/deal.II/base/config.h for "
         "'/* #undef DEAL_II_WITH_SLEPC */' instead.",
         "[Numerical] Inverse-power-iteration deflation must "
@@ -308,29 +306,29 @@ KNOWLEDGE = {
         "A = stiffness and M = mass. Using the standard eigenvalue "
         "form (no mass matrix) gives WRONG eigenvalues — Laplace "
         "eigenvalues come out scaled by element size, not lambda_mn "
-        "= pi^2*(m^2+n^2). Signal: SLEPc::SolverKrylovSchur reports "
+        "= pi^2*(m^2+n^2). Signal: SLEPcWrappers::SolverKrylovSchur reports "
         "the smallest eigenvalue on the unit square as O(h) or "
         "O(h^{-2}) — orders of magnitude off from the analytic "
-        "2*pi^2 ≈ 19.74; the EPS::get_eigenvalue result scales with "
+        "2*pi^2 ≈ 19.74; the eigenvalues vector filled by solve() scales with "
         "1/h instead of being mesh-independent.",
         "[API] Use AffineConstraints<double> for Dirichlet BCs and "
         "distribute the constraints to BOTH the stiffness and the "
         "mass matrix. Applying constraints to A only leaves M "
         "with non-zero rows on Dirichlet DoFs, producing spurious "
         "eigenmodes at lambda = 0 (one per Dirichlet DoF). Signal: "
-        "the EPS::get_eigenvalue spectrum returned by SLEPc "
+        "the eigenvalues vector filled by SLEPcWrappers::Solver*::solve "
         "contains exactly `boundary_dofs.size()` near-zero "
         "eigenvalues (magnitude < 1e-10) preceding the physical "
         "Laplace eigenvalues; AffineConstraints::distribute applied "
         "to M as well removes them.",
         "[Syntax] PETSc matrices: PETScWrappers::SparseMatrix, NOT "
-        "dealii::SparseMatrix — SLEPc operates on PETSc objects. "
-        "Mixing the types compiles but the solver silently "
-        "operates on a default-constructed empty matrix. Signal: "
-        "SLEPc::SolverKrylovSchur returns every requested "
-        "eigenvalue as exactly 0.0 (not just small — bit-exact 0); "
-        "EPS::get_eigenvalue(i) for i=0..n_requested all read 0.0 "
-        "with eigenvectors of zero norm.",
+        "dealii::SparseMatrix — SLEPc operates on PETSc objects: "
+        "SLEPcWrappers::Solver*::solve takes const "
+        "PETScWrappers::MatrixBase references. Signal: passing a "
+        "dealii::SparseMatrix does not compile — the compiler "
+        "reports no matching function for "
+        "SLEPcWrappers::SolverKrylovSchur::solve with the "
+        "dealii::SparseMatrix<double> arguments.",
         "[Integration] MPI initialisation is REQUIRED via "
         "Utilities::MPI::MPI_InitFinalize, even for a serial run, "
         "because PETSc / SLEPc internally assume MPI_COMM_WORLD "
@@ -339,16 +337,16 @@ KNOWLEDGE = {
         "the program aborts. Signal: program crashes inside the "
         "EPS constructor with an MPI_ERR_COMM error.",
         "[Numerical] For interior eigenvalues use shift-and-invert "
-        "(SLEPc::TransformationShiftInvert) — Krylov-Schur targets "
+        "(SLEPcWrappers::TransformationShiftInvert) — Krylov-Schur targets "
         "extreme eigenvalues by default. Without the transform, "
         "asking for eigenvalues near lambda = 100 on a problem "
         "whose smallest eigenvalue is 0.1 returns the smallest "
-        "ones. Signal: SLEPc::SolverKrylovSchur returns "
-        "eigenvalues from EPS::get_eigenvalue all in the lower "
+        "ones. Signal: SLEPcWrappers::SolverKrylovSchur returns "
+        "eigenvalues all in the lower "
         "spectrum (e.g. [0.1, 5]) even though "
-        "EPS::set_which_eigenpairs(EPS_TARGET_REAL) was set with "
-        "target=100; the get_target_value query confirms target=100 "
-        "was registered but ignored.",
+        "set_which_eigenpairs(EPS_TARGET_REAL) and "
+        "set_target_eigenvalue(100) were called (deal.II has no "
+        "getter for the target).",
         "[Physics] RE-VERIFIED by execution on deal.II 9.8: the "
         "catalog template (deflated inverse power iteration, built-in "
         "SparseMatrix + SolverCG, 1089 DoFs) returns lambda = "
@@ -366,7 +364,7 @@ KNOWLEDGE = {
         "BCs are lambda_mn = pi^2*(m^2 + n^2); the first few "
         "are 2 pi^2, 5 pi^2, 5 pi^2 (double), 8 pi^2. Use these "
         "as the regression-test reference. Signal: SLEPc returns "
-        "|EPS::get_eigenvalue(1) - EPS::get_eigenvalue(2)| > 1e-6 "
+        "|eigenvalues[1] - eigenvalues[2]| > 1e-6 "
         "on a fine mesh (which should agree to machine epsilon for "
         "the degenerate 5*pi^2 pair); the missing-degenerate-modes "
         "diagnostic is the early-warning that the EPS is not "

@@ -4,8 +4,9 @@ across a PLANAR interface.  Serves either side of the split.
 CONTRACT (do not change): runs in its work_dir with no arguments, reads
 imports.json (written every iteration; it is `{}` on iteration 1, so an
 iteration-1 fallback is mandatory), writes exports.json LAST and exits 0.
-Needs dune-fem importable in the interpreter named in `command` (conda-forge
-`dune-fem`).  DUNE JIT-COMPILES ITS UFL FORMS ON FIRST USE, AND THIS FILE'S
+Needs dune-fem importable in the interpreter named in `command` (`pip install
+dune-fem` from PyPI; conda-forge has no dune-fem package).  DUNE JIT-COMPILES
+ITS UFL FORMS ON FIRST USE, AND THIS FILE'S
 FORMS TAKE SEVERAL MINUTES COLD: measured 7 to 12 minutes for its first run on
 this install (16 form modules), and 4 to 6 minutes more when the 3-D grid and
 its space are not yet in DUNE's cache.  That is not a hang, and a timeout

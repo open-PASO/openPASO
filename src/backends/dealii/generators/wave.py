@@ -1,6 +1,7 @@
 """Wave equation templates for deal.II.
 
-Based on deal.II tutorial step-23 (Newmark time integration).
+Based on deal.II tutorial step-23, which uses a theta scheme; the template's
+Newmark average acceleration (beta=1/4, gamma=1/2) equals it at theta=1/2.
 """
 
 
@@ -205,7 +206,7 @@ int main()
 KNOWLEDGE = {
     "description": "Wave equation: d^2u/dt^2 = c^2*laplacian(u) (step-23 inspired)",
     "tutorial_steps": ["step-23 (wave equation, theta-method)",
-                      "step-24 (acoustic wave, Laplace transform)",
+                      "step-24 (thermoacoustic wave equation, absorbing boundary conditions, point-value extraction)",
                       "step-25 (nonlinear wave, sine-Gordon)"],
     "function_space": "FE_Q<dim>(1)",
     "time_stepping": "Newmark-beta (beta=0.25, gamma=0.5 for average acceleration, unconditionally stable)",

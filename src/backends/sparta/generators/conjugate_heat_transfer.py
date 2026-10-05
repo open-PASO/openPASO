@@ -63,7 +63,7 @@ KNOWLEDGE = {
             "compute surf": "compute <ID> surf <grp> <mix> etot — total energy "
                             "flux per surface element (per-surf ARRAY)",
             "fix ave/surf": "fix <ID> ave/surf <grp> <Nevery> <Nrepeat> "
-                            "<Nfreq> c_<ID>[1] [ave one|running|window M]",
+                            "<Nfreq> c_<ID>[1] [ave one|running]",
             "fix surf/temp": "fix <ID> surf/temp <grp> <Nevery> <f_source> "
                              "<Tinit> <emisurf> <custom-name> — CREATES the "
                              "custom per-surf attribute; 0 < emisurf <= 1",
@@ -99,7 +99,7 @@ KNOWLEDGE = {
             "is missing altogether, so the error does not tell you which "
             "mistake you made. "
             "Signal: 'ERROR: Surf_collide tsurf could not find custom "
-            "attribute (../surf_collide.cpp:141)'.",
+            "attribute (../surf_collide.cpp:141)' (line 167 in 27Aug2026).",
 
             "[Syntax] The <source> argument of fix surf/temp is BRACKET-driven, "
             "not compute-versus-fix: a bare id must name a per-surf VECTOR and "
@@ -127,7 +127,7 @@ KNOWLEDGE = {
             "f_ID[1], f_ID[2], ... The upstream compute surf feeding it is the "
             "opposite: always an array, so always indexed. "
             "Signal: 'ERROR: Compute reduce fix does not calculate a per-surf "
-            "array (../compute_reduce.cpp:293)' when you index a "
+            "array (../compute_reduce.cpp:293)' (line 297 in 27Aug2026) when you index a "
             "single-value fix. Do not confuse it with line 280, which is the "
             "per-GRID twin of the same message ('... does not calculate a "
             "per-grid array') raised by a fix ave/grid.",
@@ -171,7 +171,7 @@ KNOWLEDGE = {
             "internal variable can then be used DIRECTLY as a surf_collide "
             "temperature ('surf_collide W diffuse v_<name> 1.0') with no "
             "equal-style wrapper, because Variable::equal_style() returns true "
-            "for INTERNAL (variable.cpp:1016) — a draft of this entry claimed a "
+            "for INTERNAL (variable.cpp:1016) (line 1061 in 27Aug2026) — a draft of this entry claimed a "
             "wrapper was required and execution showed it is not. The PROCESS "
             "variable must be a global SCALAR or ONE element of a global "
             "VECTOR; a compute producing a global ARRAY, such as 'compute "
@@ -183,9 +183,9 @@ KNOWLEDGE = {
             "in mode vector carrying exactly ONE compute value and index it "
             "once. "
             "Signal: 'ERROR: Fix controller variable is not internal-style "
-            "variable (../fix_controller.cpp:135)' for the control variable, "
+            "variable (../fix_controller.cpp:135)' (line 136 in 27Aug2026) for the control variable, "
             "and 'ERROR: Fix controller compute does not calculate a global "
-            "scalar or vector (../fix_controller.cpp:104)' (or the fix twin at "
+            "scalar or vector (../fix_controller.cpp:104)' (line 105 in 27Aug2026) (or the fix twin at "
             "line 118) for a process variable of the wrong shape. For the "
             "two-index case there is NO signal — print the process variable "
             "alongside f_<ID>[1] in stats_style and check the controller is "
@@ -212,7 +212,7 @@ KNOWLEDGE = {
             "P, I and D contributions, which the fix exposes as a global "
             "3-vector) doing the same. The only guard that ever fires is the "
             "consumer's own: 'ERROR: Surf_collide tsurf <= 0.0 "
-            "(../surf_collide.cpp:183)' when the runaway goes negative. "
+            "(../surf_collide.cpp:183)' (line 209 in 27Aug2026) when the runaway goes negative. "
             "(Verified 2026-08-07)",
 
             "[Numerical] The controller gains are not dimensionless and not "

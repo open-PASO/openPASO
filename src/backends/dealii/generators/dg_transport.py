@@ -240,12 +240,13 @@ int main()
       {{
         // get_quadrature_points()[q], not quadrature_point(q): the
         // per-point accessor on FEInterfaceValues only exists since
-        // deal.II 9.4; the vector accessor is available on 9.3 too.
+        // deal.II 9.7.0; the vector accessor is available on 9.3 too.
         const auto   beta_q    = beta<dim>(fe_iv.get_quadrature_points()[q]);
-        // FEInterfaceValues gained normal_vector(q) only in 9.4;
-        // 9.3 calls it normal(q). (FEFaceValues::normal_vector
-        // exists on both, so no blanket rename is possible.)
-#if DEAL_II_VERSION_GTE(9, 4, 0)
+        // FEInterfaceValues gained normal_vector(q) only in 9.7.0;
+        // 9.3 to 9.6 call it normal(q), which 9.7.0 deprecates.
+        // (FEFaceValues::normal_vector exists on all of them, so no
+        // blanket rename is possible.)
+#if DEAL_II_VERSION_GTE(9, 7, 0)
         const double beta_dot_n = beta_q * fe_iv.normal_vector(q);
 #else
         const double beta_dot_n = beta_q * fe_iv.normal(q);

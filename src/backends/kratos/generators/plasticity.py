@@ -1,7 +1,7 @@
 """Kratos plasticity generators and knowledge.
 
 Covers the ConstitutiveLawsApplication plasticity framework:
-- Yield surfaces: VonMises, DruckerPrager, MohrCoulomb, ModifiedMohrCoulomb, Tresca, Rankine
+- Yield surfaces: VonMises, DruckerPrager, MohrCoulomb, ModifiedMohrCoulomb, Tresca (Rankine and SimoJu are damage-only)
 - Plastic potentials: same set (non-associative flow supported)
 - Hardening: perfect, linear, exponential, curve-fitting
 - Strain formulations: small strain, finite strain
@@ -308,7 +308,7 @@ KNOWLEDGE = {
                         'Signal: stress-strain past yield droops with negative slope despite HARDENING_MODULUS=0; integrated fracture energy < 0.5 of analytical perfect-plastic value.',
                         '[API] Python API: constitutive-law variables are split across modules. FRICTION_ANGLE, DILATANCY_ANGLE, YIELD_STRESS_COMPRESSION live in ConstitutiveLawsApplication (CLA); FRACTURE_ENERGY, YOUNG_MODULUS in KratosMultiphysics (KM). '
                         "Signal: Attribute lookup raises AttributeError 'has no attribute' with the module and the name interpolated around it — the line reads Module KratosMultiphysics has no attribute FRICTION_ANGLE. — at the moment the wrong module is dotted into (e.g. KM.FRICTION_ANGLE), BEFORE properties.SetValue is even reached. The correct path is ConstitutiveLawsApplication.FRICTION_ANGLE (returns a DoubleVariable). (Verified empirically 2026-06-01 — prior catalog claim said the error fires 'from properties.SetValue'; reality is the AttributeError fires at attribute access, never reaching SetValue.)",
-                        '[API] SmallStrainIsotropicPlasticityFactory() takes NO constructor arguments. Passing KM.Parameters raises TypeError. Use the specific pre-combined class (e.g. SmallStrainIsotropicPlasticityMisesMises3D). '
+                        '[API] SmallStrainIsotropicPlasticityFactory() takes NO constructor arguments. Passing KM.Parameters raises TypeError. Use the specific pre-combined class (e.g. SmallStrainIsotropicPlasticity3DVonMisesVonMises). '
                         "Signal: TypeError '__init__(): incompatible constructor arguments. The following argument types are supported: 1. KratosConstitutiveLawsApplication.SmallStrainIsotropicPlasticityFactory()' when the factory is called with KM.Parameters. (Verified empirically 2026-06-01 after KratosConstitutiveLawsApplication was installed; prior text said 'incompatible function arguments' / 'from SetValue binding' — the actual message says 'constructor arguments' and originates from the factory __init__ binding, not SetValue.)",
                         '[Numerical] SHEAR LOCKING: linear hex8 (3D8N) locks in bending-dominated plasticity. Uniform-stress benchmarks (uniaxial, triaxial) are fine; gradient-stress problems need quadratic elements (3D20N, 3D27N). '
                         'Signal: bending-plasticity tip rotation 20-40% smaller than analytic with hex8; switching to hex20 recovers it.',

@@ -23,8 +23,9 @@ THREE DECKS, BECAUSE THE BUILD ITSELF SPLITS THEM THAT WAY
 EACH DECK CARRIES A CHECK THAT IS NOT "IT RAN"
   box: a closed reflective box of a MONATOMIC gas with elastic collisions
        conserves particle count and total kinetic energy EXACTLY. Measured
-       over 1000 steps with collisions actually occurring (Ncoll 10-11 per
-       500 steps): Np and sum(KE) both exactly constant, to every printed digit, at steps
+       over 1000 steps with collisions actually occurring (Ncoll, the per-step
+       count, is 10-11 at steps 500 and 1000; about 9900 collisions over the
+       run): Np and sum(KE) both exactly constant, to every printed digit, at steps
        0, 500 and 1000.
   surface / implicit_surface: data.circle is a 50-segment polygon inscribed
        in a circle of radius 3, so the total surface length SPARTA builds must
@@ -322,8 +323,9 @@ _IMPLICIT = r"""# SPARTA capability survey, implicit-surface phase.
 #   * fix move/surf REFUSES distributed surfaces
 #     ("Cannot yet use fix move/surf with distributed surf elements");
 #   * once surfaces are implicit, compute surf, compute property/surf,
-#     compute react/surf, fix surf/temp, fix ave/surf and fix emit/surf all
-#     refuse with "Cannot use ... with implicit surfs".
+#     compute react/surf, fix surf/temp and fix ave/surf refuse with
+#     "Cannot use ... with implicit surfs", and fix emit/surf refuses with
+#     "Fix emit/surf not allowed for implicit surfaces".
 # So the surface variant covers the explicit half and this one the implicit
 # half. Each refusal above was produced by running it, not read from a manual.
 #
@@ -480,10 +482,12 @@ PITFALLS = [
     "in one deck. create_isurf requires `global surfs explicit/distributed`, "
     "but fix move/surf then refuses with \"Cannot yet use fix move/surf with "
     "distributed surf elements\"; and after conversion, compute surf, compute "
-    "property/surf, compute react/surf, fix surf/temp, fix ave/surf and fix "
-    "emit/surf all refuse with \"Cannot use ... with implicit surfs\". Plan "
+    "property/surf, compute react/surf, fix surf/temp and fix ave/surf "
+    "refuse with \"Cannot use ... with implicit surfs\", and fix emit/surf "
+    "refuses with \"Fix emit/surf not allowed for implicit surfaces\". Plan "
     "which half you need before writing the deck. Signal: a refusal naming "
-    "'distributed' or 'implicit surfs' at the first run after conversion.",
+    "'distributed', 'implicit surfs' or 'implicit surfaces' at the first run "
+    "after conversion.",
 
     "[setup] create_isurf's second argument is the ID of an EXISTING "
     "`fix ablate`, not a new name for the implicit surface. Passing a name "

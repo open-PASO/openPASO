@@ -159,6 +159,57 @@ def resolve_dealii_root(candidate: Path) -> Optional[Path]:
     return unreadable
 
 
+# The templates' cmake_minimum_required (see _generate_cmakelists).
+_CMAKE_MINIMUM = (3, 13, 4)
+_CMAKE_VERSIONS: dict[str, Optional[tuple[int, ...]]] = {}
+
+
+def _cmake_version(cmake: str) -> Optional[tuple[int, ...]]:
+    """`cmake --version` as numbers, once per executable; None if it cannot say."""
+    if cmake not in _CMAKE_VERSIONS:
+        import subprocess
+        try:
+            out = subprocess.run([cmake, "--version"], capture_output=True, text=True,
+                                 timeout=10, stdin=subprocess.DEVNULL).stdout
+            m = re.search(r"cmake version (\d+)\.(\d+)\.(\d+)", out)
+            _CMAKE_VERSIONS[cmake] = tuple(int(x) for x in m.groups()) if m else None
+        except (OSError, subprocess.TimeoutExpired):
+            _CMAKE_VERSIONS[cmake] = None
+    return _CMAKE_VERSIONS[cmake]
+
+
+def _cmake_executable() -> Optional[str]:
+    """The cmake that builds the templates: the one on PATH if it is new enough
+    for their cmake_minimum_required, else the one Spack built for deal.II (a
+    machine set up only through Spack has no other). An older cmake on PATH is
+    still returned when there is no other, so that its own message says what is
+    wrong instead of "CMake not found"."""
+    on_path = shutil.which("cmake")
+    if on_path and (_cmake_version(on_path) or (0,)) >= _CMAKE_MINIMUM:
+        return on_path
+    from core.spack import installed_prefix   # noqa: PLC0415
+    prefix = installed_prefix("cmake")
+    if prefix is not None and (prefix / "bin" / "cmake").is_file():
+        return str(prefix / "bin" / "cmake")
+    return on_path
+
+
+# Where Spack keeps its compiler wrappers: in the compiler-wrapper package's
+# prefix (<prefix>/libexec/spack/gcc/g++) from Spack 1.0 on, inside the Spack
+# checkout itself (<spack>/lib/spack/env/gcc/g++) before that.
+_SPACK_WRAPPER_DIRS = ("/libexec/spack/", "/lib/spack/env/")
+
+
+def _records_spack_wrapper(root: Path) -> bool:
+    """Whether deal.IIConfig.cmake under `root` names Spack's compiler wrapper."""
+    config = root / "lib" / "cmake" / "deal.II" / "deal.IIConfig.cmake"
+    try:
+        text = config.read_text(errors="replace")
+    except OSError:
+        return False
+    return any(marker in text for marker in _SPACK_WRAPPER_DIRS)
+
+
 def _describe_exit(rc: int) -> str:
     """The program's return code in words; a signal is named, and a crash is
     said to be the program's (measured: code 139 / -11 is a segfault inside it)."""
@@ -217,10 +268,12 @@ def _find_dealii() -> Optional[Path]:
       4. User-source dirs: ``~/dealii``, ``~/deal.II``,
          ``~/src/dealii``, ``~/src/deal.II``, and ``dealii`` / ``deal.II``
          in the user's desktop folder (core.user_dirs, locale-aware).
-      5. System paths: ``/opt/dealii``,
+      5. A Spack-built deal.II (core.spack), ahead of the system paths
+         because an old distribution deal.II is the hazard those carry.
+      6. System paths: ``/opt/dealii``,
          ``/usr/lib/x86_64-linux-gnu/cmake/deal.II``,
          ``/usr/share/cmake/deal.II``.
-      6. ``cmake --find-package`` for system-installed deal.II.
+      7. ``cmake --find-package`` for system-installed deal.II.
 
     Returns the install ROOT (the path that contains
     ``include/deal.II/`` or ``share/deal.II/cmake/``). Callers
@@ -330,7 +383,21 @@ def _find_dealii() -> Optional[Path]:
         if resolved is not None:
             return resolved
 
-    # 5. System paths.
+    # 5. Spack. A deal.II built by `openpaso install dealii --via spack`
+    #    lives in a hashed prefix no fixed list can name; Spack knows it.
+    #    openPASO's own build first. Any other Spack deal.II only if its
+    #    deal.IIConfig.cmake names real compilers: upstream's recipe leaves
+    #    Spack's compiler wrapper there, and every template built against it
+    #    stops at CMake's compiler check ("Spack compiler must be run from
+    #    Spack!").
+    from core.spack import installed_prefix   # noqa: PLC0415
+    for spack_spec in ("openpaso.dealii", "dealii"):
+        spack_prefix = installed_prefix(spack_spec)
+        if (spack_prefix is not None and _looks_like_dealii_root(spack_prefix)
+                and not _records_spack_wrapper(spack_prefix)):
+            return spack_prefix
+
+    # 6. System paths.
     for cand in (Path("/opt/dealii"), Path("/opt/deal.II"),
                  Path("/usr/local/dealii"),
                  Path("/usr/local/deal.II"),
@@ -338,8 +405,8 @@ def _find_dealii() -> Optional[Path]:
         if _looks_like_dealii_root(cand):
             return cand
 
-    # 6. CMake fall-back.
-    cmake = shutil.which("cmake")
+    # 7. CMake fall-back.
+    cmake = _cmake_executable()
     if cmake:
         import subprocess
         try:
@@ -367,7 +434,7 @@ class DealiiBackend(SolverBackend):
 
     def check_availability(self) -> tuple[BackendStatus, str]:
         # Check for cmake
-        cmake = shutil.which("cmake")
+        cmake = _cmake_executable()
         if not cmake:
             return BackendStatus.NOT_INSTALLED, "CMake not found"
 
@@ -429,8 +496,8 @@ class DealiiBackend(SolverBackend):
             Path(tmpdir, "CMakeLists.txt").write_text(test_cmake)
             try:
                 r = subprocess.run(
-                    ["cmake", "."], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                    cwd=tmpdir, timeout=30
+                    [_cmake_executable() or "cmake", "."], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, cwd=tmpdir, timeout=30
                 )
                 if r.returncode == 0:
                     return BackendStatus.AVAILABLE, "deal.II found via CMake"
@@ -578,7 +645,7 @@ class DealiiBackend(SolverBackend):
                               ["Q1"], ["2d"]),
             PhysicsCapability("time_dependent_wave", "Wave equation (step-23, step-48)", [2, 3],
                               ["Q1"], ["2d"]),
-            PhysicsCapability("time_dependent_ns", "Transient Boussinesq flow (step-35)", [2],
+            PhysicsCapability("time_dependent_ns", "Transient Boussinesq flow (Boussinesq tutorials: step-31, step-32)", [2],
                               ["Q2-Q1"], ["2d"]),
             PhysicsCapability("matrix_free", "Matrix-free high-performance FEM (step-37, step-59)", [2, 3],
                               ["Q1-Q4 (tensor product)"], ["2d"]),
@@ -778,16 +845,32 @@ class DealiiBackend(SolverBackend):
 
         cmake_content = _generate_cmakelists("fem_solve")
         (work_dir / "CMakeLists.txt").write_text(cmake_content)
+        configure = [_cmake_executable() or "cmake", "."]
+        config_dir = _dealii_config_dir(_find_dealii())
+        if config_dir is not None:
+            # CMake searches a CMAKE_PREFIX_PATH from the environment (spack
+            # load, a Spack view, environment modules) before any HINTS, but
+            # it takes deal.II_DIR as given.
+            configure.insert(1, f"-Ddeal.II_DIR={config_dir}")
 
         job_id = str(uuid.uuid4())[:8]
         job = JobHandle(job_id=job_id, backend_name="dealii", work_dir=work_dir, status="running")
 
         start = time.time()
 
+        # Refused before anything is compiled.
+        if np > 1 and _dealii_without_mpi(config_dir):
+            job.status = "failed"
+            job.error = (f"np={np} was asked for, but this deal.II ({config_dir}) is built "
+                         "without MPI (DEAL_II_WITH_MPI OFF): each of the processes would "
+                         "solve the whole problem and write the same files. Run it with np=1.")
+            job.elapsed = time.time() - start
+            return job
+
         # Step 1: CMake configure
         try:
             proc = await asyncio.create_subprocess_exec(
-                "cmake", ".",
+                *configure,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(work_dir),
@@ -911,53 +994,56 @@ class DealiiBackend(SolverBackend):
         return sorted_by_step(results)
 
 
-def _generate_cmakelists(target_name: str) -> str:
-    # If DEALII_ROOT points to source with a build dir, use that build
-    dealii_root = os.environ.get("DEALII_ROOT", "")
-    extra_hints = ""
-    if dealii_root:
-        for build_dir in ["build/lib/cmake/deal.II", "build", "build/release",
-                          "build/Release", "install/lib/cmake/deal.II"]:
-            candidate = Path(dealii_root) / build_dir
-            if (candidate / "deal.IIConfig.cmake").exists():
-                extra_hints = f" {candidate}"
-                break
-            elif candidate.is_dir():
-                extra_hints = f" {candidate}"
-                break
-        if not extra_hints and Path(dealii_root).is_dir():
-            extra_hints = f" {dealii_root}"
+def _dealii_config_dir(root: Optional[Path]) -> Optional[Path]:
+    """The directory holding deal.IIConfig.cmake for a deal.II the finder
+    reported: an install keeps it in lib/cmake/deal.II, a source tree in its
+    build directory."""
+    if root is None:
+        return None
+    for sub in ("lib/cmake/deal.II", "build/lib/cmake/deal.II", "build",
+                "build/release/lib/cmake/deal.II", "build/release",
+                "build/Release/lib/cmake/deal.II", "build/Release",
+                "install/lib/cmake/deal.II", "share/deal.II/cmake"):
+        cfg = root / sub
+        if (cfg / "deal.IIConfig.cmake").exists():
+            return cfg
+    return None
 
-    # Fall back to whatever _find_dealii() returns (conda env,
-    # /usr, /opt, etc.). Without this, cmake aborts with
-    # "Could not find a package configuration file provided by
-    # 'deal.II' (requested version 9.0)" on conda-forge installs
-    # where the binary isn't on PATH and DEALII_ROOT isn't set
-    # — discover('list') correctly reports deal.II AVAILABLE
-    # (the dealii backend's check_availability walks conda envs)
-    # but the cmake configure step doesn't see the env's
-    # lib/cmake/deal.II dir. Audit 2026-06-01.
-    if not extra_hints:
-        discovered = _find_dealii()
-        if discovered is not None:
-            # Point the hint at the directory that ACTUALLY holds
-            # deal.IIConfig.cmake. For a SOURCE tree the config lives under
-            # build/lib/cmake/deal.II (not <root>/lib/cmake/deal.II), so a bare
-            # root hint makes find_package silently fall back to a *system*
-            # deal.II of a different (older) version — e.g. advertising a 9.8
-            # source build but compiling against /usr's 9.1.1, which breaks every
-            # template that uses a post-9.1 API (issue #39 class). Search the same
-            # build/install sub-paths the DEALII_ROOT branch does.
-            for sub in ("lib/cmake/deal.II", "build/lib/cmake/deal.II",
-                        "build/release/lib/cmake/deal.II",
-                        "build/Release/lib/cmake/deal.II",
-                        "install/lib/cmake/deal.II", "share/deal.II/cmake"):
-                cfg = discovered / sub
-                if (cfg / "deal.IIConfig.cmake").exists():
-                    extra_hints = f" {cfg}"
-                    break
-            if not extra_hints:
-                extra_hints = f" {discovered}"
+
+def _dealii_without_mpi(config_dir: Optional[Path]) -> bool:
+    """True when deal.IIConfig.cmake says the build has no MPI. False when it
+    has MPI or cannot be read: then mpirun is used as before."""
+    if config_dir is None:
+        return False
+    try:
+        text = (config_dir / "deal.IIConfig.cmake").read_text(errors="replace")
+    except OSError:
+        return False
+    return re.search(r"^\s*set\(DEAL_II_WITH_MPI OFF\)", text, re.M) is not None
+
+
+def _generate_cmakelists(target_name: str) -> str:
+    # The deal.II a template compiles against is the one _find_dealii()
+    # reports: it checks DEAL_II_DIR, then DEALII_ROOT, then the usual places.
+    # This used to read DEALII_ROOT first, so with both set, discover reported
+    # DEAL_II_DIR's deal.II while every template compiled against DEALII_ROOT's
+    # (measured: "deal.II 9.7.1 at <spack prefix>" reported, "Using the
+    # deal.II-9.8.0-pre build directory" compiled).
+    #
+    # The hint points at the directory that ACTUALLY holds
+    # deal.IIConfig.cmake. For a SOURCE tree the config lives under
+    # build/lib/cmake/deal.II (not <root>/lib/cmake/deal.II), so a bare
+    # root hint makes find_package silently fall back to a *system*
+    # deal.II of a different (older) version — e.g. advertising a 9.8
+    # source build but compiling against /usr's 9.1.1, which breaks every
+    # template that uses a post-9.1 API (issue #39 class). Without any hint,
+    # cmake aborts with "Could not find a package configuration file provided
+    # by 'deal.II'" on conda-forge installs, which discover still reports
+    # AVAILABLE (audit 2026-06-01).
+    extra_hints = ""
+    discovered = _find_dealii()
+    if discovered is not None:
+        extra_hints = f" {_dealii_config_dir(discovered) or discovered}"
 
     # Honour CC/CXX from the environment so that conda-forge deal.II
     # packages (whose deal.IIConfig.cmake bakes in a feedstock-only

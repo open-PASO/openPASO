@@ -2,8 +2,9 @@
 scikit-fem solver backend.
 
 scikit-fem is a pure-Python FEM assembly library with zero compilation
-dependencies (only numpy, scipy, meshio). It generates system matrices
-from weak forms and solves with scipy sparse solvers.
+dependencies (requires only numpy and scipy; meshio is an optional extra,
+scikit-fem[all], needed for mesh file I/O such as VTU output). It generates
+system matrices from weak forms and solves with scipy sparse solvers.
 
 This backend demonstrates the agent handling an assembly-level library,
 not just turnkey solvers.
@@ -210,14 +211,14 @@ class SkfemBackend(SolverBackend):
             ),
             PhysicsCapability(
                 name="point_source",
-                description="Poisson with Dirac-delta point source — discrete RHS is N_i(x0) (Kronecker e_node for mesh-coincident source). Matches scikit-fem ex17 + ex38.",
+                description="Poisson with Dirac-delta point source — discrete RHS is N_i(x0) (Kronecker e_node for mesh-coincident source). Matches scikit-fem ex38.",
                 spatial_dims=[2],
                 element_types=["P1-tri"],
                 template_variants=["2d"],
             ),
             PhysicsCapability(
                 name="schrodinger",
-                description="1D stationary Schrödinger eigenvalue problem -½ψ'' + V(x)ψ = Eψ. Default quantum harmonic oscillator V=½x² with analytic E_n = n+½. Matches scikit-fem ex39.",
+                description="1D stationary Schrödinger eigenvalue problem -½ψ'' + V(x)ψ = Eψ. Default quantum harmonic oscillator V=½x² with analytic E_n = n+½.",
                 spatial_dims=[1],
                 element_types=["P1-line"],
                 template_variants=["1d"],
@@ -231,7 +232,7 @@ class SkfemBackend(SolverBackend):
             ),
             PhysicsCapability(
                 name="hydraulic_resistance",
-                description="Stokes flow through a 2D rectangular channel; computes resistance R=ΔP/Q against the Poiseuille closed-form 12μL/H³. Matches scikit-fem ex29.",
+                description="Stokes flow through a 2D rectangular channel; computes resistance R=ΔP/Q against the Poiseuille closed-form 12μL/H³.",
                 spatial_dims=[2],
                 element_types=["Taylor-Hood (P2-P1) tri"],
                 template_variants=["2d"],

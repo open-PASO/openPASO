@@ -62,7 +62,7 @@ KNOWLEDGE["_general"] = {
     },
     "solvers": {
         "direct": ["sparsecholesky", "umfpack", "pardiso", "mumps (MPI)"],
-        "iterative": ["CG", "GMRES", "MinRes", "QMR", "BiCGStab"],
+        "iterative": ["CG", "GMRes", "MinRes", "QMR", "TFQMR"],  # ngsolve.solvers; BiCGStab is C++-only (no Python binding)
         "preconditioners": ["local (Jacobi)", "multigrid", "bddc", "h1amg", "hcurlamg"],
         "nonlinear": ["Newton (built-in)", "solvers.Newton()", "manual Newton loop"],
         "eigenvalue": ["ArnoldiSolver (shift-invert)", "PINVIT"],

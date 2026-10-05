@@ -31,7 +31,8 @@ KNOWLEDGE = {
         "unconditionally stable. Signal: an explicit-Euler dolfinx "
         "Function update on a refined mesh reaches NaN within ~5-10 "
         "time steps when dt > 2/lambda_max; the same problem with the "
-        "BilinearForm a = (T*v/dt + kappa*grad(T)*grad(v))*dx converges "
+        "bilinear form a = (T*v/dt + kappa*ufl.dot(ufl.grad(T), "
+        "ufl.grad(v)))*dx converges "
         "smoothly to steady state. (Audit 2026-06-02.)",
         "[Input] Insulated boundary is the NATURAL BC for "
         "-div(kappa*grad(T)) = f — do NOTHING (no dirichletbc, no "

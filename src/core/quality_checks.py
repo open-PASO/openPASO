@@ -2578,6 +2578,25 @@ def _imports_at_roundoff(name, exports, graph):
     return None
 
 
+def _imported_size(name, exports, graph):
+    """The largest |number| `name`'s partners export to it (values and fluxes); None without the data."""
+    if not isinstance(exports, dict) or not isinstance(graph, dict):
+        return None
+    partners = [p for p in ((graph.get("declared_edges") or {}).get(name) or []) if p in exports]
+    nums = []
+    for p in partners:
+        e = exports[p] if isinstance(exports[p], dict) else {}
+        for key in ("values", "normal_fluxes"):
+            stack = [e.get(key)]
+            while stack:
+                v = stack.pop()
+                if isinstance(v, (list, tuple)):
+                    stack.extend(v)
+                elif isinstance(v, (int, float)) and v == v:
+                    nums.append(abs(float(v)))
+    return max(nums) if nums else None
+
+
 def check_interface_sensitivity(sensitivity: dict, floor: float = 1e-9,
                                 noise_margin: float = 3.0,
                                 noise_floor: float | None = None,
@@ -2705,7 +2724,16 @@ def check_interface_sensitivity(sensitivity: dict, floor: float = 1e-9,
         blocks = rec.get("blocks") or {}
         dead = sorted(k for k, v in blocks.items()
                       if v is not None and v == v and v < floor)
-        if dead and len(dead) < len(blocks):
+        _tiny = _imported_size(name, exports, graph)
+        if dead and len(dead) < len(blocks) and _tiny is not None and _tiny <= 1e-14:
+            # EVERY NUMBER HANDED TO IT IS ROUND-OFF, so the probe's nudge of them was too, and a
+            # solver may answer a load of that size with no solve at all (measured: FEBio's
+            # small-residual exit returned the same traction bit for bit on 1e-17 imports, and the
+            # same script doubled it when a 1e-3 import doubled).
+            not_checked.append(
+                f"interface sensitivity of {name}'s blocks {dead}: NOT measured. Every number it "
+                f"imports is at round-off ({_tiny:.1e}), so the probe's nudge was round-off too.")
+        elif dead and len(dead) < len(blocks):
             findings.append(
                 f"Participant {name} exports block(s) {dead} that do NOT respond "
                 "to its imports at all, while the rest of its export does. That "

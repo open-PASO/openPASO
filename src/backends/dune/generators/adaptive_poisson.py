@@ -166,7 +166,8 @@ KNOWLEDGE = {
             "which ZEROES live discrete functions."),
         "solver": "galerkin scheme on adaptive grid with mark/refine/coarsen cycle",
         "spaces": "lagrange(gridView, order=k) on adaptiveLeafGridView",
-        "mesh": "ALUGrid (conda-forge dune-alugrid) for local h-refinement",
+        "mesh": ("ALUGrid (dune-alugrid from PyPI, installed as a "
+                 "dependency of dune-fem) for local h-refinement"),
         "exit_code_warning": (
             "Adaptive DUNE runs frequently exit 134 AFTER printing "
             "every correct result: the abort happens in ALUGrid "

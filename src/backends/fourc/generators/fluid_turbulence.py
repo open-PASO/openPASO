@@ -24,10 +24,14 @@ class FluidTurbulenceGenerator(BaseGenerator):
             ),
             "sgs_models": {
                 "Smagorinsky": "Classic constant-coefficient SGS model",
-                "DynamicSmagorinsky": "Germano dynamic procedure for C_s",
-                "WALE": "Wall-Adapting Local Eddy viscosity",
+                "Smagorinsky_with_van_Driest_damping": (
+                    "Smagorinsky with van Driest wall damping (channel of "
+                    "height 2 in y only)"
+                ),
+                "Dynamic_Smagorinsky": "Germano dynamic procedure for C_s",
                 "Vreman": "Vreman SGS model",
-                "Multifractal": "Multifractal SGS model",
+                "Dynamic_Vreman": "Vreman model with one coefficient computed dynamically from volume-averaged filtered quantities (clipped at zero)",
+                "Multifractal_Subgrid_Scales": "Multifractal SGS model",
             },
             "stabilization": [
                 "Residual-based VMS (variational multiscale) — built into fluid elements",
@@ -176,7 +180,8 @@ class FluidTurbulenceGenerator(BaseGenerator):
             "#     the wall (y+ ~ 1) with periodic stream/spanwise\n"
             "#     boundary surfaces\n"
             "#   * FLUID DYNAMIC + a TURBULENCE MODEL section\n"
-            "#     (Smagorinsky / dynamic / WALE) + periodic BCs +\n"
+            "#     (Smagorinsky / Dynamic_Smagorinsky / Vreman /\n"
+            "#     Multifractal_Subgrid_Scales) + periodic BCs +\n"
             "#     turbulence statistics sampling\n"
             "#   * MAT_fluid at the target Reynolds number\n"
             "# Pitfalls (see knowledge() for the full set):\n"

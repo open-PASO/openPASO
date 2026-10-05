@@ -141,7 +141,9 @@ KNOWLEDGE = {
             "nearest_element",
             "barycentric",
             "coupling_geometry",
-            "radial_basis_function",
+            "projection_3D_2D",
+            "nearest_neighbor_iga",
+            "radial_basis_function (Kratos >= 10.4.2; not registered in 10.3.0)",
             # 'kratos_mapping' is the *python wrapper module* name
             # under CoSim/data_transfer_operators/, not a mapper
             # *type*. 'empire_mapping' is NOT registered anywhere
@@ -152,13 +154,13 @@ KNOWLEDGE = {
             "external": "CoSimIO for coupling with external codes (C/C++/Python/Fortran API)",
         },
         "pitfalls": [
-            "[API] Catalog had two systematic naming errors corrected 2026-06-01:\n  (a) Convergence accelerator \"ibqn\" \u2014 NOT a registered name. The real file under KratosMultiphysics/CoSimulationApplication/convergence_accelerators/ is block_ibqnls.py (or iqnils.py for the inverse-least-squares variant). Other registered names: aitken, anderson, constant_relaxation, mvqn, block_mvqn.\n  (b) Mapper type \"empire_mapping\" does NOT exist in libKratosMappingCore.so (empire substring 0 hits). Real mapper types include nearest_neighbor, nearest_element, barycentric, coupling_geometry, radial_basis_function. Also: \"kratos_mapping\" in the prior catalog refers to the python wrapper module name, not a mapper *type*. Signal: convergence_accelerator type \"ibqn\" in a CoSim parameters JSON raises a Kratos factory ImportError finding \"ibqn.py\" in convergence_accelerators/; similarly mapping with \"empire_mapping\" raises a MapperFactory unknown-mapper error. (Verified empirically 2026-06-01 \u2014 Tier-2 fixture cosimulation_accelerator_mapper_names in scripts/tier2_fixtures/kratos/. KratosCoSimulationApplication was also missing from the .venv \u2014 install via \"pip install KratosCoSimulationApplication\" before any CoSim catalog usage.)",
+            "[API] Catalog had two systematic naming errors corrected 2026-06-01:\n  (a) Convergence accelerator \"ibqn\" \u2014 NOT a registered name. The real file under KratosMultiphysics/CoSimulationApplication/convergence_accelerators/ is block_ibqnls.py (or iqnils.py for the inverse-least-squares variant). Other registered names: aitken, anderson, constant_relaxation, mvqn, block_mvqn.\n  (b) Mapper type \"empire_mapping\" does NOT exist in libKratosMappingCore.so (empire substring 0 hits). Real mapper types at 10.3.0: nearest_neighbor, nearest_element, barycentric, coupling_geometry, projection_3D_2D, nearest_neighbor_iga; beam_mapper is registered from 10.4.0 and radial_basis_function from 10.4.2, neither in 10.3.0. Also: \"kratos_mapping\" in the prior catalog refers to the python wrapper module name, not a mapper *type*. Signal: convergence_accelerator type \"ibqn\" in a CoSim parameters JSON raises a Kratos factory ImportError finding \"ibqn.py\" in convergence_accelerators/; similarly mapping with \"empire_mapping\" raises a MapperFactory unknown-mapper error. (Verified empirically 2026-06-01 \u2014 Tier-2 fixture cosimulation_accelerator_mapper_names in scripts/tier2_fixtures/kratos/. KratosCoSimulationApplication was also missing from the .venv \u2014 install via \"pip install KratosCoSimulationApplication\" before any CoSim catalog usage.)",
         ],
         "guidance": [
             "[Numerical] Weak coupling: one pass per time step (fast but may be inaccurate for strong interactions)",
             "[Numerical] Strong coupling: iterate until interface convergence (required for added-mass instability)",
             "[Numerical] Aitken relaxation: good default, but MVQN converges faster for large interface problems",
-            "[Numerical] Data mapping: non-matching meshes require interpolation (use RBF for smooth fields)",
+            "[Numerical] Data mapping: non-matching meshes require interpolation (the RBF mapper for smooth fields, radial_basis_function, needs Kratos >= 10.4.2)",
             "[Numerical] CoSimIO: standalone library for coupling Kratos with any external solver",
         ]
     },

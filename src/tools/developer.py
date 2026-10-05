@@ -119,11 +119,13 @@ _SOURCE_LOCATIONS = {
         ],
     },
     "fenics": {
-        "root": _source_root("FENICS_ROOT", "pip-installed — set FENICS_ROOT to enable source access"),
+        "root": _source_root("FENICS_ROOT", "conda-installed — set FENICS_ROOT to enable source access"),
         "source_env_var": "FENICS_ROOT",
-        "build_system": "CMake (from source) or pip/conda (pre-built)",
+        "build_system": "CMake (from source) or conda/Spack/apt (pre-built; there is no PyPI package)",
         "language": "Python + C++ (PETSc)",
-        "build_command": "pip install fenics-dolfinx  # or: cd build && cmake --build .",
+        "build_command": "conda create -n openpaso-fenicsx -y -c conda-forge fenics-dolfinx pyvista python=3.12  "
+                         "# or from source: cmake .. && make install in cpp/build, then "
+                         "pip install --check-build-dependencies --no-build-isolation . in python/",
         "reference_files": "Official demos at https://docs.fenicsproject.org/dolfinx/main/python/demos.html",
         "key_dirs": _make_key_dirs(os.environ.get("FENICS_ROOT", ""), {
             "templates": "openpaso/src/backends/fenics/backend.py",
@@ -141,7 +143,9 @@ _SOURCE_LOCATIONS = {
         "build_system": "CMake",
         "language": "C++17",
         "build_command": "cmake -DDEAL_II_DIR=/usr/share/deal.II . && make",
-        "reference_files": "97 step tutorials at /usr/share/doc/libdeal.ii-doc/examples/step-*/",
+        "reference_files": "step tutorials (the numbering has gaps: 88 up to step-97 in deal.II 9.7, 91 up to "
+                           "step-104 in 9.8) at /usr/share/doc/libdeal.ii-doc/examples/step-*/ (the copy there is "
+                           "the distribution package's: libdeal.ii-doc 9.1.1 on Ubuntu 20.04 ships 62, up to step-64)",
         "key_dirs": _make_key_dirs(os.environ.get("DEALII_ROOT", ""), {
             "templates": "openpaso/src/backends/dealii/backend.py",
             "include": "/usr/include/deal.II/",
@@ -201,7 +205,8 @@ _SOURCE_LOCATIONS = {
         }),
         "extension_points": [
             "New physics: add Kratos Application (C++) or use existing",
-            "New element: register via KM.KratosGlobals",
+            "New element: implement in C++ and register with KRATOS_REGISTER_ELEMENT in the application's Register() "
+            "(KM.KratosGlobals only looks up variables, flags and constitutive laws)",
             "CoSimulation: use CoSimulationApplication for multi-code coupling",
             "Custom process: derive from KM.Process",
         ],

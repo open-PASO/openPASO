@@ -53,9 +53,15 @@ which is order 1.98 then 2.03.
     the ones to watch: a coordinate a rounding error outside the mesh throws
     `ExcPointNotAvailableHere`, so clamp or skip such points deliberately
     rather than letting one exception end the run.
-  * IT IS O(log N) PER CALL because of the cell search. For a few thousand
-    probes that is irrelevant; for a million, build a `FEFieldFunction` and
-    reuse it, or sort the points by cell.
+  * IT IS O(N) PER CALL: without a GridTools::Cache the cell search scans
+    every vertex and every active cell, so on large meshes the time per call
+    grows in proportion to the number of cells (measured on 9.7.1 and
+    9.8.0-pre). For a few thousand probes on a modest mesh that is fine; for
+    many probes on a large mesh, reuse one `FEFieldFunction` (its
+    value_list() searches through a GridTools::Cache, and its single-point
+    value() first tries the cell of the previous point, so points sorted by
+    cell skip most searches), or use VectorTools::point_values with a
+    Utilities::MPI::RemotePointEvaluation.
   * THE DOF HANDLER AND THE VECTOR MUST MATCH the refinement level you are
     reporting. Re-distributing dofs after refinement invalidates an old
     solution vector, and reading it gives values from the previous mesh with no

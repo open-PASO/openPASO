@@ -1,0 +1,40 @@
+{
+  "solver": "kratos",
+  "timestamp": "2026-05-07T23:08:25.547603",
+  "KratosMultiphysics": {
+    "importable": true,
+    "version": "unknown"
+  },
+  "applications": {
+    "StructuralMechanicsApplication": {
+      "importable": true,
+      "version": "unknown"
+    },
+    "FluidDynamicsApplication": {
+      "importable": false,
+      "version": null
+    },
+    "ConstitutiveLawsApplication": {
+      "importable": false,
+      "version": null
+    },
+    "DEMApplication": {
+      "importable": false,
+      "version": null
+    },
+    "ContactStructuralMechanicsApplication": {
+      "importable": false,
+      "version": null
+    },
+    "CoSimulationApplication": {
+      "importable": false,
+      "version": null
+    }
+  },
+  "api": {
+    "KM.Model": true,
+    "KM.ModelPart": true,
+    "KM.DISPLACEMENT": true,
+    "KM.YOUNG_MODULUS": true
+  }
+}

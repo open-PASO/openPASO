@@ -686,14 +686,13 @@ KNOWLEDGE = {
             "Hierarchical basis, so coarse-level modes survive a "
             "degree change — the usual choice for p-adaptive "
             "Poisson. WARNING, verified by execution: "
-            "has_support_points() is FALSE for degree >= 2, and "
+            "has_support_points() is FALSE at EVERY degree, including "
+            "1 (the element has only generalized support points), and "
             "VectorTools::interpolate_boundary_values then SEGFAULTS "
             "(exit 139 on Release; a Debug build aborts with 'You "
             "are trying to access the support points of a finite "
             "element that either has no support points at all...'). "
-            "At degree 1 it coincides with FE_Q and the call is "
-            "fine, which is exactly why the bug hides in a "
-            "first-order test and appears when you raise the degree. "
+            "Unlike FE_Q, even the first-order element is affected. "
             "Use VectorTools::project_boundary_values instead, or "
             "guard on fe.has_support_points().",
         "FE_Bernstein":
@@ -701,8 +700,8 @@ KNOWLEDGE = {
             "where mass-matrix conditioning matters (modal analysis, "
             "transient diffusion). SAME WARNING as "
             "FE_Q_Hierarchical, verified by execution: "
-            "has_support_points() is FALSE for degree >= 2 (and it "
-            "has no generalized support points either), so "
+            "has_support_points() is FALSE at every degree, including "
+            "1 (and it has no generalized support points either), so "
             "interpolate_boundary_values SEGFAULTS. Use "
             "project_boundary_values.",
         "FE_Q_iso_Q1":
@@ -720,7 +719,9 @@ KNOWLEDGE = {
             "it returns an EMPTY map — so Dirichlet data must be "
             "imposed weakly through the penalty term.",
         "FE_DGP":
-            "Monomial DG basis; alternative to FE_DGQ for higher-"
+            "Complete-polynomial P_k DG space with an L2-orthonormal "
+            "Legendre basis (FE_DGPMonomial is the monomial variant); "
+            "alternative to FE_DGQ for higher-"
             "order accurate Poisson on hyper-cube meshes.",
         "FE_SimplexP":
             "Lagrange on simplex (triangle / tet) cells — needed "
@@ -783,8 +784,12 @@ KNOWLEDGE = {
         "relative residual above 1)",
         "SparseILU / SparseMIC        — incomplete LU / modified incomplete "
         "Cholesky, both verified to work with SolverCG on Poisson; SparseMIC "
-        "is the class the name 'PreconditionICC' refers to",
-        "PreconditionAMG / BoomerAMG  — parallel; via TrilinosWrappers, scales to 10^7 DoFs",
+        "is NOT PreconditionICC - that name is PETScWrappers::PreconditionICC, "
+        "a separate PETSc incomplete-Cholesky wrapper "
+        "(TrilinosWrappers::PreconditionIC is the Trilinos one)",
+        "PreconditionAMG / BoomerAMG  — parallel AMG: TrilinosWrappers::PreconditionAMG (Trilinos ML; "
+        "PreconditionAMGMueLu for MueLu) or PETScWrappers::PreconditionBoomerAMG (hypre via PETSc); "
+        "LA::MPI::PreconditionAMG (step-40) picks one per backend; scales to 10^7 DoFs",
         "PreconditionChebyshev        — used inside multigrid as smoother, also as a standalone for matrix-free",
         "MGSmootherRelaxation         — geometric multigrid smoother (step-16, step-50)",
     ],
@@ -1033,7 +1038,9 @@ GENERAL_KNOWLEDGE = {
         "H(curl)": "FE_Nedelec(k), FE_NedelecSZ(k)",
         "H(curl)_advanced": (
             "FE_NedelecNodal(k) — Nédélec element with a nodal-interpolation "
-            "DoF setup, useful when coupling against nodal H(curl) data."
+            "DoF setup, useful when coupling against nodal H(curl) data. "
+            "deal.II 9.8.0 and later only (not in 9.7.1); declared in "
+            "deal.II/fe/fe_nedelec.h."
         ),
         "trace_and_face": (
             "FE_FaceQ(p) — Q-polynomial face element used for "
@@ -1261,22 +1268,25 @@ GENERAL_KNOWLEDGE = {
                 "DealiiAssert isn't firing. Fix: rebuild deal.II "
                 "with -DCMAKE_BUILD_TYPE=DebugRelease, or accept the "
                 "release build. "
-                "(4) Second arg is anything besides empty / DEBUG / "
-                "RELEASE — FATAL_ERROR 'invalid second argument. "
-                "Valid arguments are (empty), DEBUG, or RELEASE'. "
+                "(4) Any argument other than DEBUG / RELEASE — "
+                "FATAL_ERROR 'The deal_ii_setup_target() macro was "
+                "called with an invalid argument. Valid arguments are "
+                "(none), DEBUG, or RELEASE. The argument given is "
+                "\"<arg>\".' Giving both DEBUG and RELEASE is a "
+                "separate FATAL_ERROR ('...the debug or release "
+                "configuration can only be specified once'). "
                 "Common: passing 'Debug' (lowercase d, capitalized "
                 "rest) thinking the macro is case-insensitive — it "
                 "isn't (string MATCHES is case-sensitive). "
-                "(5) Target is an OBJECT_LIBRARY — the link-"
-                "interface block (TARGET_LINK_LIBRARIES) is SKIPPED "
-                "silently (gated on `_type != OBJECT_LIBRARY`). The "
-                "object library compiles fine but linking it into "
-                "the final executable without explicitly "
-                "TARGET_LINK_LIBRARIES(<exe> ${DEAL_II_TARGET_<build>}) "
-                "yields undefined-symbol errors at link time. "
+                "(5) Target is an OBJECT_LIBRARY — only the deal.II "
+                "LINKER FLAGS (DEAL_II_LINKER_FLAGS*) are skipped "
+                "(gated on `_type != OBJECT_LIBRARY`); "
+                "target_link_libraries(<target> "
+                "${DEAL_II_TARGET_<build>}) is still applied, so the "
+                "object library carries the deal.II link interface. "
                 "Plus: this is a CMake MACRO (not FUNCTION), so "
-                "internal vars _build, _flags, _cuda_flags, "
-                "_cxx_flags LEAK into the caller scope and can "
+                "internal vars _build and _type (and _arg when an "
+                "argument is given) LEAK into the caller scope and can "
                 "shadow user-set variables of the same names. "
                 "(File walk macro_deal_ii_setup_target.cmake "
                 ".)"),
@@ -1341,26 +1351,34 @@ GENERAL_KNOWLEDGE = {
             "env_vars": {
                 "TEST_PICKUP_REGEX": "regex filter on '<category>/<test>' names; empty = catchall (default)",
                 "TEST_TIME_LIMIT":   "wall clock limit per test in seconds (default 600)",
-                "DIFF_DIR":          "hint path for diff executable",
-                "NUMDIFF_DIR":       "hint path for numdiff executable (preferred over diff)",
+                "DIFF_DIR":          "not read: the macro looks only for numdiff (there is no diff fallback)",
+                "NUMDIFF_DIR":       "hint path for the numdiff executable, the only comparison tool the macro looks for",
                 "TEST_LIBRARIES":    "extra libs/targets to link against",
                 "TEST_LIBRARIES_DEBUG / _RELEASE":  "per-config link list",
                 "TEST_TARGET":       "test target name (or _DEBUG / _RELEASE pair)",
             },
             "Signal": (
-                "[Input] DEAL_II_PICKUP_TESTS has three FATAL_ERROR traps: "
-                "(1) calling it outside an external project (DEAL_II_PROJECT_CONFIG_INCLUDED "
-                "not set) — literal 'DEAL_II_PICKUP_TESTS can only be called in "
-                "external (test sub-)projects after the inclusion of "
-                "deal.IIConfig.cmake'; "
-                "(2) neither diff nor numdiff on PATH — 'Could not find diff "
-                "or numdiff. One of those are required'; "
-                "(3) numdiff IS a symlink to diff (common on minimal installs) — "
-                "macro runs a relative-tolerance probe and dies with 'The "
-                "detected numdiff executable was not able to pass a simple "
-                "relative tolerance test. This usually means that either "
-                "numdiff was misconfigured or that it is a symbolic link to "
-                "diff.' Workaround: install real numdiff from "
+                "[Input] DEAL_II_PICKUP_TESTS stops with a FATAL_ERROR "
+                "when (1) it is called outside an external project "
+                "(DEAL_II_PROJECT_CONFIG_INCLUDED not set) — literal "
+                "'DEAL_II_PICKUP_TESTS can only be called in external "
+                "(test sub-) projects after the inclusion of "
+                "deal.IIConfig.cmake' — or when a test file name "
+                "compares a boolean feature value with an operator "
+                "other than '='. A missing or "
+                "broken numdiff is NOT fatal (measured on 9.7.1 and "
+                "9.8): only numdiff is looked for (NUMDIFF_DIR hint, no "
+                "diff fallback), and it is probed with 'numdiff -r "
+                "1.0e-8' on two nearly equal files. If numdiff is "
+                "missing or fails the probe (e.g. it is a symlink to "
+                "diff), the macro emits a WARNING 'Could not find or "
+                "execute numdiff, which is required for running most of "
+                "the tests within the testsuite; ...' and sets "
+                "NUMDIFF_EXECUTABLE empty (neither happens for the test "
+                "categories quick_tests and performance); DEAL_II_ADD_TEST "
+                "then runs every test without comparing its output, so a "
+                "test whose output does not match its .output file "
+                "reports PASSED. Workaround: install real numdiff from "
                 "savannah.gnu.org/projects/numdiff or set NUMDIFF_DIR. "
                 "Additionally: an unknown `with_<feature>` in a test filename "
                 "(neither DEAL_II_WITH_<F> nor DEAL_II_<F> defined) silently "
@@ -1372,7 +1390,8 @@ GENERAL_KNOWLEDGE = {
         "DEAL_II_QUERY_GIT_INFORMATION": {
             "description": (
                 "Populate GIT_BRANCH / GIT_REVISION / GIT_SHORTREV / "
-                "GIT_TAG from the source dir's .git metadata. The "
+                "GIT_TAG / GIT_TIMESTAMP / GIT_FANCY_TAG from the "
+                "source dir's .git metadata. The "
                 "macro has an OPTIONAL positional PREFIX argument: "
                 "called as DEAL_II_QUERY_GIT_INFORMATION() variables "
                 "are unprefixed; called as "
@@ -1383,19 +1402,21 @@ GENERAL_KNOWLEDGE = {
                 "[Output] Four sharp edges users routinely hit with "
                 "DEAL_II_QUERY_GIT_INFORMATION: "
                 "(1) The default variables are UNPREFIXED — GIT_BRANCH, "
-                "GIT_REVISION, GIT_SHORTREV, GIT_TAG. There is NO "
+                "GIT_REVISION, GIT_SHORTREV, GIT_TAG, GIT_TIMESTAMP, "
+                "GIT_FANCY_TAG. There is NO "
                 "DEAL_II_GIT_* prefix unless the user explicitly "
                 "passes a prefix argument; the prefix is "
                 "${ARGN}_-style and lives in the macro body. "
                 "(2) The variable set is GIT_BRANCH / GIT_REVISION / "
-                "GIT_SHORTREV / GIT_TAG — there is NO GIT_TIMESTAMP "
-                "and NO GIT_COMMIT_DATE; older documentation that "
-                "claims a _TIMESTAMP slot is wrong. "
+                "GIT_SHORTREV / GIT_TIMESTAMP (the commit date, e.g. "
+                "'2026-09-30 12:19:53+02:00') and, through the helper "
+                "scripts get_latest_tag.sh / get_fancy_tag.sh, GIT_TAG "
+                "/ GIT_FANCY_TAG; there is NO GIT_COMMIT_DATE. "
                 "(3) If ${CMAKE_SOURCE_DIR}/.git/HEAD doesn't exist "
                 "(tarball install, shallow CI checkout without .git/, "
                 "or downstream app embedded in a non-git workspace) "
                 "the macro is a SILENT NO-OP — no warning, no error, "
-                "all four variables remain unset. Subsequent "
+                "all six variables remain unset. Subsequent "
                 "configure_file expansions on ${GIT_REVISION} produce "
                 "the empty string. "
                 "(4) GIT_TAG depends on the auxiliary shell script "

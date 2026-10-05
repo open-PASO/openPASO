@@ -8,9 +8,10 @@ Covers the 2D scalar wave equation
 with explicit central-difference time-stepping and row-sum-lumped mass
 so each step is a single sparse-matrix-vector product (no linear solve).
 
-Modelled after scikit-fem upstream examples ex09 / ex36 / ex44 (wave
-equation variants) — the backend previously had **no** wave-equation
-generator at all, leaving a clear coverage gap relative to upstream.
+Modelled after scikit-fem upstream example ex44 (1D wave equation,
+Crank-Nicolson on a first-order system) — the backend previously had
+**no** wave-equation generator at all, leaving a clear coverage gap
+relative to upstream.
 """
 
 
@@ -133,7 +134,7 @@ KNOWLEDGE: dict = {
             "homogeneous Dirichlet BCs. Explicit central-"
             "difference time integration + row-sum-lumped mass "
             "(no linear solve per step). Matches scikit-fem "
-            "upstream ex09 / ex36 / ex44 in physics; the lumped-"
+            "upstream ex44 in physics; the lumped-"
             "explicit variant here is the cheapest runnable form."
         ),
         "weak_form": (
@@ -174,14 +175,15 @@ KNOWLEDGE: dict = {
             "Mesh is a dataclass whose first field is doflocs, so "
             "the tuple is read as COORDINATES and you get back a "
             "MeshQuad1 carrying a 1-D point array and a single "
-            "bogus element. Signal: nothing is raised and nothing "
-            "is warned at the construction line — the only thing "
-            "emitted is a bare stdout line 'Unable to calculate "
-            "global DOF locations.', which is not a Python warning, "
-            "so catch_warnings records an empty list and "
+            "bogus element. Signal: nothing is raised, warned or "
+            "printed at the construction line. The failure "
+            "surfaces LATER, at Basis(...), which first logs "
+            "'Unable to calculate global DOF locations.' to "
+            "stderr through the logging module — not a Python "
+            "warning, so catch_warnings records an empty list and "
             "simplefilter('error') cannot turn it into an "
-            "exception. The failure surfaces LATER, at Basis(...), "
-            "as IndexError 'too many indices for array: array is "
+            "exception — and then raises "
+            "IndexError 'too many indices for array: array is "
             "1-dimensional, but 2 were indexed' — a message that "
             "never mentions MeshQuad, so it reads as a basis bug. "
             "The two-positional-argument spelling MeshQuad(nx, ny) "
@@ -218,9 +220,10 @@ KNOWLEDGE: dict = {
             "claimed O(h^1.5) stall does not occur.)",
             "[API] `mass.assemble(basis)` returns a "
             "scipy.sparse.csr_matrix; summing along axis=1 "
-            "produces a numpy.matrix of shape (N, 1) in "
-            "NumPy < 2.0 and an ndarray in NumPy >= 2.0. Use "
-            "np.asarray(...).ravel() to coerce to 1-D regardless. "
+            "produces a numpy.matrix of shape (N, 1) under both "
+            "NumPy 1.x and 2.x (this is scipy's sparse-matrix "
+            "API; only the csr_array classes return an ndarray). "
+            "Use np.asarray(...).ravel() to coerce to 1-D. "
             "Signal: the mix-up is SILENT — no TypeError is "
             "raised and the warning list is empty, so neither "
             "try/except nor catch_warnings sees it. An (N,) "
@@ -311,12 +314,13 @@ KNOWLEDGE: dict = {
             "points raise NOTHING. The file is written and reads "
             "back with a three-column point array whose third "
             "column meshio supplied as zeros; the only notice is "
-            "plain text on the process stdout, 'Warning: VTU "
+            "plain text on the process STDERR (meshio prints it "
+            "through rich Console(stderr=True)), 'Warning: VTU "
             "requires 3D points, but 2D points given.', which is "
             "NOT a Python warning — catch_warnings records an "
-            "empty list, simplefilter('error') cannot promote it, "
-            "and it escapes contextlib.redirect_stdout, so it "
-            "cannot be captured that way either. (b) A wrong "
+            "empty list and simplefilter('error') cannot promote "
+            "it. contextlib.redirect_stdout does not capture it; "
+            "contextlib.redirect_stderr does. (b) A wrong "
             "cell-type tag is USUALLY loud, not silent: tagging "
             "quad connectivity as 'triangle', 'quad8' or 'line' "
             "raises meshio WriteError naming the expected "
@@ -332,8 +336,8 @@ KNOWLEDGE: dict = {
             "silently-malformed-tag claim are both corrected.)",
         ],
         "references": [
-            "scikit-fem examples: ex09 (3D wave), ex36 (wave "
-            "equation), ex44 (wave equation, alt formulation)",
+            "scikit-fem example: ex44 (1-D wave equation as a "
+            "first-order system)",
             "Hughes, T.J.R. The Finite Element Method (1987), "
             "Ch. 9: hyperbolic problems and CFL conditions",
         ],

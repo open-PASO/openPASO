@@ -260,10 +260,20 @@ gridView.writeVTK("result", pointdata={"u": uh})
             "Multi-field space: composite(V, Q, "
             "components=['velocity','pressure']). TrialFunction on it "
             "is ONE argument of shape (sum of dimRanges,) — slice it, "
-            "ufl.TrialFunctions does NOT unpack it. Measured "
-            "2026-08-03 to produce the same object as product() for "
-            "the same arguments."),
-        "product": "Alias-equivalent of composite on this install.",
+            "ufl.TrialFunctions does NOT unpack it. It is the space for "
+            "a MONOLITHIC solve: galerkin() on it builds and solves "
+            "(re-measured 2026-10-01 with the stokes template's "
+            "Taylor-Hood form: storage 'numpy', umfpack converged in 1 "
+            "linear iteration)."),
+        "product": (
+            "NOT an alias of composite. For the same arguments it has "
+            "the same C++ space type, dimRange and size, but dune-fem "
+            "documents it as the space for a DECOUPLED solve: it has "
+            "no storage (storage.name is None), interpolate() returns "
+            "a tuple function with .components, and galerkin() on it "
+            "raises TypeError at scheme construction for solver=None, "
+            "'gmres' and ('suitesparse','umfpack') (measured "
+            "2026-10-01 on dune-fem 2.12.0.2)."),
         "combined": "Present in dune.fem.space; NOT exercised here.",
         "lagrangehp": (
             "Variable-order Lagrange for p-adaptivity, "
@@ -316,7 +326,8 @@ gridView.writeVTK("result", pointdata={"u": uh})
         "what_is_NOT_here": (
             "dune-fem-dg. FALSIFIED 2026-08-03: 'import dune.femdg' "
             "and 'import dune.fem.dg' both raise ModuleNotFoundError "
-            "on a conda-forge dune-fem 2.12.0.2 install, so its ready "
+            "on a pip-installed (PyPI) dune-fem 2.12.0.2 install "
+            "(conda-forge has no dune-fem package), so its ready "
             "made SSP Runge-Kutta steppers, Bassi-Rebay 1/2, CDG/CDG2 "
             "operators and limiters are NOT available. Earlier "
             "revisions of this catalog listed them as if they were. "
@@ -360,8 +371,13 @@ gridView.writeVTK("result", pointdata={"u": uh})
         "marker. Do NOT pass gridView= to mark(); it is an upstream "
         "defect in 2.12.0.2. Full detail in adaptation_measured."),
     "parallel": (
-        "Shared memory: dune.fem.threading.use is an ATTRIBUTE and "
-        "DEFAULTS TO 1 whatever threading.max reports — assign it or "
+        "Shared memory: dune.fem.threading.use is an ATTRIBUTE. It "
+        "starts at DUNE_NUM_THREADS, else OMP_NUM_THREADS, else 1, and "
+        "threading.max at DUNE_NUM_THREADS, else OMP_NUM_THREADS, else "
+        "the core count, so with neither variable set use is 1 while "
+        "max reports every core (measured 2026-10-01 on a 32-core "
+        "host: no variable -> max 32, use 1; OMP_NUM_THREADS=2 -> 2 "
+        "and 2; DUNE_NUM_THREADS=3 -> 3 and 3) — assign it or "
         "call dune.fem.threading.useMax(). Distributed: dune.fem.comm "
         "exposes rank/size/barrier/broadcast/gather/scatter/sum/min/"
         "max (measured rank 0, size 1 in a serial run); no MPI launch "

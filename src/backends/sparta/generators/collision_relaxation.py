@@ -39,7 +39,11 @@ compute          nr grid all species nrho
 compute          tg thermal/grid all all temp
 fix              fnr ave/grid all 1 100 100 c_nr[*]
 fix              ftg ave/grid all 1 100 100 c_tg[*]
-compute          lam lambda/grid f_fnr[*] f_ftg lambda knall
+# one species: fnr averages one value, so it is a per-grid VECTOR, named
+# f_fnr. With several species it is an array, named f_fnr[*]; SPARTA
+# 27Aug2026 refuses f_fnr[*] on a vector ('Cannot use wildcard with
+# f_fnr[*] because it does not produce multiple values').
+compute          lam lambda/grid f_fnr f_ftg lambda knall
 compute          knmin reduce min c_lam[2]
 timestep         {dt}
 stats            100
@@ -124,7 +128,7 @@ KNOWLEDGE = {
             "species is caught only when the collision model is set up. "
             "Signal: 'ERROR: Illegal collide command (../collide_vss.cpp:47)' "
             "for the missing filename; 'ERROR on proc 0: Species <X> did not "
-            "appear in VSS parameter file (../collide_vss.cpp:924)' when the "
+            "appear in VSS parameter file (../collide_vss.cpp:924)' (line 1075 in 27Aug2026) when the "
             "file is the wrong one for your species (e.g. handing air.vss to "
             "an argon deck).",
 
@@ -134,8 +138,8 @@ KNOWLEDGE = {
             "FIRST RUN, not when the collide line is parsed, so a deck that "
             "never reaches 'run' never reports it. "
             "Signal: 'ERROR: Collision mixture does not contain all species "
-            "(../collide.cpp:159)'; a mistyped mixture ID instead gives "
-            "'ERROR: Collision mixture does not exist (../collide.cpp:155)'.",
+            "(../collide.cpp:159)' (line 185 in 27Aug2026); a mistyped mixture ID instead gives "
+            "'ERROR: Collision mixture does not exist (../collide.cpp:155)' (line 181 in 27Aug2026).",
 
             "[Physics] Without a collide command, create_particles gives every "
             "particle ZERO rotational and vibrational energy even when the "
@@ -149,7 +153,7 @@ KNOWLEDGE = {
             "the offending keyword, so check the spelling against the compiled "
             "build rather than against a doc page for another version. "
             "Signal: 'ERROR: Illegal collide_modify command "
-            "(../collide.cpp:1727)'.",
+            "(../collide.cpp:1727)' (line 2344 in 27Aug2026).",
 
             "[Physics] ROTATIONAL relaxation is active by default but "
             "VIBRATIONAL relaxation is not: with no collide_modify the "
@@ -169,7 +173,7 @@ KNOWLEDGE = {
             "quiet no-op an earlier wording claimed: for any species whose "
             "vibdof is > 2 and which has no 'vibfile' on the species line it "
             "ABORTS at run setup with 'ERROR: Discrete vibrational info for "
-            "species <X> not read in (../particle.cpp:177)' "
+            "species <X> not read in (../particle.cpp:177)' (line 176 in 27Aug2026) "
             "(particle.cpp skips the check only for vibdof <= 2). For a "
             "vibdof <= 2 species it is accepted and starts at 0, but it does "
             "not stay there — it is zero for the first stats blocks and then "
@@ -179,7 +183,7 @@ KNOWLEDGE = {
             "Signal: a Tvib column that is exactly 0.0 on every stats line "
             "while the Trot column moves — rc = 0, no warning — which "
             "identifies the DEFAULT (no collide_modify) case; the 'discrete' "
-            "mistake announces itself with the particle.cpp:177 abort "
+            "mistake announces itself with the particle.cpp:177 (line 176 in 27Aug2026) abort "
             "instead.",
 
             "[Output] 'compute grid <grp> <mix> tvib' and 'compute tvib/grid "
@@ -228,7 +232,7 @@ KNOWLEDGE = {
             "were looking for. Check [2] against [1] before reading any bin, "
             "and widen lo/hi rather than adding bins. "
             "Signal: 'ERROR: Fix ave/histo cannot input per-particle values in "
-            "scalar mode (../fix_ave_histo.cpp:228)' and the per-grid twin at "
+            "scalar mode (../fix_ave_histo.cpp:228)' (line 230 in 27Aug2026) and the per-grid twin at "
             "line 231; 'ERROR: Illegal fix ave/histo command "
             "(../fix_ave_histo.cpp:53)' when lo, hi or Nbin are omitted. A "
             "f_ID[1] equal to Nrepeat rather than to the particle count means "

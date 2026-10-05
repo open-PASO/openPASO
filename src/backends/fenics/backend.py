@@ -524,7 +524,8 @@ class FenicsBackend(SolverBackend):
                 if ver:
                     version_note = (
                         f"\n\n**Installed dolfinx version: {ver}**\n"
-                        "API notes for 0.9+/0.10+:\n"
+                        "API notes for 0.10+ (in 0.9 petsc_options_prefix does not "
+                        "exist and NonlinearProblem has no solve()):\n"
                         "- NonlinearProblem requires petsc_options_prefix kwarg\n"
                         "- Use problem.solve() directly, NOT separate NewtonSolver\n"
                         "- LinearProblem also requires petsc_options_prefix\n"
@@ -537,7 +538,9 @@ class FenicsBackend(SolverBackend):
                         # wrapped basix element as the `points` property.
                         "- element has NO .interpolation_points in basix 0.10; "
                         "use element.basix_element.points (ndarray property)\n"
-                        "- For VTU output use VTXWriter or XDMFFile, read with pyvista (not meshio)\n"
+                        "- For VTU output use dolfinx.io.VTKFile (.pvd + .pvtu/.vtu), read with "
+                        "pyvista (not meshio); VTXWriter writes an ADIOS2 .bp directory "
+                        "and XDMFFile writes .xdmf + .h5\n"
                         "- fem.assemble_scalar returns the RANK-LOCAL value; wrap "
                         "in comm.allreduce(..., op=MPI.SUM) for a global norm\n"
                     )
@@ -717,7 +720,10 @@ class FenicsBackend(SolverBackend):
     def precice_participant(self) -> dict:
         """FEniCSx as a preCICE participant — a dolfinx solve advanced each window,
         exchanging an interface field (e.g. read heat flux as Neumann BC, write surface
-        temperature). Verified pattern (works with the fenicsxprecice adapter too)."""
+        temperature). Verified pattern with pyprecice 3.1.2 and dolfinx 0.10.0. The
+        fenicsxprecice 1.0.1 Adapter does not run with pyprecice 3.1.2: its initialize()
+        calls Participant.start_profiling_section, which 3.1.2 does not have
+        (AttributeError, measured 2026-10-01)."""
         return {
             "description": "FEniCSx (dolfinx) preCICE participant for the FEM side of a coupling",
             "exchange_loop": (
@@ -727,21 +733,34 @@ class FenicsBackend(SolverBackend):
                 "# field enters as a BC: a Neumann flux (read) or Dirichlet value (read), and\n"
                 "# the surface response (write) is sampled from the solution.\n"
                 "qheat = fem.Constant(domain, 0.0)          # updated each window from preCICE\n"
+                "T_n = fem.Function(V)                      # previous time level; the form reads qheat and T_n\n"
                 "p = precice.Participant('Solid','precice-config.xml',0,1)\n"
                 "vid = p.set_mesh_vertices('Solid-Mesh', np.array([[0.0,0.0]]))\n"
                 "p.initialize()\n"
                 "while p.is_coupling_ongoing():\n"
+                "    if p.requires_writing_checkpoint():     # *-implicit: save the state this window starts from\n"
+                "        saved = T_n.x.array.copy()\n"
                 "    dt = p.get_max_time_step_size()\n"
                 "    qheat.value = float(p.read_data('Solid-Mesh','Heat-Flux',vid,dt)[0])\n"
                 "    Th = problem.solve()                    # advance the FEM solve one window\n"
                 "    Tw = surface_value(Th)\n"
                 "    p.write_data('Solid-Mesh','Wall-Temperature',vid,np.array([Tw])); p.advance(dt)\n"
+                "    if p.requires_reading_checkpoint():     # window not converged: restore it and redo it\n"
+                "        T_n.x.array[:] = saved\n"
+                "    else:                                   # window complete: step the time level\n"
+                "        T_n.x.array[:] = Th.x.array\n"
                 "p.finalize()"
             ),
             "notes": ("dolfinx 0.10: use fem.functionspace + LinearProblem(..., "
-                      "petsc_options_prefix=...). For per-interface-node exchange use the "
-                      "fenicsxprecice Adapter; for a scalar/lumped interface a 1-vertex mesh "
-                      "suffices. Set LD_LIBRARY_PATH to /opt/precice/lib; pyprecice must match "
+                      "petsc_options_prefix=...). The two checkpoint calls are what the "
+                      "*-implicit schemes need: without them preCICE aborts this participant "
+                      "at the first advance(); under *-explicit both return False. A steady "
+                      "form ignores T_n, but keep the two calls. For per-interface-node exchange "
+                      "pass every interface node's coordinates to set_mesh_vertices and read/write "
+                      "arrays of that length in the same loop; the fenicsxprecice 1.0.1 Adapter "
+                      "stops at initialize() with pyprecice 3.1.2 ('cyprecice.Participant' object "
+                      "has no attribute 'start_profiling_section', measured). For a scalar/lumped "
+                      "interface a 1-vertex mesh suffices. Set LD_LIBRARY_PATH to /opt/precice/lib; pyprecice must match "
                       "the libprecice version."),
         }
 

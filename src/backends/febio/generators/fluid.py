@@ -106,9 +106,12 @@ KNOWLEDGE = {
             "fluid": {
                 "density": "Mass density rho",
                 "k": "Bulk modulus (penalises near-incompressibility)",
-                "viscous": "Nested viscous law: 'Newtonian fluid' (mu), "
-                           "'Carreau' (mu_0, mu_inf, lambda, n), "
-                           "'Carreau-Yasuda', or 'power-law'.",
+                "viscous": "Nested viscous law: 'Newtonian fluid' (mu, "
+                           "kappa), 'Carreau' (mu0, mui, lambda, n), "
+                           "'Carreau-Yasuda' (mu0, mui, lambda, n, a), "
+                           "'Bingham', 'Powell-Eyring', 'Cross' or "
+                           "'Quemada'. There is no 'power-law' viscous "
+                           "type.",
             },
         },
         "pitfalls": [

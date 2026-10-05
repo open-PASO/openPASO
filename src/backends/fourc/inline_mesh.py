@@ -21,14 +21,17 @@ while in a build where 2D has been folded into SOLID, `WALL` aborts with
 
     Unknown type 'WALL' of finite element
 
-STRUCT_QUAD4_TYPE / STRUCT_QUAD4_SUFFIX below carry the WALL spelling with all
-six of its required keys, because that is what the deployed 4C accepts. Swap
-both constants together if you target a build where SOLID owns quad4 — they are
-not interchangeable one at a time, since neither keyword set is a subset of the
+The builds before the 2026.2.0 release have WALL; 4C 2026.2.0 and later have
+SOLID. struct_quad4() returns the spelling for the grammar the discovered 4C
+reads (backends.fourc.grammar_dialect); the constants below are the WALL one. The
+keyword sets are not interchangeable one at a time: neither is a subset of the
 other.
 """
 
-# 2D structural element spelling. Change BOTH constants together.
+from backends.fourc.grammar_dialect import CURRENT, new_elements
+
+# 2D structural element spelling of the 4C builds before the 2026.2.0 release (WALL);
+# struct_quad4() gives the SOLID spelling of 2026.2.0 and later. Change BOTH constants together.
 STRUCT_QUAD4_TYPE = "WALL QUAD4"
 STRUCT_QUAD4_SUFFIX_LINEAR = (
     "MAT 1 KINEM linear EAS none THICK 1.0 STRESS_STRAIN plane_strain GP 2 2"
@@ -36,6 +39,29 @@ STRUCT_QUAD4_SUFFIX_LINEAR = (
 STRUCT_QUAD4_SUFFIX_NONLINEAR = (
     "MAT 1 KINEM nonlinear EAS none THICK 1.0 STRESS_STRAIN plane_strain GP 2 2"
 )
+
+
+def discovered_dialect() -> str:
+    """The input grammar of the 4C this machine would run (grammar_dialect)."""
+    from backends.fourc.backend import _find_fourc_binary  # noqa: PLC0415
+    from backends.fourc.grammar_dialect import dialect_of  # noqa: PLC0415
+    return dialect_of(_find_fourc_binary())
+
+
+def struct_quad4(kinem: str, dialect: str | None = None) -> tuple[str, str]:
+    """(element type, suffix) of a plane-strain structural QUAD4 with MAT 1.
+
+    4C 2026.2.0 folded WALL into SOLID. The SOLID line is the one 4C's own tests
+    were migrated to: EAS none and GP 2 2 have no counterpart because they are
+    SOLID QUAD4's defaults (no element technology, quad_4point). With no
+    `dialect`, the discovered 4C's is used, so a direct caller writes what its
+    4C reads."""
+    if dialect is None:
+        dialect = discovered_dialect()
+    if new_elements(dialect):
+        return "SOLID QUAD4", f"MAT 1 KINEM {kinem} THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+    return STRUCT_QUAD4_TYPE, (STRUCT_QUAD4_SUFFIX_LINEAR if kinem == "linear"
+                               else STRUCT_QUAD4_SUFFIX_NONLINEAR)
 
 
 def generate_quad4_rectangle(nx: int, ny: int, lx: float = 1.0, ly: float = 1.0,
@@ -743,7 +769,8 @@ MATERIALS:
       DENS: {density}
       THEXPANS: {alpha}
       INITTEMP: {T_ref}
-      THERMOMAT: 2
+      # THERMOMAT is left out: 4C 2026.3.0 removed it, and before 2026.3.0 the thermal field
+      # takes its material from the CLONING MATERIAL MAP either way
   - MAT: 2
     MAT_Fourier:
       CAPA: {capacity}
@@ -800,7 +827,8 @@ DESIGN SURF DIRICH CONDITIONS:
 
 
 def matched_elasticity_input(nx: int = 40, ny: int = 4, E: float = 1000.0, nu: float = 0.3,
-                               lx: float = 10.0, ly: float = 1.0) -> str:
+                               lx: float = 10.0, ly: float = 1.0,
+                               dialect: str | None = None) -> str:
     """Cantilever beam lx×ly, fixed left, body force (0,-1). Matches FEniCS/deal.II.
 
     Uses KINEM linear (small-strain St. Venant-Kirchhoff) so that
@@ -811,10 +839,11 @@ def matched_elasticity_input(nx: int = 40, ny: int = 4, E: float = 1000.0, nu: f
     2026-06-01: u_y_max fourc=7.50 vs fenics=12.96 / dealii=13.23
     on a 10x1 cantilever under the same body force).
     """
+    element_type, element_suffix = struct_quad4("linear", dialect)
     mesh = generate_quad4_rectangle(nx, ny, lx=lx, ly=ly,
                                      element_section="STRUCTURE",
-                                     element_type=STRUCT_QUAD4_TYPE,
-                                     element_suffix=STRUCT_QUAD4_SUFFIX_LINEAR)
+                                     element_type=element_type,
+                                     element_suffix=element_suffix)
 
     yaml = f'''TITLE:
   - "Cantilever {lx}x{ly} — cross-solver benchmark"
@@ -1048,7 +1077,8 @@ MATERIALS:
       DENS: {density}
       THEXPANS: {alpha}
       INITTEMP: {T_ref}
-      THERMOMAT: 2
+      # THERMOMAT is left out: 4C 2026.3.0 removed it, and before 2026.3.0 the thermal field
+      # takes its material from the CLONING MATERIAL MAP either way
   - MAT: 2
     MAT_Fourier:
       CAPA: {capacity}
@@ -1177,7 +1207,8 @@ def matched_elasticity_genalpha_input(nx: int = 20, ny: int = 4,
                                       numstep: int = 10,
                                       timestep: float = 0.05,
                                       lx: float = 10.0,
-                                      ly: float = 1.0) -> str:
+                                      ly: float = 1.0,
+                                      dialect: str | None = None) -> str:
     """Transient cantilever under sudden tip-side body load, GenAlpha.
 
     Same cantilever geometry as matched_elasticity_input, but
@@ -1186,10 +1217,11 @@ def matched_elasticity_genalpha_input(nx: int = 20, ny: int = 4,
     variant gets a real transient instead of the placeholder
     template (which aborted in 4C's MatchTree, probe 2026-06-12).
     """
+    element_type, element_suffix = struct_quad4("linear", dialect)
     mesh = generate_quad4_rectangle(nx, ny, lx=lx, ly=ly,
                                      element_section="STRUCTURE",
-                                     element_type=STRUCT_QUAD4_TYPE,
-                                     element_suffix=STRUCT_QUAD4_SUFFIX_LINEAR)
+                                     element_type=element_type,
+                                     element_suffix=element_suffix)
 
     yaml = f'''TITLE:
   - "Cantilever {lx}x{ly} transient — GenAlpha"
@@ -2070,7 +2102,8 @@ MATERIALS:
       DENS: {density}
       THEXPANS: {alpha}
       INITTEMP: {T_ref}
-      THERMOMAT: 2
+      # THERMOMAT is left out: 4C 2026.3.0 removed it, and before 2026.3.0 the thermal field
+      # takes its material from the CLONING MATERIAL MAP either way
   - MAT: 2
     MAT_Fourier:
       CAPA: {capacity}
@@ -2137,12 +2170,15 @@ def matched_tsi_plane_strain_input(
 ) -> str:
     """4C thermo-elastic PLANE STRAIN via a pseudo-2D thin slab (one-way TSI).
 
-    Why this exists: 4C has NO 2D TSI elements — every TSI corpus test is
-    3D SOLIDSCATRA. The two 2D structural eletypes both dead-end when a
-    thermo material is attached:
+    Why this exists: 4C runs no 2D TSI — every TSI corpus test is 3D
+    SOLIDSCATRA. On 4C 2026.2.0 and 2026.3.0 a 2D SOLIDSCATRA or SOLID element
+    passes the input check and TSI then stops with "Unsupported solid element
+    type!". On a 4C before 2026.2.0 the two 2D structural eletypes both
+    dead-end when a thermo material is attached:
       * WALL QUAD4  + MAT_Struct_ThermoStVenantK
-          -> "Invalid type of material law for wall element" (4C_w1_mat.cpp:179)
-      * SOLID QUAD4 (any material, current builds)
+          -> "Unsupported solid element type!" (4C_tsi_utils.cpp:76: TSI's
+             clone strategy takes only SOLIDSCATRA)
+      * SOLID QUAD4 (any material)
           -> "Element 'SOLID' does not seem to know cell type 'quad4'"
     Both reproduced live against a built 4C binary. The correct route is
     the standard thin-slab trick implemented here:
@@ -2232,7 +2268,8 @@ MATERIALS:
       DENS: {density}
       THEXPANS: {alpha}
       INITTEMP: {T_ref}
-      THERMOMAT: 2
+      # THERMOMAT is left out: 4C 2026.3.0 removed it, and before 2026.3.0 the thermal field
+      # takes its material from the CLONING MATERIAL MAP either way
   - MAT: 2
     MAT_Fourier:
       CAPA: {capacity}
@@ -2590,6 +2627,13 @@ THERMAL DYNAMIC:
   NUMSTEP: 1
   MAXTIME: 1.0
   LINEAR_SOLVER: 1
+THERMAL DYNAMIC/RUNTIME VTK OUTPUT:
+  # The temperature as runtime VTK: 4C 2026.3.0's post_processor cannot convert
+  # native thermo results (problem type thermo not yet supported).
+  OUTPUT_THERMO: true
+  TEMPERATURE: true
+IO/RUNTIME VTK OUTPUT:
+  INTERVAL_STEPS: 1
 SOLVER 1:
   SOLVER: "UMFPACK"
   NAME: "Thermal_Solver"
@@ -2668,6 +2712,13 @@ THERMAL DYNAMIC:
   NUMSTEP: {numstep}
   MAXTIME: {maxtime}
   LINEAR_SOLVER: 1
+THERMAL DYNAMIC/RUNTIME VTK OUTPUT:
+  # The temperature as runtime VTK: 4C 2026.3.0's post_processor cannot convert
+  # native thermo results (problem type thermo not yet supported).
+  OUTPUT_THERMO: true
+  TEMPERATURE: true
+IO/RUNTIME VTK OUTPUT:
+  INTERVAL_STEPS: 1
 SOLVER 1:
   SOLVER: "UMFPACK"
   NAME: "Thermal_Solver"
@@ -2999,7 +3050,8 @@ def matched_mixture_3d_input(n: int = 4,
                              E: float = 1000.0,
                              nu: float = 0.3,
                              density: float = 0.1,
-                             load: float = 5.0) -> str:
+                             load: float = 5.0,
+                             dialect: str | None = None) -> str:
     """3D unit-cube under tension with a MAT_Mixture material.
 
     Routes the catalog's mixture/mixture_3d row (previously a one-line
@@ -3032,6 +3084,12 @@ def matched_mixture_3d_input(n: int = 4,
     grid = mesh["node_grid"]
     left_face = sorted(nid for (i, j, k), nid in grid.items() if i == 0)
     right_face = sorted(nid for (i, j, k), nid in grid.items() if i == n)
+    # 4C 2026.3.0 dropped NUMMAT from MIX_Constituent_ElastHyper (MATIDS says
+    # it); 4C 2026.2.0 and the builds before it require it (2026.2.0 stops with
+    # "Parameter 'NUMMAT' not found in container." without it, measured).
+    if dialect is None:
+        dialect = discovered_dialect()
+    nummat = "" if dialect == CURRENT else "      NUMMAT: 1\n"
 
     yaml = f'''TITLE:
   - "3D cube tension — MAT_Mixture (single NeoHooke constituent)"
@@ -3065,8 +3123,7 @@ MATERIALS:
         constant: [1.0]
   - MAT: 11
     MIX_Constituent_ElastHyper:
-      NUMMAT: 1
-      MATIDS: [101]
+{nummat}      MATIDS: [101]
   - MAT: 101
     ELAST_CoupLogNeoHooke:
       MODE: "YN"

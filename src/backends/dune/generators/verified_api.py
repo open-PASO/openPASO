@@ -56,9 +56,9 @@ KNOWN_ABSENT_DUNE_PATHS: frozenset[str] = frozenset({
     "dune.fem.space.raviartthomas",
     # companion packages the catalog used to advertise. Measured
     # 2026-08-03: every one of these raises ModuleNotFoundError on a
-    # conda-forge dune-fem 2.12.0.2 install, which is exactly WHY the
-    # catalog has to be allowed to name them — the claim being made is
-    # that they are absent.
+    # pip-installed (PyPI) dune-fem 2.12.0.2 install, which is exactly
+    # WHY the catalog has to be allowed to name them — the claim being
+    # made is that they are absent.
     "dune.femdg",
     "dune.fem.dg",
     "dune.vem",
@@ -81,7 +81,8 @@ EXECUTED_API: dict = {
     "install_under_test": (
         "dune-fem 2.12.0.2 (dune-common/grid/geometry/istl/"
         "localfunctions/alugrid all 2.12.0.2), CPython 3.12.13, "
-        "Linux x86-64, conda-forge build. All numbers below were "
+        "Linux x86-64, pip-installed from the PyPI sdists (conda-forge "
+        "has no dune-fem package). All numbers below were "
         "measured on that install on 2026-08-03. "
         "NOTE for readers of older catalog text: entries dated "
         "2026-08-01 in this backend say 'dune-fem 2.10'; the env has "
@@ -434,9 +435,12 @@ EXECUTED_API: dict = {
             "info['converged'] AND a physical sanity bound."),
         "parameter_key_deprecation": (
             "MEASURED: parameters={'newton.tolerance': 1e-10} still "
-            "works but emits UserWarning \"the parameter key 'newton' "
-            "is deprecated. Replace with 'nonlinear'\", and the key is "
-            "rewritten — scheme.parameters came back as "
+            "works but emits UserWarning \"Warning: the parameter key "
+            "'newton' is deprecated. Replace with 'nonlinear' to avoid "
+            "this warning!\" (re-measured 2026-09-30: both key names "
+            "are wrapped in ANSI colour codes, so match on \"is "
+            "deprecated. Replace with\", not on the whole line), and "
+            "the key is rewritten — scheme.parameters came back as "
             "{'nonlinear.tolerance': 1e-10, 'linear.method': 'cg'}. "
             "Passing BOTH 'newton.tolerance' and "
             "'nonlinear.tolerance' was accepted with NO error at all. "
@@ -576,8 +580,13 @@ EXECUTED_API: dict = {
             "Module names are md5 hashes of the generated C++ (the "
             "type name for spaces/schemes, the emitted integrands for "
             "a form). MEASURED to trigger a new module: "
-            "a different grid class (each ALUGrid variant "
-            "built its own HierarchicalGrid), and ANY change to the "
+            "a different C++ grid type (each (dimension, element type) "
+            "ALUGrid built its own HierarchicalGrid; aluConformGrid and "
+            "aluSimplexGrid of the same dimension are the same C++ type "
+            "Dune::ALUGrid< d, d, Dune::simplex > and share one module, "
+            "because conformity is set at run time — re-measured "
+            "2026-09-30: six ALUGrid variants, four modules), and ANY "
+            "change to the "
             "form — including changing a bare float literal in it "
             "(7.3125 -> 9.8125 cost 25.204 s and added one .so). "
             "MEASURED not to trigger one: re-running the identical "
@@ -687,10 +696,14 @@ EXECUTED_API: dict = {
             "function."),
         "boundary_ids": (
             "dune.fem.utility.inspectBoundaryIds(gridView) projects "
-            "the boundary ids onto a finiteVolume function. On a 4x4 "
-            "structuredGrid the SET of ids present was {0, 1, 2, 3, 4} "
-            "(which id belongs to which side was not checked — read "
-            "them off this function rather than assuming). "
+            "the boundary ids onto a finiteVolume function, one value "
+            "per cell: 0 for an interior cell, the face's id for a cell "
+            "with one boundary face, and the AVERAGE of the ids for a "
+            "cell with several. On a 4x4 structuredGrid the values "
+            "present were {0, 1, 2, 2.5, 3, 4}; the ids are 1 = x-min, "
+            "2 = x-max, 3 = y-min, 4 = y-max, and the four corner cells "
+            "hold 2, 2.5, 2.5 and 3, so do not read the cell values as "
+            "integer tags (re-measured 2026-09-30). "
             "dune.fem.utility.gridWidth(gridView) returned "
             "0.25 on the same grid. Use these instead of guessing at "
             "the ids in a dune.ufl.BoundaryId conditional."),
@@ -939,17 +952,26 @@ EXECUTED_API: dict = {
             "dune.fem.threading.max and .use are ATTRIBUTES (read and "
             "assign them); .useMax is a CALLABLE "
             "(<built-in method useMax of PyCapsule object>, "
-            "callable() is True). Executed 2026-08-03: threading.max "
-            "reports the machine's core count but threading.use == 1 "
-            "by DEFAULT. Assigning dune.fem.threading.use = 2 took "
-            "effect immediately (read back as 2), and calling "
-            "dune.fem.threading.useMax() raised use to threading.max."),
+            "callable() is True). At startup max = DUNE_NUM_THREADS, "
+            "else OMP_NUM_THREADS, else the machine's core count, and "
+            "use = DUNE_NUM_THREADS, else OMP_NUM_THREADS, else 1 "
+            "(re-measured 2026-09-30: OMP_NUM_THREADS=2 gave max 2 and "
+            "use 2, DUNE_NUM_THREADS=3 gave max 3 and use 3 and wins "
+            "over OMP_NUM_THREADS). Executed 2026-08-03 with neither "
+            "variable set: threading.max reported the machine's core "
+            "count and threading.use == 1. Assigning "
+            "dune.fem.threading.use = 2 took effect immediately (read "
+            "back as 2), and calling dune.fem.threading.useMax() "
+            "raised use to threading.max."),
         "Signal": (
-            "[Performance] dune-fem assembles and solves on ONE "
-            "thread unless you say otherwise — threading.use defaults "
-            "to 1 whatever threading.max reports. If a DUNE run "
-            "pegs a single core while the machine idles, that is why. "
-            "(Executed 2026-08-03.)"),
+            "[Performance] With neither DUNE_NUM_THREADS nor "
+            "OMP_NUM_THREADS set, dune-fem assembles and solves on ONE "
+            "thread (threading.use == 1) whatever threading.max "
+            "reports; if either is set, use and max both start at that "
+            "value. If a DUNE run pegs a single core while the machine "
+            "idles, read threading.use and assign it or call "
+            "threading.useMax(). (Executed 2026-08-03; the environment "
+            "variables re-measured 2026-09-30.)"),
     },
 
     # ── convergence behaviour, stated WITHOUT the measured answer ────
@@ -1156,8 +1178,9 @@ EXECUTED_API: dict = {
     # ── which dune sub-packages actually exist here ─────────────────
     "companion_modules_measured": {
         "description": (
-            "Which dune sub-packages a plain conda-forge dune-fem "
-            "install exposes, measured with importlib on 2026-08-03. "
+            "Which dune sub-packages a plain pip-installed (PyPI) "
+            "dune-fem install exposes, measured with importlib on "
+            "2026-08-03. "
             "This matters because several capabilities the catalog "
             "used to advertise live in SEPARATE packages."),
         "importable": [
@@ -1209,9 +1232,9 @@ EXECUTED_API: dict = {
             "[API] Capabilities named in DUNE's own documentation are "
             "not necessarily in your install. Signal: 'import "
             "dune.femdg' and 'import dune.vem' both raise "
-            "ModuleNotFoundError on a conda-forge dune-fem 2.12.0.2 "
-            "env, so any plan that depends on dune-fem-dg's SSP-RK "
-            "steppers or on VEM spaces fails at the first import — "
+            "ModuleNotFoundError on a pip-installed (PyPI) dune-fem "
+            "2.12.0.2 env, so any plan that depends on dune-fem-dg's "
+            "SSP-RK steppers or on VEM spaces fails at the first import — "
             "check with importlib before designing around them. "
             "(Executed 2026-08-03.)"),
     },
@@ -1367,8 +1390,11 @@ EXECUTED_PITFALLS: list[str] = [
         "[API] Parameter keys beginning with 'newton.' are deprecated "
         "in favour of 'nonlinear.', and dune-fem REWRITES them for "
         "you. Signal: parameters={'newton.tolerance': 1e-10} emits "
-        "UserWarning \"the parameter key 'newton' is deprecated. "
-        "Replace with 'nonlinear'\" and scheme.parameters comes back "
+        "UserWarning \"Warning: the parameter key 'newton' is "
+        "deprecated. Replace with 'nonlinear' to avoid this "
+        "warning!\", with both key names wrapped in ANSI colour codes "
+        "(so grep for 'is deprecated. Replace with', not for the whole "
+        "line), and scheme.parameters comes back "
         "as {'nonlinear.tolerance': 1e-10, ...}. Passing BOTH "
         "'newton.tolerance' and 'nonlinear.tolerance' is accepted with "
         "no error at all and the newton.* value is silently dropped — "
@@ -1504,10 +1530,11 @@ EXECUTED_PITFALLS: list[str] = [
     (
         "[API] dune.femdg and dune.vem are NOT part of dune-fem. "
         "Signal: 'import dune.femdg' and 'import dune.vem' both raise "
-        "ModuleNotFoundError on a conda-forge dune-fem 2.12.0.2 "
-        "install, as do dune.fem.dg, dune.polygongrid, dune.spgrid and "
-        "dune.uggrid. The SSP Runge-Kutta steppers, Bassi-Rebay / CDG "
-        "operators and limiters those packages provide are therefore "
+        "ModuleNotFoundError on a pip-installed (PyPI) dune-fem "
+        "2.12.0.2 install, as do dune.fem.dg, dune.polygongrid, "
+        "dune.spgrid and dune.uggrid. The SSP Runge-Kutta steppers, "
+        "Bassi-Rebay / CDG operators and limiters those packages "
+        "provide are therefore "
         "unavailable: write the DG operator with the ordinary galerkin "
         "scheme and your own explicit stepper. dune.alugrid IS "
         "importable. (Executed 2026-08-03.)"

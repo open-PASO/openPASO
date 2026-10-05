@@ -8,7 +8,15 @@ Adaptive mesh refinement and very large parallel computations, in C++.
 sudo apt install libdeal.ii-dev
 ```
 
-Version 9.3 or newer is needed for all examples (Ubuntu 20.04 ships 9.1.1). If you build it yourself, use `-DCMAKE_BUILD_TYPE=DebugRelease`: a Release build removes the internal checks, so mistakes fail silently.
+Version 9.7 or newer is needed for all examples (Ubuntu 20.04 ships 9.1.1): the time_dependent_heat template calls the one-argument `SolutionTransfer::interpolate`, which deal.II 9.6 does not have yet. If you build it yourself, use `-DCMAKE_BUILD_TYPE=DebugRelease`: a Release build removes the internal checks, so mistakes fail silently.
+
+Or let Spack build deal.II 9.7.1 with the features the templates use. This is a serial Release
+build, so the internal checks are off here too. Every template runs on it; the element survey
+lists FE_NedelecNodal, which deal.II added in 9.8.0, as not attempted.
+
+```bash
+openpaso install dealii --via spack
+```
 
 Then check that openPASO sees it:
 
@@ -47,6 +55,6 @@ python check_install.py
 | `poisson` | Poisson / Laplace equation (step-3/6/7, with AMR, L-domain, rectangle, 3D mixed Dirichlet-Neumann MMS convergence study) | 2-D, 3-D | `2d`, `3d`, `l_domain`, `rectangle`, `2d_adaptive`, `3d_mixed_bc` |
 | `stokes` | Stokes flow (step-22, Taylor-Hood Q2/Q1, block preconditioner) | 2-D | `2d` |
 | `time_dependent_heat` | Transient heat with AMR (step-26) | 2-D | `2d` |
-| `time_dependent_ns` | Transient Boussinesq flow (step-35) | 2-D | `2d` |
+| `time_dependent_ns` | Transient Boussinesq flow (Boussinesq tutorials: step-31, step-32) | 2-D | `2d` |
 | `time_dependent_wave` | Wave equation (step-23, step-48) | 2-D, 3-D | `2d` |
 | `wave` | Wave equation with Newmark time integration (step-23 inspired) | 2-D | `2d` |

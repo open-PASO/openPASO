@@ -226,15 +226,18 @@ class KratosBackend(SolverBackend):
         #     ContactStructuralMechanicsApplication and LinearSolversApplication.
         #     The generators that run end-to-end on that stack (verified
         #     rc=0 with physical output) are: poisson, heat, heat_transient,
-        #     linear_elasticity (incl. the 2d_nonlinear Total-Lagrangian
-        #     Newton solve), contact (penalty Signorini), structural_dynamics,
+        #     linear_elasticity (the 2d variant only: 2d_nonlinear serves no
+        #     template, just a comment block saying why the Total-Lagrangian
+        #     route is not served), contact (penalty Signorini), structural_dynamics,
         #     plasticity / constitutive_laws (need ConstitutiveLawsApplication).
         #   * The remaining entries below (poromechanics, shallow_water, dam,
         #     dem, mpm, shape_optimization, cosimulation, dem_structures_coupling,
         #     cable_net, optimization) are GENUINE parameterized solves — NOT
-        #     probe stubs — that require a fuller Kratos build whose
-        #     application is not in the minimal pip stack. They are retained
-        #     because they actually solve; they are not silent no-ops.
+        #     probe stubs — that need an application outside that minimal
+        #     stack. Each of those applications is its own PyPI wheel at 10.3.0
+        #     (KratosMultiphysics-all brings the Poromechanics, ShallowWater,
+        #     Dam, DEM, MPM and CoSimulation ones). They are retained because
+        #     they actually solve; they are not silent no-ops.
         return [
             PhysicsCapability(
                 name="poisson",
@@ -365,11 +368,11 @@ class KratosBackend(SolverBackend):
                 template_variants=["channel_2d"],
             ),
             PhysicsCapability("poromechanics", "Poromechanics: fracture in porous media, dam/tunnel (PoromechanicsApplication)", [2, 3],
-                              ["SmallStrainUPwDiffOrderElement2D6N"], ["2d"]),
+                              ["UPlSmallStrainElement2D4N"], ["2d"]),
             PhysicsCapability("shallow_water", "Shallow water equations: floods, dam breaks, coastal (ShallowWaterApplication)", [2],
-                              ["ShallowWaterElement2D3N"], ["2d"]),
+                              ["WaveElement2D3N"], ["2d"]),
             PhysicsCapability("dam", "Dam engineering: thermal-mechanical, seepage, cracking", [2, 3],
-                              ["SmallStrainElement2D3N"], ["2d"]),
+                              ["SmallDisplacementThermoMechanicElement2D4N"], ["2d"]),
             PhysicsCapability("plasticity", "Elasto-plasticity: MC, DP, VonMises, Tresca + 6 hardening laws (ConstitutiveLawsApplication)", [2, 3],
                               ["SmallDisplacementElement3D8N", "SmallDisplacementElement2D4N",
                                "TotalLagrangianElement3D8N"], ["3d"]),

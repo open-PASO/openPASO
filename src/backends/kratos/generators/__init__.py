@@ -70,9 +70,11 @@ KNOWLEDGE["_general"] = {
     },
     "applications_count": "47+ applications spanning structure, fluid, thermal, contact, DEM, MPM, geo, optimization, IGA, ROM, PFEM, RANS",
     "linear_solvers": {
-        "direct": ["sparse_lu", "skyline_lu", "pastix"],
+        "direct": ["sparse_lu (LinearSolversApplication)", "skyline_lu_factorization",
+                   "pardiso_lu (LinearSolversApplication MKL builds only; not in the 10.3.0 pip wheel)"],
         "iterative": "AMGCL (built-in, configurable smoother/krylov/coarsening)",
-        "trilinos": "AztecOO, Amesos, ML, MueLu (MPI parallel)",
+        "trilinos": ("aztec/cg/bicgstab/gmres (AztecOO), amesos/klu/super_lu_dist/mumps (Amesos), "
+                     "multi_level (ML), amgcl (AMGCL); no MueLu (MPI parallel)"),
     },
     "application_loader_pattern": {
         "description": (

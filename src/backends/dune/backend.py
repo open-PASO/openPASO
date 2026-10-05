@@ -1,7 +1,8 @@
 """
 DUNE-fem solver backend.
 
-DUNE-fem uses UFL (same form language as FEniCS) with Netgen/ALUGrid meshes.
+DUNE-fem uses UFL (same form language as FEniCS) on DUNE grids (YaspGrid via
+structuredGrid, ALUGrid), with meshes read from Gmsh/DGF/meshio files.
 Generates Python scripts, executes them, collects VTK output.
 VTK output is native via gridView.writeVTK() — no conversion needed.
 
@@ -45,14 +46,19 @@ _DUNE_INSTALL_HINT = (
     "Install from PyPI, which is the working source — conda-forge has no "
     "dune-fem package:\n"
     "  pip install dune-fem mpi4py    (mpi4py is an undeclared dependency; "
-    "without it the first import stops)\n"
+    "if DUNE was built against MPI, the first import stops without it)\n"
     "Or point openPASO at an existing install:\n"
     "  DUNE_PYTHON=/path/to/env/bin/python   (explicit interpreter)\n"
     "  DUNE_CONDA_PREFIX=/path/to/env        (conda env root)\n"
     "DUNE JIT-compiles C++ on first use, so a fresh install is slow before it "
     "is fast. A cache built against a different Python fails at USE, not at "
     "import: `import dune.fem` succeeds and the first grid dies with "
-    "'undefined symbol'. Remove ~/.cache/dune-py to rebuild it.")
+    "'undefined symbol'. Remove the dune-py cache to rebuild it: "
+    "$DUNE_PY_DIR/dune-py if DUNE_PY_DIR is set, else "
+    "<env-prefix>/.cache/dune-py inside a venv or an activated conda env "
+    "(where openPASO's runs put it), else ~/.cache/dune-py. "
+    "`python -m dune info` prints the location for the environment it "
+    "runs in.")
 
 
 def _reset_dune_python_cache():
@@ -316,7 +322,8 @@ class DuneBackend(SolverBackend):
             ),
             PhysicsCapability(
                 name="stokes",
-                description="Stokes flow with Uzawa iteration (UFL)",
+                description=("Stokes flow, Taylor-Hood P2/P1 on one composite "
+                             "space, one monolithic direct solve (UFL)"),
                 spatial_dims=[2],
                 element_types=["Lagrange-P2 + Lagrange-P1"],
                 template_variants=["2d"],

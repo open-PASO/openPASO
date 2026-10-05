@@ -1,0 +1,157 @@
+name: Knowledge Drift Check
+
+# The product repository's drift check. The development repository runs the
+# full check (knowledge-freshness.yml), which needs its test suite and
+# fixtures; the product ships only what this one needs (see KEEP_FOR_DRIFT in
+# scripts/make_product_tree.py of the development repository):
+#   knowledge-gates  the catalog's names against the installed solvers, no
+#                    measured answer or campaign identifier in served text, the
+#                    pitfall format, every knowledge area reachable, the payload
+#                    a tool returns clean;
+#   fingerprint      the solvers' API surface against data/fingerprints/.
+# The development tree carries this file so that the product sync copies it;
+# the jobs run only in the product repository.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'data/**'
+      - 'tests/**'
+      - 'scripts/fingerprint_solvers.py'
+      - 'pyproject.toml'
+      - '.github/workflows/knowledge-drift.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'data/**'
+      - 'tests/**'
+      - 'scripts/fingerprint_solvers.py'
+      - 'pyproject.toml'
+      - '.github/workflows/knowledge-drift.yml'
+  workflow_dispatch:
+
+# issues: write lets the weekly run file what it found; the default token is
+# read-only, and the step would otherwise fail only on the first real drift.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  knowledge-gates:
+    if: github.repository == 'open-PASO/openPASO'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install openPASO with the solvers the catalog checks introspect
+        run: pip install -e ".[skfem,ngsolve,test]"
+
+      - name: Run the knowledge gates
+        id: gates
+        # On the weekly run a failure is filed as an issue; on a pull request
+        # or a push it fails the check.
+        continue-on-error: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -o pipefail
+          pytest tests/test_catalog_consistency.py tests/test_introspect.py \
+                 tests/test_knowledge_not_contaminated.py \
+                 tests/test_pitfall_format_contract.py \
+                 tests/test_knowledge_is_discoverable.py \
+                 tests/test_assembled_payload_is_clean.py \
+                 tests/test_gate_cannot_see_answers.py \
+                 -v 2>&1 | tee /tmp/knowledge-gates.log
+
+      - name: File the weekly failure as an issue
+        if: steps.gates.outcome == 'failure' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = fs.existsSync('/tmp/knowledge-gates.log')
+              ? fs.readFileSync('/tmp/knowledge-gates.log', 'utf8') : '(test output not captured)';
+            const title = 'Knowledge drift: the weekly knowledge gates failed';
+            const body = `The weekly knowledge gates failed on ${context.sha.slice(0, 8)}:\n\n\`\`\`\n${log.slice(-6000)}\n\`\`\`\n\nA solver release or a knowledge edit made a served name or text disagree with the check. Correct the knowledge so it matches what the solver now accepts.`;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'knowledge-drift' });
+            const same = open.find(i => i.title === title);
+            if (same) {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: same.number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['knowledge-drift'] });
+            }
+
+  fingerprint:
+    # The install of every pip-installable solver is too heavy for every pull
+    # request; the weekly run, a push to main and a manual run do it.
+    if: github.repository == 'open-PASO/openPASO' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install openPASO with every pip-installable solver
+        run: pip install -e ".[all-solvers,test]"
+
+      # Compare against the COMMITTED fingerprints before anything is generated:
+      # the script without --compare saves over data/fingerprints/, and a
+      # comparison after that reads back what it just wrote.
+      - name: Compare against the committed fingerprints
+        id: compare
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python scripts/fingerprint_solvers.py --compare 2>&1 | tee /tmp/fingerprint-compare.log
+
+      - name: File the drift as an issue
+        if: steps.compare.outcome == 'failure' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = fs.existsSync('/tmp/fingerprint-compare.log')
+              ? fs.readFileSync('/tmp/fingerprint-compare.log', 'utf8') : '(comparison output not captured)';
+            const title = 'Knowledge drift: a solver API changed';
+            const body = `The weekly fingerprint check found API changes on ${context.sha.slice(0, 8)}:\n\n\`\`\`\n${log.slice(-6000)}\n\`\`\`\n\nReview the knowledge for the named solver; the run's artifact holds the current fingerprints to commit as the new baseline once the knowledge is updated.`;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'knowledge-drift' });
+            const same = open.find(i => i.title === title);
+            if (same) {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: same.number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['knowledge-drift'] });
+            }
+
+      - name: Generate the current fingerprints for the artifact
+        run: python scripts/fingerprint_solvers.py
+
+      - name: Upload fingerprints
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-fingerprints
+          path: data/fingerprints/
+
+      # The comparison may not stop the job before the artifact is written, but drift
+      # found by a push to main or a manual run must not pass silently: only the weekly
+      # run files an issue, so every other run fails here.
+      - name: Fail on drift outside the weekly run
+        if: steps.compare.outcome == 'failure' && github.event_name != 'schedule'
+        run: |
+          echo "API drift detected; see the comparison step's output and the solver-fingerprints artifact."
+          exit 1

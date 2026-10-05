@@ -49,7 +49,8 @@ gridView = structuredGrid([0, 0], [1, 1], [{nx}, {nx}])
 
 # REQUIRED: one COMPOSITE space holding velocity and pressure, so the
 # saddle-point block matrix is assembled. Two separate spaces give two
-# decoupled solves. dune.fem.space.product is the same factory.
+# decoupled solves. dune.fem.space.product is NOT the same factory: it is
+# dune-fem's decoupled variant, and galerkin() on it raises TypeError.
 V = lagrange(gridView, dimRange=2, order={order_v})   # velocity
 Q = lagrange(gridView, order={order_p})               # pressure
 W = composite(V, Q, components=["velocity", "pressure"])
@@ -153,8 +154,15 @@ KNOWLEDGE = {
         ],
         "required_vs_optional": {
             "REQUIRED": [
-                "composite() (or the identical product()) — two "
-                "separate spaces give two decoupled solves, not Stokes",
+                "composite() — two separate spaces give two decoupled "
+                "solves, not Stokes. product() is NOT an alias: dune-fem "
+                "documents it as the space for a DECOUPLED solve, its "
+                "discrete functions are tuple functions (.components) "
+                "with no linear-operator or solver storage, and "
+                "galerkin() on a product space raises TypeError at "
+                "construction ('NoneType' object is not callable for "
+                "solver=None or 'gmres'; measured 2026-09-30 on dune-fem "
+                "2.12.0.2 with this template's Taylor-Hood form)",
                 "an LBB-stable pair: velocity order strictly higher "
                 "than pressure order (2/1 is the safe default)",
                 "nothing about the solver, strictly — but "
@@ -271,12 +279,19 @@ KNOWLEDGE = {
                 "whatever the chosen solver family passes in and no "
                 "part of that line can be grepped for. (Executed "
                 "2026-08-03 on dune-fem 2.12.0.2, hit twice from "
-                "different scripts. Caveat from a 2026-08-13 re-run "
-                "on the same version: a scalar lagrange galerkin "
-                "scheme accepted ilu and amg without complaint under "
-                "the default, istl, fem and petsc families, so this "
-                "list is family-specific and the entry should not be "
-                "read as saying ilu is universally rejected.)"
+                "different scripts.) The accepted list depends on the "
+                "solver family, not on the space (re-measured 2026-09-30 "
+                "on a scalar P1 galerkin scheme): the default "
+                "solver='cg' and solver=('fem', 'cg') accept only none, "
+                "sor, ssor, gauss-seidel, jacobi and reject ilu and amg "
+                "at scheme construction; solver=('istl', 'cg') "
+                "accepts ilu and rejects amg only at the first solve, "
+                "listing none, ssor, sor, ilu, gauss-seidel, jacobi, "
+                "amg-ilu, amg-jacobi, ildl; solver=('petsc', 'cg') "
+                "accepts ilu and rejects amg at the first solve, listing "
+                "none, oas, gauss-seidel, sor, ssor, jacobi, ilu, icc, "
+                "kspoptions, hypre, ml, lu, pcgamg. A bare 'amg' is "
+                "valid in none of them."
             ),
             (
                 "[Numerical] Equal-order velocity/pressure violates "

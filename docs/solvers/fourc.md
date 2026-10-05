@@ -10,6 +10,18 @@ export FOURC_BINARY=/path/to/4C
 
 Built from source, which takes hours: <https://github.com/4C-multiphysics/4C>. You do not need it to start.
 
+Or let Spack build 4C 2026.3.0 with all of its dependencies, from the recipe openPASO ships. It
+took about 70 minutes on a 32-core machine, and the result is found without `FOURC_BINARY`, unless
+another 4C comes first (the command then names the variable to set):
+
+```bash
+openpaso install fourc --via spack
+```
+
+68 of the 69 templates run on this release. The 69th is a format stub that is not meant to run.
+FS3I and FE² multiscale read files from a 4C source tree: for those two, point `FOURC_ROOT` at the
+2026.3.0 sources.
+
 Then check that openPASO sees it:
 
 ```bash
@@ -36,7 +48,7 @@ python check_install.py
 | `fbi` | Fluid-beam interaction (immersed) | 3-D | `penalty_3d` |
 | `fluid` | Incompressible Navier-Stokes | 2-D, 3-D | `channel_2d`, `cavity_2d` |
 | `fluid_ale` | Fluid on a deforming (ALE) mesh -- the moving-domain setting every FSI and free-surface problem needs | 2-D | `hdg_2d` |
-| `fluid_turbulence` | Fluid turbulence: LES (Smagorinsky, dynamic, WALE) and DNS | 2-D, 3-D | `les_channel_3d` |
+| `fluid_turbulence` | Fluid turbulence: LES (Smagorinsky, Dynamic_Smagorinsky, Vreman, Dynamic_Vreman, Multifractal_Subgrid_Scales) and DNS | 2-D, 3-D | `les_channel_3d` |
 | `fpsi` | Fluid-porous-structure interaction | 3-D | `monolithic_3d` |
 | `fs3i` | FS3I (fluid-structure-scalar-scalar, 5-field) | 3-D | `fs3i_3d` |
 | `fsi` | Fluid-structure interaction | 2-D, 3-D | `fsi_2d` |
@@ -62,7 +74,7 @@ python check_install.py
 | `porofluid_elasticity_scatra` | Multiphase porous flow + deformable skeleton + scalar transport, monolithically coupled | 3-D | `monolithic_3d` |
 | `porous_media` | Poroelasticity (Biot/mixture theory, consolidation) | 2-D, 3-D | `single_phase_3d`, `terzaghi_2d`, `consolidation_3d` |
 | `reduced_airways` | Reduced-dimensional airways (lung) | 1-D | `airways_1d` |
-| `reduced_lung` | Reduced lung model: 1D airways + 0D alveoli + optional 3D parenchyma | 1-D, 3-D | `lung_1d` |
+| `reduced_lung` | Reduced lung: 1-D compliant-tube airway flow (Reduced_Lung_1D_Pipe_Flow) | 1-D | `lung_1d` |
 | `scalar_transport` | [Umbrella] Scalar-transport family pitfalls (applies to poisson, heat, electrochemistry, level-set, low-mach scalars). For specific physics use poisson/heat/electrochemistry directly. | 2-D, 3-D | `umbrella` |
 | `shell` | Shell elements (Kirchhoff-Love, Reissner-Mindlin) | 3-D | `shell_3d` |
 | `ssi` | Structure-scalar interaction (battery/electrode) | 3-D | `monolithic_elch_3d` |

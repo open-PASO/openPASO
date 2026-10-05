@@ -343,6 +343,25 @@ def _normalise(s: str) -> str:
     return s.strip()
 
 
+# The directories in front of a source file named by an error message.
+_SOURCE_DIRS_RE = re.compile(
+    r"(?:[\w.~+-]*/)+(?=[\w.+-]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)\b)")
+
+
+def _fold_source_paths(s: str) -> str:
+    """Keep only the file name where an error names a source file.
+
+    The same error names its source file differently depending on how the
+    solver was built. SPARTA built with make prints
+    "(../compute_reduce.cpp:232)"; built with CMake, as Spack builds it, it
+    prints the absolute path of the build directory. Measured on SPARTA
+    27Aug2026: the whole error line of the Spack build matched no entry, not
+    even by words, because the path's words outnumber the message's. The same
+    line from the make build matched its entry verbatim.
+    """
+    return _SOURCE_DIRS_RE.sub("", s)
+
+
 # DOMAIN VOCABULARY. An agent and an entry routinely name the same thing
 # differently, and the mismatch silently defeats token matching. Measured case
 # that motivated this: the query "element locking hexahedral" scored 1/3 against
@@ -490,8 +509,15 @@ def match_signal(entry: dict[str, Any], query: str) -> tuple[str, float]:
         return "substring", 1.0
     if q in whole:
         return "substring_body", 0.85
+    # A match only on the folded text is still the same error: the two sides
+    # differ only in where the solver was built.
+    q = _fold_source_paths(q)
+    if sig and q in _fold_source_paths(sig):
+        return "substring", 1.0
+    if q in _fold_source_paths(whole):
+        return "substring_body", 0.85
 
-    qt = _tokens(query)
+    qt = _tokens(q)
     if not qt:
         return "", 0.0
     wt = _tokens(entry.get("text", ""))

@@ -376,9 +376,10 @@ KNOWLEDGE = {
             "Placeholder inside FESystem on subdomains where "
             "displacement should be inactive (FSI solid region "
             "when modelling the fluid, or vice versa). Zero "
-            "DoFs there, but you still need a manifold-id or "
-            "hp::DoFHandler::active_fe_index switch to actually "
-            "skip assembly.",
+            "DoFs there, but you still need a manifold-id or a "
+            "cell->set_active_fe_index() switch (DoFHandler + "
+            "hp::FECollection; hp::DoFHandler was removed in 9.5) "
+            "to actually skip assembly.",
         "FESystem":
             "The vector wrapper. A bare FE_Q gives scalar u, "
             "NOT the displacement field — forgetting FESystem is "
@@ -397,7 +398,7 @@ KNOWLEDGE = {
     },
     "preconditioners": [
         "PreconditionSSOR<>          — serial default for symmetric positive-definite elasticity stiffness; cheap, works well up to ~10^5 DoFs",
-        "PreconditionAMG / BoomerAMG — parallel AMG for >10^5 DoFs; via TrilinosWrappers (BoomerAMG is HYPRE through Trilinos)",
+        "PreconditionAMG / BoomerAMG — parallel AMG for >10^5 DoFs; TrilinosWrappers::PreconditionAMG (Trilinos ML; MueLu via TrilinosWrappers::PreconditionAMGMueLu) or PETScWrappers::PreconditionBoomerAMG (HYPRE through PETSc)",
         "PreconditionJacobi          — diagonal scaling only; useful baseline when debugging convergence stall",
         "PreconditionChebyshev       — for smoothing inside multigrid; not a top-level preconditioner for direct CG use",
     ],
@@ -449,8 +450,13 @@ KNOWLEDGE = {
         "alone gives the wrong scalar component. Signal: DataOut "
         "writes a displacement field where only the first component "
         "is non-zero (u_x has the expected gravity-driven profile, "
-        "u_y is identically zero); per-component norm "
-        "`solution.block(1).l2_norm() == 0` on a vector FESystem.",
+        "u_y is identically zero); the norm of the u_y DoFs is 0 "
+        "(with a Vector<double> solution select them via "
+        "DoFTools::extract_dofs(dof_handler, "
+        "fe.component_mask(FEValuesExtractors::Scalar(1))); "
+        "`solution.block(1)` exists only for a BlockVector sized by "
+        "DoFTools::count_dofs_per_fe_block after "
+        "DoFRenumbering::component_wise).",
         "[Integration] deal.II reads BOTH triangles and quads from "
         "Gmsh in 2D. `gmsh.option.setNumber"
         "('Mesh.RecombineAll', 1)` is a preference (tensor-product "
@@ -533,7 +539,9 @@ KNOWLEDGE = {
         "aborts with ExcFEHasNoSupportPoints, which opens 'You are "
         "trying to access the support points of a finite' and closes "
         "'which the corresponding tables have not been implemented.' "
-        "— three adjacent literals at fe/fe.h:2441-2443 that read as "
+        "— three adjacent literals of ExcFEHasNoSupportPoints "
+        "(fe/fe.h lines 2466-2468 in deal.II 9.8.0, 2443-2445 in "
+        "9.7.1) that read as "
         "one sentence: You are trying to access the support points of "
         "a finite element that either has no support points at all, "
         "or for which the corresponding tables have not been "
@@ -544,7 +552,8 @@ KNOWLEDGE = {
         "where displacement should be inactive does NOT skip "
         "assembly on those cells — it just makes the DoF count zero "
         "there. You still need to mark the cells with a manifold ID "
-        "or a hp::DoFHandler<dim> active_fe_index switch. Signal: "
+        "or a DoFHandler<dim> + hp::FECollection "
+        "cell->set_active_fe_index() switch. Signal: "
         "DataOut shows non-zero residual values on cells that should "
         "be 'off'; `system_rhs.l2_norm()` is larger than expected "
         "even though `dof_handler.n_dofs_on_subdomain()` reports the "

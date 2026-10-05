@@ -93,10 +93,13 @@ refers to something not yet defined is an error.
     (particles per cell x grid cells) for several in each cell.
   * `create_box` TAKES THREE PAIRS EVEN IN 2-D. The z pair is still required;
     give it a unit-thickness slab such as -0.5 0.5.
-  * `create_grid`'s THIRD COUNT MUST BE 1 in two dimensions, or the run is
-    silently three-dimensional and every per-cell quantity changes meaning.
+  * `create_grid`'s THIRD COUNT MUST BE 1 in two dimensions; any other value
+    aborts with 'Create_grid nz value must be 1 for a 2d simulation'.
   * `species` AND `collide` READ FILES (ar.species, ar.vss ship with SPARTA).
     Copy them next to the script or give a path; a missing file aborts.
+  * `global nrho/fnum` CREATES NO PARTICLES. Without `create_particles` (or
+    another particle source such as `fix emit/*` or `read_particles`) the box
+    stays EMPTY: the run completes with 0 particles and rc = 0.
   * `fix ave/time nevery nrepeat nfreq` MUST SATISFY
         nevery * nrepeat <= nfreq   and   nfreq % nevery == 0
     or SPARTA rejects it. The averaging WINDOW is nevery*nrepeat steps ending at

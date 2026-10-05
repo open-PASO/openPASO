@@ -11,7 +11,9 @@ Kratos uses a three-file system:
   - mesh.mdpa: mesh data (nodes, elements, conditions, sub-model-parts)
   - (optional) StructuralMaterials.json or ThermalMaterials.json
 
-Install: pip install KratosMultiphysics-all (includes ~25 applications)
+Install: pip install KratosMultiphysics-all (core + 16 applications, plus MeshMovingApplication
+  as a dependency; it resolves to the 10.3.0 set. IgaApplication, RANSApplication,
+  OptimizationApplication, CableNetApplication etc. are separate wheels)
 Individual: pip install KratosStructuralMechanicsApplication, etc.
 """
 
@@ -27,7 +29,7 @@ KRATOS_APPLICATIONS = {
     },
     "TrilinosApplication": {
         "physics": "Distributed-memory parallel solvers (MPI)",
-        "description": "MPI-parallel linear solvers via Trilinos (AztecOO, Amesos, ML, MueLu).",
+        "description": "MPI-parallel linear solvers via Trilinos (AztecOO, Amesos, ML) and AMGCL.",
     },
     "MetisApplication": {
         "physics": "Graph partitioning for MPI domain decomposition",
@@ -175,10 +177,6 @@ KRATOS_APPLICATIONS = {
         "physics": "Isogeometric Analysis",
         "description": "NURBS-based elements for exact geometry representation.",
     },
-    "MultilevelMonteCarloApplication": {
-        "physics": "Stochastic analysis (MLMC)",
-        "description": "Multilevel Monte Carlo for uncertainty quantification.",
-    },
     "MedApplication": {
         "physics": "MED file format I/O",
         "description": "Read/write MED mesh format (Salome/Code_Aster compatible).",
@@ -186,10 +184,6 @@ KRATOS_APPLICATIONS = {
     "HDF5Application": {
         "physics": "HDF5 I/O",
         "description": "Read/write simulation data in HDF5 format.",
-    },
-    "CoSimIOApplication": {
-        "physics": "Inter-process communication for co-simulation",
-        "description": "Lightweight data exchange library for multi-code coupling.",
     },
 }
 
@@ -234,15 +228,15 @@ STRUCTURAL_MECHANICS = {
 
         # Shell elements
         "ShellThinElement3D3N": "Thin shell triangle (Kirchhoff, no transverse shear)",
-        "ShellThinElement3D4N": "Thin shell quad",
-        "ShellThickElement3D3N": "Thick shell triangle (Reissner-Mindlin, with transverse shear)",
+        "ShellThinElementCorotational3D4N": "Thin shell quad (corotational)",
+        "ShellThickElementCorotational3D3N": "Thick shell triangle (corotational, with transverse shear)",
         "ShellThickElement3D4N": "Thick shell quad",
 
         # Beam elements
         "CrBeamElement3D2N": "Co-rotational 3D Euler-Bernoulli beam",
         "CrBeamElement2D2N": "Co-rotational 2D Euler-Bernoulli beam",
-        "CrBeamElementLinear3D2N": "Linear co-rotational 3D beam",
-        "CrBeamElementLinear2D2N": "Linear co-rotational 2D beam",
+        "CrLinearBeamElement3D2N": "Linear co-rotational 3D beam",
+        "CrLinearBeamElement2D2N": "Linear co-rotational 2D beam",
 
         # Membrane elements
         "MembraneElement3D3N": "Membrane triangle (no bending stiffness)",
@@ -250,7 +244,7 @@ STRUCTURAL_MECHANICS = {
 
         # Truss / cable / spring elements
         "TrussElement3D2N": "3D truss (tension and compression)",
-        "TrussElementLinear3D2N": "Linear 3D truss",
+        "TrussLinearElement3D2N": "Linear 3D truss",  # LinearTrussElement3D2N is also registered
         "CableElement3D2N": "Cable element (tension only, no compression)",
         "SpringDamperElement3D2N": "Point-to-point spring + damper",
 
@@ -275,10 +269,17 @@ STRUCTURAL_MECHANICS = {
 
     # ── Solver Types ──
     "solver_types": {
-        "Static": "static_mechanical_solver (Newton-Raphson for nonlinear, direct for linear)",
-        "Dynamic": "dynamic_mechanical_solver (time integration: Newmark, Bossak, Generalized-alpha)",
-        "Explicit": "mechanical_explicit_solver (central difference, no system solve)",
-        "Formfinding": "formfinding_mechanical_solver (for membrane/cable form-finding)",
+        "Static": "structural_mechanics_static_solver (Newton-Raphson for nonlinear, direct for linear); 'static' is accepted too",
+        "Dynamic": ("time_integration_method 'implicit' (the default) -> structural_mechanics_implicit_dynamic_solver "
+                    "(scheme_type newmark, bossak (default), pseudo_static, backward_euler, bdf1-bdf5, relaxation); "
+                    "'explicit' -> structural_mechanics_explicit_dynamic_solver (central_differences or multi_stage, "
+                    "no system solve); 'dynamic' is accepted too"),
+        "formfinding": ("structural_mechanics_formfinding_solver (for membrane/cable form-finding); lower-case only: "
+                        "'Formfinding' and 'Explicit' are rejected as solver_type values"),
+        "eigen_value": "structural_mechanics_eigensolver",
+        "harmonic_analysis": "structural_mechanics_harmonic_analysis_solver",
+        "adjoint_static": "structural_mechanics_adjoint_static_solver",
+        "prebuckling": "structural_mechanics_prebuckling_solver",
     },
 
     # ── Analysis Types ──
@@ -293,15 +294,16 @@ STRUCTURAL_MECHANICS = {
         "residual_criterion",              # ||R|| < tol
         "and_criterion",                   # Both displacement AND residual
         "or_criterion",                    # Either displacement OR residual
-        "displacement_and_other_dof_criterion",  # For mixed problems
-    ],
+    ],  # with rotation_dofs / volumetric_strain_dofs / strain_dofs true, these names switch to MixedGenericCriteria / ResidualDisplacementAndOtherDoFCriteria
 
     # ── Dynamic Analysis Schemes ──
     "time_integration_schemes": {
         "newmark": {"beta": 0.25, "gamma": 0.5, "description": "Newmark-beta (unconditionally stable)"},
         "bossak": {"alpha": -0.3, "description": "Bossak (numerical damping via alpha)"},
-        "generalized_alpha": {"description": "Generalized-alpha (best for structural dynamics)"},
-    },
+        "pseudo_static": {"description": "ResidualBasedPseudoStaticDisplacementScheme"},
+        "backward_euler": {"description": "BDF1 (ResidualBasedBDFDisplacementScheme); bdf2 ... bdf5 are accepted too"},
+        "relaxation": {"description": "ResidualBasedRelaxationScheme"},
+    },  # implicit scheme_type default is "bossak" (damp_factor_m -0.3); there is no generalized-alpha scheme; explicit: central_differences, multi_stage
 
     # ── ProjectParameters.json Template ──
     "project_parameters_template": {
@@ -449,30 +451,29 @@ CONSTITUTIVE_LAWS = {
             "params": ["DENSITY", "YOUNG_MODULUS", "POISSON_RATIO"],
             "description": "Saint Venant-Kirchhoff (small strain, large rotation)",
         },
-        "HyperElasticIsotropicNeoHookean3DLaw": {
+        "HyperElastic3DLaw": {
             "params": ["DENSITY", "YOUNG_MODULUS", "POISSON_RATIO"],
-            "description": "Neo-Hookean hyperelastic (large deformation)",
+            "description": ("Neo-Hookean hyperelastic (large deformation); C++ class HyperElasticIsotropicNeoHookean3D, "
+                            "ConstitutiveLawsApplication. The Simo-Taylor formulation is HyperElasticSimoTaylorNeoHookean3DLaw"),
         },
-        "HyperElasticIsotropicNeoHookeanPlaneStrain2DLaw": {
+        "HyperElasticPlaneStrain2DLaw": {
             "params": ["DENSITY", "YOUNG_MODULUS", "POISSON_RATIO"],
-            "description": "2D plane strain Neo-Hookean",
+            "description": "2D plane strain Neo-Hookean (C++ class HyperElasticIsotropicNeoHookeanPlaneStrain2D)",
         },
     },
 
     # ── Plasticity (Small Strain) ──
-    # Factory pattern: SmallStrainIsotropicPlasticityFactory3D
+    # Factory pattern: SmallStrainIsotropicPlasticityFactory (optional "law_type": "3D" (default) or "PlaneStrain")
     # Combines yield_surface + plastic_potential
     "plasticity_small_strain": {
-        "factory_name": "SmallStrainIsotropicPlasticityFactory3D",
+        "factory_name": "SmallStrainIsotropicPlasticityFactory",
         "yield_surfaces": [
             "VonMises",
-            "Rankine",
             "Tresca",
             "ModifiedMohrCoulomb",
             "DruckerPrager",
-            "SimoJu",
             "MohrCoulomb",
-        ],
+        ],  # Rankine and SimoJu are rejected by the plasticity factory (damage laws only)
         "plastic_potentials": [
             "VonMises",
             "Tresca",
@@ -489,15 +490,16 @@ CONSTITUTIVE_LAWS = {
         ],
         "hardening_curves": {
             0: "Linear Softening",
-            1: "Exponential Hardening",
+            1: "Exponential Softening",
             2: "Initial Hardening + Exponential Softening (parabolic)",
             3: "Perfect Plasticity",
-            4: "Curve Fitting Hardening (Von Mises only)",
+            4: "Curve Fitting Hardening (VonMises/Tresca only)",
             5: "Linear + Exponential Softening",
+            6: "Curve Defined By Points",
         },
         "materials_json_example": {
             "constitutive_law": {
-                "name": "SmallStrainIsotropicPlasticityFactory3D",
+                "name": "SmallStrainIsotropicPlasticityFactory",
                 "yield_surface": "VonMises",
                 "plastic_potential": "VonMises",
             },
@@ -516,14 +518,17 @@ CONSTITUTIVE_LAWS = {
     # ── Plasticity (Finite Strain) ──
     "plasticity_finite_strain": {
         "description": "Multiplicative decomposition F = Fe * Fp, exponential map integrator",
-        "factory_name": "SmallStrainIsotropicPlasticityFactory3D",  # same factory, finite strain version available
-        "note": "Uses TotalLagrangianElement or UpdatedLagrangianElement",
+        "factory_name": None,  # no finite-strain factory is registered
+        "note": ("Registered directly as FiniteStrainIsotropicPlasticity3D<YieldSurface><PlasticPotential> "
+                 "(e.g. FiniteStrainIsotropicPlasticity3DVonMisesVonMises); SmallStrainIsotropicPlasticityFactory "
+                 "builds only SmallStrainIsotropicPlasticity* laws. Uses TotalLagrangianElement or UpdatedLagrangianElement"),
     },
 
     # ── Damage ──
     "damage_isotropic": {
-        "factory_name": "SmallStrainIsotropicDamageFactory3D",
-        "specific_name_pattern": "SmallStrainIsotropicDamage3D<YieldSurface><PlasticPotential>",
+        "factory_name": "SmallStrainIsotropicDamageFactory",
+        # the factory appends plastic_potential to the name, so pass "plastic_potential": ""
+        "specific_name_pattern": "SmallStrainIsotropicDamage3D<YieldSurface>",  # e.g. SmallStrainIsotropicDamage3DVonMises
         "params": [
             "DENSITY", "YOUNG_MODULUS", "POISSON_RATIO",
             "YIELD_STRESS_TENSION", "YIELD_STRESS_COMPRESSION",
@@ -561,7 +566,7 @@ CONSTITUTIVE_LAWS = {
             "params": ["DENSITY", "LAYER_EULER_ANGLES", "combination_factors"],
             "description": "Iso-strain (Voigt) composite. Sub-properties define constituents.",
         },
-        "SerialParallelRuleOfMixturesLaw": {
+        "SerialParallelRuleOfMixturesLaw3D": {  # 2D variant: SerialParallelRuleOfMixturesLaw2D
             "params": ["combination_factors", "parallel_behaviour_directions", "LAYER_EULER_ANGLES"],
             "description": "Serial-parallel composite for fiber-matrix materials.",
         },
@@ -607,7 +612,7 @@ FLUID_DYNAMICS = {
         "monolithic": {
             "solver_type": "Monolithic",
             "description": "Coupled velocity-pressure solve. More robust, larger system.",
-            "python_module": "navier_stokes_solver_vmsmonolithic",
+            "python_module": "navier_stokes_monolithic_solver",
         },
         "fractional_step": {
             "solver_type": "FractionalStep",
@@ -618,11 +623,9 @@ FLUID_DYNAMICS = {
 
     # ── Element Types ──
     "elements": {
-        # VMS (Variational MultiScale) - monolithic
+        # VMS (Variational MultiScale) - monolithic, simplex only (use QSVMS2D4N/QSVMS3D8N for quads/hexes)
         "VMS2D3N": "VMS stabilized triangle (2D, 3 nodes), monolithic",
-        "VMS2D4N": "VMS stabilized quad (2D, 4 nodes), monolithic",
         "VMS3D4N": "VMS stabilized tetrahedron, monolithic",
-        "VMS3D8N": "VMS stabilized hexahedron, monolithic",
 
         # QSVMS (Quasi-Static VMS) - preferred for monolithic
         "QSVMS2D3N": "Quasi-static VMS triangle, dynamic subscales",
@@ -630,11 +633,9 @@ FLUID_DYNAMICS = {
         "QSVMS3D4N": "Quasi-static VMS tetrahedron",
         "QSVMS3D8N": "Quasi-static VMS hexahedron",
 
-        # Fractional step elements
+        # Fractional step elements (simplex only)
         "FractionalStep2D3N": "Fractional step triangle",
-        "FractionalStep2D4N": "Fractional step quad",
         "FractionalStep3D4N": "Fractional step tetrahedron",
-        "FractionalStep3D8N": "Fractional step hexahedron",
 
         # Two-fluid (free surface)
         "TwoFluidNavierStokes2D3N": "Two-fluid (level-set) triangle",
@@ -649,7 +650,6 @@ FLUID_DYNAMICS = {
     "conditions": {
         "MonolithicWallCondition2D2N": "Wall (no-slip) for monolithic, 2D",
         "MonolithicWallCondition3D3N": "Wall (no-slip) for monolithic, 3D triangle",
-        "MonolithicWallCondition3D4N": "Wall (no-slip) for monolithic, 3D quad",
         "NavierStokesWallCondition2D2N": "Wall with wall law support",
         "NavierStokesWallCondition3D3N": "Wall with wall law support (3D)",
     },
@@ -657,13 +657,13 @@ FLUID_DYNAMICS = {
     # ── Stabilization Settings ──
     "stabilization": {
         "formulation": {
-            "element_type": "vms",  # or "qsvms", "fic"
-            "dynamic_tau": 1.0,     # Stabilization parameter (0.0 = no dynamic tau)
-            "oss_switch": 0,        # 0 = ASGS, 1 = OSS (Orthogonal Sub-Scales)
-        },
+            "element_type": "vms",  # or "qsvms", "dvms"; "fic" takes no use_orthogonal_subscales
+            "dynamic_tau": 1.0,     # Stabilization parameter (0.0 = no dynamic tau); the vms default is 0.01
+            "use_orthogonal_subscales": False,  # False = ASGS, True = OSS; sets ProcessInfo OSS_SWITCH
+        },  # "oss_switch" (int) is only a solver_settings key of the fractional_step solver
         "methods": {
-            "ASGS": "Algebraic Sub-Grid Scales (oss_switch=0, default)",
-            "OSS": "Orthogonal Sub-Scales (oss_switch=1, more accurate but more expensive)",
+            "ASGS": "Algebraic Sub-Grid Scales (use_orthogonal_subscales=false, default)",
+            "OSS": "Orthogonal Sub-Scales (use_orthogonal_subscales=true, more accurate but more expensive)",
             "VMS": "Variational MultiScale (classical)",
             "QSVMS": "Quasi-Static VMS with dynamic subscales (recommended)",
             "FIC": "Finite Increment Calculus",
@@ -847,7 +847,6 @@ CONVECTION_DIFFUSION = {
         "SurfaceCondition3D4N": "3D boundary quad surface",
         "ThermalFace2D2N": "Thermal face condition (alternative)",
         "ThermalFace3D3N": "Thermal face condition 3D",
-        "Condition2D2N": "Generic 2D condition (replaced at runtime)",
     },
 
     # ── Time Scheme Parameter ──
@@ -915,9 +914,8 @@ CONVECTION_DIFFUSION = {
                 "model_part_name": "ThermalModelPart.Parts_Solid",
                 "properties_id": 1,
                 "Material": {
-                    "constitutive_law": {
-                        "name": "Placeholder",  # ConvDiff does not use constitutive laws
-                    },
+                    # no "constitutive_law" entry: ConvDiff uses none, and ReadMaterialsUtility
+                    # errors on an unregistered law name
                     "Variables": {
                         "DENSITY": 1.0,
                         "CONDUCTIVITY": 1.0,
@@ -955,12 +953,6 @@ CONVECTION_DIFFUSION = {
                 "4. Make sure material has CONDUCTIVITY, DENSITY, SPECIFIC_HEAT defined",
             ],
         },
-        "wrong_approach": {
-            "description": "Using LaplacianElement with HEAT_FLUX",
-            "why_fails": "LaplacianElement only assembles the diffusion (stiffness) matrix. "
-                         "It does NOT read HEAT_FLUX from the source term. "
-                         "The RHS will be zero regardless of HEAT_FLUX values.",
-        },
     },
 }
 
@@ -986,18 +978,22 @@ COSIMULATION = {
     "convergence_accelerators": {
         "constant_relaxation": {
             "description": "Fixed relaxation factor (simplest, slowest)",
-            "params": {"relaxation_coefficient": 0.5},
+            "params": {"alpha": 0.125},
         },
         "aitken": {
             "description": "Aitken adaptive relaxation (good default for FSI)",
-            "params": {"relaxation_coefficient_initial_value": 0.25},
+            "params": {"init_alpha": 0.1, "init_alpha_max": 0.45},
         },
         "mvqn": {
             "description": "Multi-Vector Quasi-Newton (fast convergence, needs memory)",
             "params": {},
         },
-        "ibqn": {
-            "description": "Interface Block Quasi-Newton",
+        "block_ibqnls": {
+            "description": "Interface Block Quasi-Newton Least Squares (block variant)",
+            "params": {},
+        },
+        "block_mvqn": {
+            "description": "Block Multi-Vector Quasi-Newton (block variant)",
             "params": {},
         },
         "anderson": {
@@ -1014,8 +1010,8 @@ COSIMULATION = {
     "convergence_criteria": [
         "relative_norm_initial_residual",
         "relative_norm_previous_residual",
-        "absolute_norm_residual",
-    ],
+        "absolute_norm_energy_conjugate",
+    ],  # the last is energy-conjugate based (needs criteria_composition "energy_conjugate"); the relative_norm criteria also take abs_tolerance
 
     # ── Predictors ──
     "predictors": [
@@ -1028,9 +1024,8 @@ COSIMULATION = {
     "data_transfer_operators": [
         "copy",                       # Direct copy (matching meshes)
         "kratos_mapping",             # Using MappingApplication
-        "empire_mapping",             # External EMPIRE mapping
         "sum_distributed_to_single",  # Collect distributed data
-        "copy_single_to_distributed", # Distribute single data
+        "copy_single_to_distributed", # Distribute single data (deprecated alias of transfer_one_to_many)
     ],
 
     # ── Solver Wrapper Types ──
@@ -1050,25 +1045,56 @@ COSIMULATION = {
             "parallel_type": "OpenMP",
         },
         "solver_settings": {
-            "type": "coupled_solvers",
+            "type": "coupled_solvers.gauss_seidel_strong",
             "echo_level": 1,
-            "coupling_scheme": {
-                "type": "gauss_seidel_strong",
-                "convergence_accelerator": {
+            # no "coupling_scheme" or "max_iteration" key: the scheme is the "type" above, and the
+            # iteration limit, accelerators and criteria sit at solver_settings level
+            "num_coupling_iterations": 15,
+            "convergence_accelerators": [
+                {
                     "type": "aitken",
-                    "relaxation_coefficient_initial_value": 0.25,
+                    "solver": "fluid",
+                    "data_name": "displacement",
+                    "init_alpha": 0.25,
                 },
-                "convergence_criteria": [
-                    {
-                        "type": "relative_norm_initial_residual",
-                        "solver": "fluid",
-                        "data_name": "displacement",
-                        "abs_tolerance": 1e-7,
-                        "rel_tolerance": 1e-5,
-                    },
-                ],
-                "max_iteration": 15,
-            },
+            ],
+            "convergence_criteria": [
+                {
+                    "type": "relative_norm_initial_residual",
+                    "solver": "fluid",
+                    "data_name": "displacement",
+                    "abs_tolerance": 1e-7,
+                    "rel_tolerance": 1e-5,
+                },
+            ],
+            # required: the order the solvers run in and the data each one receives and sends
+            "coupling_sequence": [
+                {
+                    "name": "fluid",
+                    "input_data_list": [],
+                    "output_data_list": [],
+                },
+                {
+                    "name": "structure",
+                    "input_data_list": [
+                        {
+                            "data": "force",
+                            "from_solver": "fluid",
+                            "from_solver_data": "force",
+                            "data_transfer_operator": "mapper",
+                            "data_transfer_operator_options": ["swap_sign"],
+                        },
+                    ],
+                    "output_data_list": [
+                        {
+                            "data": "displacement",
+                            "to_solver": "fluid",
+                            "to_solver_data": "displacement",
+                            "data_transfer_operator": "mapper",
+                        },
+                    ],
+                },
+            ],
             "solvers": {
                 "fluid": {
                     "type": "solver_wrappers.kratos.fluid_dynamics_wrapper",
@@ -1121,7 +1147,7 @@ COSIMULATION = {
 
     "pitfalls": [
         "Each solver needs its OWN ProjectParameters.json (referenced by input_file)",
-        "Data names must match between coupling_scheme and solver data blocks",
+        "Data names used in coupling_sequence, convergence_accelerators and convergence_criteria must match the solvers' data blocks",
         "Interface SubModelParts must exist in BOTH solver meshes",
         "For FSI: fluid sends REACTION (force), structure sends DISPLACEMENT",
         "convergence_accelerator: aitken is safest default; mvqn is fastest but can diverge",
@@ -1229,7 +1255,10 @@ CONTACT_STRUCTURAL_MECHANICS = {
         },
         "penalty": {
             "description": "Penalty method (simpler, needs tuning of penalty parameter)",
-            "parameter": "PENALTY_PARAMETER",
+            "parameter": ("INITIAL_PENALTY (core variable in ProcessInfo): computed automatically as "
+                          "stiffness_factor * E_mean / h_mean (times 1e4 in the penalty process) unless "
+                          "advance_ALM_parameters.manual_ALM is true, then taken from advance_ALM_parameters.penalty. "
+                          "PENALTY_PARAMETER belongs to the legacy ContactMechanicsApplication"),
         },
         "mortar_NTN": {
             "description": "Node-to-Node mortar (simplified)",
@@ -1250,12 +1279,12 @@ CONTACT_STRUCTURAL_MECHANICS = {
     },
 
     "conditions": {
-        "ALMFrictionlessMortarContact2D2N": "ALM frictionless 2D contact",
-        "ALMFrictionlessMortarContact3D3N": "ALM frictionless 3D (triangle)",
-        "ALMFrictionlessMortarContact3D4N": "ALM frictionless 3D (quad)",
-        "ALMFrictionalMortarContact3D3N": "ALM frictional 3D (triangle)",
-        "PenaltyFrictionlessMortarContact3D3N": "Penalty frictionless 3D",
-        "PenaltyFrictionalMortarContact3D3N": "Penalty frictional 3D",
+        "ALMFrictionlessMortarContactCondition2D2N": "ALM frictionless 2D contact",
+        "ALMFrictionlessMortarContactCondition3D3N": "ALM frictionless 3D (triangle)",
+        "ALMFrictionlessMortarContactCondition3D4N": "ALM frictionless 3D (quad)",
+        "ALMFrictionalMortarContactCondition3D3N": "ALM frictional 3D (triangle)",
+        "PenaltyFrictionlessMortarContactCondition3D3N": "Penalty frictionless 3D",
+        "PenaltyFrictionalMortarContactCondition3D3N": "Penalty frictional 3D",
         "MeshTyingMortarCondition2D2N": "Mesh tying (glued contact) 2D",
         "MeshTyingMortarCondition3D3N": "Mesh tying (glued contact) 3D",
     },
@@ -1286,11 +1315,13 @@ GEOMECHANICS = {
     },
 
     "constitutive_laws": {
-        "LinearElastic": "Isotropic linear elastic soil",
-        "MohrCoulomb": "Mohr-Coulomb plasticity (cohesion, friction angle)",
-        "DruckerPrager": "Drucker-Prager plasticity (smooth MC approximation)",
-        "ModifiedCamClay": "Critical state soil model",
-    },
+        "GeoLinearElasticPlaneStrain2DLaw": "Linear elastic, plane strain",
+        "GeoIncrementalLinearElastic3DLaw": "Incremental linear elastic, 3D",
+        "GeoMohrCoulombWithTensionCutOff2D": "Mohr-Coulomb with tension cut-off (2D)",
+        "GeoMohrCoulombWithTensionCutOff3D": "Mohr-Coulomb with tension cut-off (3D)",
+        "SmallStrainUDSM2DPlaneStrainLaw": "User-defined soil model from an external library (also SmallStrainUDSM3DLaw)",
+        "SmallStrainUMAT2DPlaneStrainLaw": "UMAT from an external library (also SmallStrainUMAT3DLaw)",
+    },  # GeoMechanicsApplication registers no Drucker-Prager or Cam-Clay law
 
     "element_types": {
         "UPwSmallStrainElement2D3N": "Coupled U-Pw triangle (small strain)",
@@ -1746,9 +1777,11 @@ BC_PROCESSES = {
         },
     },
     "ApplyConstantScalarValueProcess": {
-        "python_module": "apply_constant_scalar_value_process",
+        "python_module": "process_factory",
         "kratos_module": "KratosMultiphysics",
-        "description": "Apply a constant scalar (simpler than AssignScalar)",
+        "process_name": "ApplyConstantScalarValueProcess",
+        "description": ("Legacy C++ process (upstream docs recommend assign_scalar_variable_process); "
+                        "sets a constant scalar at ExecuteInitialize"),
         "parameters": {
             "model_part_name": "MainModelPart.SubModelPartName",
             "variable_name": "TEMPERATURE",
@@ -1768,13 +1801,13 @@ VTK_OUTPUT = {
     "kratos_module": "KratosMultiphysics",
     "process_name": "VtkOutputProcess",
     "default_parameters": {
-        "model_part_name": "MainModelPart",
-        "file_format": "ascii",    # "ascii" or "binary"
+        "model_part_name": "PLEASE_SPECIFY_MODEL_PART_NAME",  # must be set
+        "file_format": "binary",    # "ascii" or "binary"
         "output_precision": 7,
         "output_control_type": "step",  # "step" or "time"
-        "output_interval": 1,       # Every N steps or dt seconds
+        "output_interval": 1.0,     # Every N steps or dt seconds
         "output_sub_model_parts": False,
-        "output_path": "vtk_output",
+        "output_path": "VTK_Output",
         "save_output_files_in_folder": True,
         "nodal_solution_step_data_variables": [],  # e.g. ["DISPLACEMENT", "VELOCITY", "PRESSURE"]
         "nodal_data_value_variables": [],
@@ -1829,8 +1862,7 @@ from KratosMultiphysics.CoSimulationApplication.co_simulation_analysis import Co
 if __name__ == "__main__":
     with open("ProjectParametersCoSim.json", 'r') as parameter_file:
         parameters = KratosMultiphysics.Parameters(parameter_file.read())
-    model = KratosMultiphysics.Model()
-    simulation = CoSimulationAnalysis(model, parameters)
+    simulation = CoSimulationAnalysis(parameters)  # signature: CoSimulationAnalysis(cosim_settings, models=None); no Model argument
     simulation.Run()
 ''',
 
@@ -1882,9 +1914,6 @@ LINEAR_SOLVERS = {
             "description": "Built-in skyline LU (serial, simple problems only)",
             "max_recommended_dofs": 50000,
         },
-        "pastix": {
-            "description": "PaSTiX parallel direct solver (if compiled)",
-        },
     },
     "iterative": {
         "amgcl": {
@@ -1905,10 +1934,12 @@ LINEAR_SOLVERS = {
         },
     },
     "trilinos_mpi": {
-        "trilinos_aztec_solver": "AztecOO Krylov solver (MPI)",
-        "trilinos_amesos_solver": "Amesos direct solver (MPI)",
-        "trilinos_ml_solver": "ML AMG preconditioner (MPI)",
-        "trilinos_muelu_solver": "MueLu AMG preconditioner (MPI, recommended)",
+        # TrilinosApplication solver_type values; there is no MueLu solver. The Amesos2 types
+        # (amesos2, klu2, basker, ...) exist only in builds with TRILINOS_EXCLUDE_AMESOS2_SOLVER=OFF (default ON)
+        "aztec": "AztecOO Krylov solver (MPI; also cg, bicgstab, gmres)",
+        "amesos": "Amesos direct solver (MPI; also klu, super_lu_dist, mumps)",
+        "multi_level": "ML AMG preconditioned solver (MPI)",
+        "amgcl": "AMGCL AMG solver (MPI)",
     },
 }
 
@@ -1939,10 +1970,14 @@ GLOBAL_PITFALLS = [
     "Check that BCs don't over-constrain the problem (causes singular matrix)",
 
     # ── Common Errors ──
-    "ERROR: 'Variable is not in the model part' -> add variable via AddNodalSolutionStepVariable",
+    "ERROR: 'The variables list doesn't have this variable:' -> add variable via AddNodalSolutionStepVariable",
     "ERROR: 'Element not registered' -> wrong application imported, or typo in element name",
-    "ERROR: 'Zero diagonal in system matrix' -> BCs missing, or element has zero volume",
-    "ERROR: 'Negative Jacobian' -> element nodes in wrong order, or severely distorted mesh",
+    "NO ERROR for missing BCs: Kratos has no 'Zero diagonal in system matrix' error; the block builder silently "
+    "sets the diagonal of all-zero rows, and a singular system (no Dirichlet BCs) solves without an exception to "
+    "a meaningless field. At most the linear solver warns (amgcl: 'Non converged linear solution'; "
+    "skyline_lu_factorization can print 'Error zero sum') -> check BCs and zero-volume elements yourself",
+    "ERROR: 'WARNING:: ELEMENT ID: N INVERTED. DETJ0: ...' (SmallDisplacement/TotalLagrangian/UpdatedLagrangian "
+    "elements) -> element nodes in wrong order, or severely distorted mesh",
 
     # ── Performance ──
     "For > 100k DOFs: use AMGCL iterative solver, not direct LU",

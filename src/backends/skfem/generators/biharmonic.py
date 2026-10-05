@@ -62,7 +62,7 @@ print("Biharmonic solve complete.")
 
 KNOWLEDGE = {
     "biharmonic": {
-        "description": "Biharmonic / plate bending (examples 05, 34, 41)",
+        "description": "Biharmonic / plate bending (examples 02, 08, 20, 34)",
         "solver": "Direct (4th order system needs fine mesh)",
         "elements": "ElementTriMorley (nonconforming), ElementTriArgyris (C1), ElementQuadBFS (C1 quad)",
         "pitfalls": [

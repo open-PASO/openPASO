@@ -4,9 +4,12 @@ Encodes general PD knowledge including pre-cracks, rigid impactors
 via boundaryphase, SPH infrastructure requirements, and CFL calculation.
 
 Key insight: PD in 4C rides on top of the SPH particle framework.  Even
-though the physics is peridynamic (bond-based), the SPH kernel, boundary
-formulation, and transport velocity parameters *must* be specified or the
-code crashes with ``pd_neighbor_pairs = 0``.
+though the physics is peridynamic (bond-based), the PARTICLE DYNAMIC/SPH
+section (SPH kernel, boundary formulation, transport velocity and initial
+particle spacing) *must* be specified: without it INITIALPARTICLESPACING
+defaults to 0.0 and 4C aborts, before 4C 2026.3.0 with ``negative initial
+particle spacing!``, in 4C 2026.3.0 earlier, on its check that
+PERIDYNAMIC_GRID_SPACING equals INITIALPARTICLESPACING.
 """
 
 from __future__ import annotations
@@ -38,8 +41,11 @@ class ParticlePDGenerator(BaseGenerator):
                 "is built on top of the SPH (Smoothed Particle Hydrodynamics) particle "
                 "infrastructure, which means SPH kernel and boundary parameters MUST "
                 "be specified even though the physics is purely peridynamic.  Failing "
-                "to include the SPH sub-section causes the code to crash with "
-                "'pd_neighbor_pairs = 0'."
+                "to include the PARTICLE DYNAMIC/SPH sub-section makes 4C abort "
+                "(INITIALPARTICLESPACING defaults to 0.0): before 4C 2026.3.0 with "
+                "'negative initial particle spacing!'; 4C 2026.3.0 stops earlier, "
+                "on its check that PERIDYNAMIC_GRID_SPACING equals "
+                "INITIALPARTICLESPACING."
             ),
             "required_sections": [
                 "PROBLEM TYPE",
@@ -132,12 +138,27 @@ class ParticlePDGenerator(BaseGenerator):
                         "causes excessive penetration."
                     ),
                     "PRE_CRACKS": (
-                        'Line segments defining pre-existing cracks.  Format: '
+                        "Peridynamics BRANCH builds only: upstream 4C's PARTICLE "
+                        "DYNAMIC/PD has no PRE_CRACKS key and rejects it with "
+                        "'Could not match this input'.  From 4C v2026.2.0 (commit "
+                        "163b10526) upstream pre-cracks are PRE_CRACK_LINES (list of "
+                        "START/END 3-vectors) or PRE_CRACK_PLANES (list of P0/P1/P2 "
+                        "3-vectors).  On a branch build: "
+                        'line segments defining pre-existing cracks.  Format: '
                         '"x1 y1 x2 y2 ; x3 y3 x4 y4".  Bonds crossing these line '
                         "segments are broken at initialization (visibility condition).  "
                         "Multiple crack segments separated by semicolons.  This is the "
                         "mechanism for modeling notches and initial damage without "
-                        "removing particles."
+                        "removing particles.  This is the pre-merge branch form; "
+                        "upstream 4C 2026.2.0 and later read PRE_CRACK_LINES instead."
+                    ),
+                    "PRE_CRACK_LINES": (
+                        "4C 2026.2.0 and later: a list of segments, each '- START: [x1, y1, "
+                        "z1]' and 'END: [x2, y2, z2]'; bonds crossing a segment "
+                        "are broken at initialization.  PRE_CRACK_PLANES is the "
+                        "same with parallelogram patches given by corner points "
+                        "P0, P1, P2; both lists take 3-D points and both are "
+                        "accepted in 2-D peridynamic decks."
                     ),
                 },
                 "PARTICLE DYNAMIC/INITIAL AND BOUNDARY CONDITIONS": {
@@ -270,9 +291,12 @@ class ParticlePDGenerator(BaseGenerator):
                     "particles from the discretization."
                 ),
                 "format": (
+                    'PRE_CRACKS (peridynamics branch builds only, not upstream 4C): '
                     '"x1 y1 x2 y2 ; x3 y3 x4 y4"  -- each segment is defined by '
                     "its two endpoints (2D coordinates).  Multiple segments separated "
-                    "by semicolons."
+                    "by semicolons.  Upstream 4C from v2026.2.0 instead takes "
+                    "PRE_CRACK_LINES, a list of entries with START and END "
+                    "3-vectors (or PRE_CRACK_PLANES with P0/P1/P2)."
                 ),
                 "example": (
                     '"x1 y1 x2 y2 ; x3 y3 x4 y4"  -- multiple line segments separated by semicolons'
@@ -309,11 +333,14 @@ class ParticlePDGenerator(BaseGenerator):
                     "particle's mass, as well as KERNEL, "
                     "KERNEL_SPACE_DIM, BOUNDARYPARTICLEFORMULATION and "
                     "TRANSPORTVELOCITYFORMULATION. Signal: without the "
-                    "section 4C aborts in "
+                    "section a 4C before 2026.3.0 aborts in "
                     "ParticleInteractionSPH::set_initial_states with "
                     "`negative initial particle spacing!` "
                     "(particle/src/interaction/"
-                    "4C_particle_interaction_sph.cpp) — nothing about "
+                    "4C_particle_interaction_sph.cpp); 4C 2026.3.0 stops "
+                    "earlier, at its check that PERIDYNAMIC_GRID_SPACING "
+                    "equals INITIALPARTICLESPACING (measured on the three "
+                    "builds 2026-10-01) — nothing about "
                     "neighbour pairs or boundary formulations is "
                     "mentioned.  Do NOT treat a zero "
                     "`Number of pd_neighbor_pairs in peridynamic "
@@ -403,17 +430,20 @@ class ParticlePDGenerator(BaseGenerator):
                     "2026-08-06.)"
                 ),
                 (
-                    "[Input] Pre-cracks (PRE_CRACKS) must "
+                    "[Input] Pre-cracks (PRE_CRACKS, the pre-merge PD "
+                    "branch's key; 4C 2026.2.0 and later read PRE_CRACK_LINES) must "
                     "use 2D coordinates (x, y) matching the "
                     "particle positions. The visibility "
                     "check is GEOMETRIC — tests whether "
                     "the line segment connecting two "
                     "particles crosses the crack segment. "
-                    "NOTE: PRE_CRACKS is not part of "
-                    "upstream 4C main; it comes from "
-                    "branch work on bond-based "
-                    "peridynamics, so check your build "
-                    "before relying on it. Signal: a crack "
+                    "NOTE: PRE_CRACKS is the form of "
+                    "pre-merge branch work on bond-based "
+                    "peridynamics; upstream 4C 2026.2.0 and "
+                    "later read PRE_CRACK_LINES / "
+                    "PRE_CRACK_PLANES lists of START and "
+                    "END points instead, so check your "
+                    "build before relying on it. Signal: a crack "
                     "in the wrong units (mm vs m, or a "
                     "domain offset that misses the "
                     "particle grid) is accepted in "
@@ -540,10 +570,14 @@ class ParticlePDGenerator(BaseGenerator):
                     "displacement). Add 'PDFIXED 1' to the "
                     "particle definition string. Use for "
                     "clamped supports in fracture problems. "
-                    "NOTE: PDFIXED is not part of upstream "
-                    "4C main; it comes from branch work on "
-                    "bond-based peridynamics, so check your "
-                    "build before relying on it. Signal: "
+                    "NOTE: PDFIXED is the form of pre-merge "
+                    "branch work on bond-based peridynamics; "
+                    "upstream 4C 2026.2.0 and later hold a particle with "
+                    "DIRICHLET_FUNCT <n> on its line plus "
+                    "DIRICHLET_BOUNDARY_CONDITION_FLAGGED: "
+                    "[pdphase], FUNCT<n> being the "
+                    "displacement (all zero pins it), so "
+                    "check your build before relying on it. Signal: "
                     "omitting it on a clamped edge lets "
                     "those particles move freely and 4C "
                     "warns about nothing — the bond count "
@@ -637,10 +671,11 @@ class ParticlePDGenerator(BaseGenerator):
             {
                 "name": "plate_2d",
                 "description": (
-                    "2D plate with a horizontal pre-crack under prescribed "
+                    "2D plate under prescribed "
                     "velocity impact from the left.  Demonstrates all essential PD "
-                    "features: pdphase body, boundaryphase impactor, pre-cracks, "
-                    "CFL-safe time stepping.  Uses mm/ms/g unit system."
+                    "features: pdphase body, boundaryphase impactor, "
+                    "CFL-safe time stepping; the pre-crack syntax is shown as a "
+                    "comment.  Uses mm/ms/g unit system."
                 ),
             },
         ]
@@ -760,6 +795,10 @@ class ParticlePDGenerator(BaseGenerator):
         """Template showing the FORMAT of a 2D PD input. All values are placeholders."""
         return textwrap.dedent("""\
             # 2D Peridynamics: FORMAT TEMPLATE
+            # The pre-crack key depends on the build: the pre-merge peridynamics
+            # extension reads a PRE_CRACKS string, 4C 2026.2.0 and later read
+            # PRE_CRACK_LINES (shown as a comment below). The decks openPASO runs
+            # are served in the grammar of the 4C it finds.
             # ALL numerical values below are PLACEHOLDERS — they must be determined
             # by the user based on the specific problem geometry, material, and
             # required resolution. Consult the literature and 4C test files
@@ -790,7 +829,7 @@ class ParticlePDGenerator(BaseGenerator):
               INTERACTION: "SPH"
               RESULTSEVERY: <OUTPUT_FREQUENCY>
               RESTARTEVERY: <RESTART_FREQUENCY>
-              TIMESTEP: "<dt-from-CFL: dt < 0.5 * dx / sqrt(E/rho)>"
+              TIMESTEP: <dt>  # unquoted number; CFL: dt < 0.5 * dx / sqrt(E/rho)
               NUMSTEP: <total steps>
               MAXTIME: <end time>
               GRAVITY_ACCELERATION: "0.0 0.0 0.0"
@@ -825,7 +864,13 @@ class ParticlePDGenerator(BaseGenerator):
               PD_DIMENSION: Peridynamic_2DPlaneStrain
               NORMALCONTACTLAW: NormalLinearSpring
               NORMAL_STIFF: <contact stiffness>
-              PRE_CRACKS: "<x1> <y1> <x2> <y2> ; <x3> <y3> <x4> <y4>"
+              # Pre-cracks: upstream 4C has no PRE_CRACKS key (peridynamics branch
+              # builds only; upstream rejects it with "Could not match this input").
+              # From 4C v2026.2.0 upstream takes a list instead:
+              # PRE_CRACK_LINES:
+              #   - START: [<x1>, <y1>, 0.0]
+              #     END: [<x2>, <y2>, 0.0]
+              # (or PRE_CRACK_PLANES with corner points P0, P1, P2).
 
             MATERIALS:
               - MAT: 1

@@ -72,7 +72,8 @@ class SSTIGenerator(BaseGenerator):
                     "description": (
                         "Thermo-elastic St. Venant-Kirchhoff material for "
                         "the structural field.  Supports thermal expansion "
-                        "and links to a thermal material via THERMOMAT.  "
+                        "and, on a 4C before 2026.3.0, can link a thermal "
+                        "material via THERMOMAT (4C 2026.3.0 removed the key).  "
                         "Used in combination with scalar-dependent "
                         "inelastic growth for full SSTI coupling."
                     ),
@@ -98,7 +99,8 @@ class SSTIGenerator(BaseGenerator):
                             "range": "any (often 293 K)",
                         },
                         "THERMOMAT": {
-                            "description": "Material ID of the thermal material (MAT_Fourier)",
+                            "description": ("Material ID of the thermal material (MAT_Fourier). "
+                                            "4C before 2026.3.0 only; 4C 2026.3.0 has no THERMOMAT"),
                             "range": "valid MAT ID",
                         },
                     },
@@ -201,7 +203,11 @@ class SSTIGenerator(BaseGenerator):
                     "discretization, but ... the ImplType is "
                     "set Undefined ... Use SOLIDSCATRA, "
                     "WALLSCATRA or SHELLSCATRA elements with "
-                    "meaningful ImplType instead!'. (Verified "
+                    "meaningful ImplType instead!'. (From 4C "
+                    "2026.2.0 on the message no longer lists "
+                    "WALLSCATRA; the element it calls "
+                    "SHELLSCATRA is SHELL7PSCATRA in the input. "
+                    "Verified "
                     "by execution 2026-08-06.  Two earlier "
                     "versions were wrong: 'no SCATRA "
                     "discretisation found' from a "
@@ -335,6 +341,9 @@ class SSTIGenerator(BaseGenerator):
     def _template_monolithic_3d() -> str:
         return textwrap.dedent("""\
             # FORMAT TEMPLATE — all numerical values are placeholders.
+            # Written in the input grammar of 4C before 2026.3.0 (the 2026.2.0 release
+            # included); 4C 2026.3.0 renamed some of the keys below. The decks openPASO runs are served in the grammar of the
+            # 4C it finds.
             # ---------------------------------------------------------------
             # 3-D Monolithic Structure-Scalar-Thermo Interaction (SSTI)
             #
@@ -443,22 +452,36 @@ class SSTIGenerator(BaseGenerator):
                   DENS: <density>
                   THEXPANS: <thermal_expansion_coefficient>
                   INITTEMP: <reference_temperature>
-                  THERMOMAT: 2
               # Fourier heat conduction (thermal field)
               - MAT: 2
                 MAT_Fourier:
                   CAPA: <volumetric_heat_capacity>
                   CONDUCT:
                     constant: [<thermal_conductivity>]
-              # Electrode / scalar transport material
+              # Electrode / scalar transport material, in the form 4C reads
+              # before 2026.3.0. 4C 2026.3.0 rejects this block ("Could not
+              # match this input"): it takes constant DIFF_COEF and COND, the
+              # optional DIFF_COEF_CONC_SCALE_FUNCT, DIFF_COEF_TEMP_SCALE_FUNCT,
+              # COND_CONC_SCALE_FUNCT and COND_TEMP_SCALE_FUNCT, no *_PARA_NUM /
+              # *_PARA lists, and X_MIN / X_MAX inside an optional OCP_MODEL
+              # LITHIATION_BOUNDS group.
               - MAT: 3
                 MAT_electrode:
+                  DIFF_COEF_CONC_DEP_FUNCT: <diff_coef_concentration_function>
+                  DIFF_COEF_TEMP_SCALE_FUNCT: <diff_coef_temperature_function>
+                  COND_CONC_DEP_FUNCT: <cond_concentration_function>
+                  COND_TEMP_SCALE_FUNCT: <cond_temperature_function>
                   DIFF_PARA_NUM: <num_diffusion_parameters>
                   DIFF_PARA: [<diffusion_coefficient>]
                   COND_PARA_NUM: <num_conductivity_parameters>
                   COND_PARA: [<electronic_conductivity>]
                   C_MAX: <max_concentration>
                   CHI_MAX: <max_stoichiometry>
+                  OCP_MODEL:
+                    Function:
+                      OCP_FUNCT_NUM: <ocp_function_id>
+                    X_MIN: <ocp_x_min>
+                    X_MAX: <ocp_x_max>
 
             # Clone structure mesh -> thermo mesh and scatra mesh
             CLONING MATERIAL MAP:

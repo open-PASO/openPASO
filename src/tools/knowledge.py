@@ -85,11 +85,13 @@ def discover_test_dirs() -> dict:
             test_dirs["ngsolve"] = ng_demo
             break
 
-    # Kratos ships Python tests inside each Application:
-    # site-packages/KratosMultiphysics/<App>/tests/*.py. The
-    # tree is broad (many Applications) so we point at the
-    # top KratosMultiphysics dir and let the rglob walk find
-    # *.py matching the keyword.
+    # Kratos wheels ship no test suites: site-packages/
+    # KratosMultiphysics/<App>/ holds only that Application's
+    # python_scripts modules (application tests live in a source
+    # checkout at applications/<App>/tests/*.py; a CMake install
+    # copies them to <prefix>/applications/<App>/tests). We point
+    # at the installed KratosMultiphysics dir, so the rglob walk
+    # finds those modules' *.py matching the keyword, not tests.
     kratos_candidates = [
         Path(__file__).resolve().parents[2] / ".venv" / "lib"
         / "python3.12" / "site-packages" / "KratosMultiphysics",
@@ -341,9 +343,15 @@ IF YOU HAVE DELIVERED AND WANT TO KNOW WHETHER IT IS RIGHT
        CONDITIONS` with a `DNODE-NODE TOPOLOGY` block sets a different value at
        every named node, which is exactly what a Dirichlet-Neumann interface
        needs. A run that reports this as a 4C limitation is wrong.
-     * FEBio DOES ACCEPT A POSITION-DEPENDENT BODY FORCE, as a `<body_load>`
-       component carrying `type="math"`. Without that attribute the expression
-       is silently truncated to its numeric prefix.
+     * FEBio DOES ACCEPT A POSITION-DEPENDENT BODY FORCE: `<body_load
+       type="body force">` with `<force type="math">fx, fy, fz</force>`, or
+       `<body_load type="non-const">`, whose `<x>`/`<y>`/`<z>` are read as math
+       even without the attribute. Without `type="math"`, `<force>` silently
+       truncates an expression in its LAST component to the numeric prefix
+       (`0, 0, -1*X` acts as the constant (0, 0, -1)), and any other
+       expression there (an earlier component, or no leading number) stops
+       the read with "syntax error". `type="const"` components take numbers
+       only: an expression is truncated silently and `type="math"` is refused.
 
 WHERE THE DELIVERABLE HAS TO END UP
 ──────────────────────────────────
@@ -716,9 +724,15 @@ SEVEN RULES THAT APPLY WHATEVER YOU ASKED FOR
        problem with the condition's content. Measured on one deck: E:0 -> exit
        139, the SAME deck with E:1 -> "processor 0 finished normally", exit 0.
        Check the digit before rewriting section names or element types.
-     * FEBio DOES ACCEPT A POSITION-DEPENDENT BODY FORCE, as a `<body_load>`
-       component carrying `type="math"`. Without that attribute the expression
-       is silently truncated to its numeric prefix.
+     * FEBio DOES ACCEPT A POSITION-DEPENDENT BODY FORCE: `<body_load
+       type="body force">` with `<force type="math">fx, fy, fz</force>`, or
+       `<body_load type="non-const">`, whose `<x>`/`<y>`/`<z>` are read as math
+       even without the attribute. Without `type="math"`, `<force>` silently
+       truncates an expression in its LAST component to the numeric prefix
+       (`0, 0, -1*X` acts as the constant (0, 0, -1)), and any other
+       expression there (an earlier component, or no leading number) stops
+       the read with "syntax error". `type="const"` components take numbers
+       only: an expression is truncated silently and `type="math"` is refused.
 
 7. REFINEMENT COUNTS HALVINGS, NOT CELLS. `refined(k)` (scikit-fem),
    `refine_global(k)` (deal.II), `globalRefine(k)` (DUNE) give 2^k cells per
@@ -811,16 +825,21 @@ Full detail, per backend: knowledge(topic="physics", solver=..., physics=...)
                            point, and 1.000000 exactly at a node.
         NGSolve            u(mesh(px, py))          -- mesh(...) locates the
                            element and evaluates inside it
-        DUNE-fem           uh(global_point) if your version supports it,
-                           otherwise uh.localFunction(element) with the LOCAL
-                           coordinate from element.geometry.local(point).
-                           NOT RE-VERIFIED on this install at the time of
-                           writing -- treat as the shape of the call, not as a
-                           checked signature, and print the result at a node
-                           where you know the answer before trusting it.
-        Kratos             no built-in point evaluator: find the element whose
-                           nodes bracket the point and combine its nodal
-                           values with the shape functions -- for a P1
+        DUNE-fem           dune.fem.utility.pointSample(uh, [x, y]) for a
+                           global point (it locates the element), or per
+                           element uh(e, e.geometry.toLocal(point)) /
+                           uh.localFunction(e)(e.geometry.toLocal(point)).
+                           The Python method is toLocal (there is no
+                           geometry.local), and uh(global_point) is not
+                           supported in 2.12: it falls through to UFL
+                           evaluation and did not return within 150 s
+                           (measured).
+        Kratos             point_output_process / multiple_points_output_process
+                           write the interpolated value at given points; in a
+                           script: loc = KM.BinBasedFastPointLocator2D(mp);
+                           loc.UpdateSearchDatabase();
+                           found, N, elem = loc.FindPointOnMesh(KM.Array3([x, y, 0]))
+                           then sum N[k]*u_k over elem.GetNodes() -- for a P1
                            triangle that is the barycentric combination
                            l1*u1 + l2*u2 + l3*u3
         4C                 read the VTU and interpolate in the containing
@@ -1034,16 +1053,17 @@ being fluent in one is no help in another:
   Kratos       a process declared in the JSON runs only if it is IN the right
                list — `loads_process_list`, `constraints_process_list`. A
                declared-but-unlisted process is never executed.
-  FEBio        a load applies only through an ACTIVE load controller: the
-               `<nodal_load>`/`<body_load>` value needs `lc="<id>"` and that
-               `<load_controller>` must exist in `<LoadData>` with points that
-               are non-zero over your step.
+  FEBio        a `<nodal_load>`/`<body_load>` value without `lc=` is applied
+               at full value in every step (constant in time). `lc="<id>"`
+               scales it by that `<load_controller>`, which must then exist in
+               `<LoadData>` (else "Invalid load curve ID") with points that are
+               non-zero over your step.
   4C           `VAL` MULTIPLIES `FUNCT`. `FUNCT: [0]` means NO function and
                `VAL: [0.0]` scales any function to nothing. For a manufactured
                source you almost always want `VAL: [1.0], FUNCT: [1]`.
-  SPARTA       a `compute` produces no output by itself. A `fix ave/time`
-               (or dump/print) must reference it as `c_<id>` for any number to
-               be written at all.
+  SPARTA       a `compute` produces no output by itself. `stats_style`, a
+               `fix ave/time`, a dump or a print must reference it as `c_<id>`
+               (a print as `$(c_<id>)`) for any number to be written at all.
 
 THE CHECK COSTS ONE COMMAND. Before you believe a result, grep your own input
 for the ingredient's name and confirm something CONSUMES it. A driven problem
@@ -1291,7 +1311,9 @@ def register_knowledge_tools(mcp: FastMCP):
    combined eletype, NOT plain `SOLID HEX8` (structure-only) or
    the legacy `WALL` 2D eletype.
    - SOLIDSCATRA combines structural + scalar transport capabilities
-   - No 2D TSI element exists. A 2D PLANE-STRAIN problem is NOT out of
+   - No 2D TSI runs: a 4C before 2026.2.0 has no 2D SOLIDSCATRA, and on 4C
+     2026.2.0 and 2026.3.0 a 2D SOLIDSCATRA passes the input check and TSI then stops with
+     "Unsupported solid element type!". A 2D PLANE-STRAIN problem is NOT out of
      reach: run it as a ONE-ELEMENT-THICK SOLIDSCATRA HEX8 slab with u_z
      pinned on every node (exact plane strain, not an approximation).
      `prepare_simulation(solver='fourc', physics='tsi')` serves that slab
@@ -1310,7 +1332,8 @@ def register_knowledge_tools(mcp: FastMCP):
          DENS: 1.0            # Density
          THEXPANS: 1.2e-5     # Thermal expansion coefficient (1/K)
          INITTEMP: 0.0        # Reference temperature
-         THERMOMAT: 2         # Links to thermal material ID
+         # no THERMOMAT: 4C 2026.3.0 rejects it; the CLONING MATERIAL MAP below
+         # pairs MAT 1 with MAT 2 in every release
      - MAT: 2
        MAT_Fourier:
          CAPA: 1.0            # Heat capacity
@@ -1554,7 +1577,7 @@ direction, which is not what "one-way TSI" usually means.
 2. **CLONING MAP is mandatory** — without it, 4C crashes at initialization
 3. **THEXPANS units** — must be consistent with temperature units (1/K or 1/°C)
 4. **INITTEMP** — the reference temperature for zero thermal strain
-5. **No 2D TSI element** — a 2D plane-strain problem runs as a
+5. **No 2D TSI run** (every 4C measured: a build with WALL, 2026.2.0, 2026.3.0) — a 2D plane-strain problem runs as a
    one-element-thick SOLIDSCATRA HEX8 slab with u_z pinned everywhere
    (exact plane strain; served by `prepare_simulation(solver='fourc',
    physics='tsi')`). Do not conclude that 4C cannot do 2D thermo-mechanics.

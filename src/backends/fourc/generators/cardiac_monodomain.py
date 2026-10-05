@@ -3,7 +3,7 @@
 Covers cardiac electrophysiology using the monodomain equation.  The
 monodomain model is a reaction-diffusion PDE that describes the propagation
 of the transmembrane potential through cardiac tissue.  It couples with
-ionic cell models (e.g. Aliev-Panfilov, ten Tusscher) that represent the
+ionic cell models (e.g. Bueno-Orovio minimal, ten Tusscher) that represent the
 local ionic currents at each point in the myocardium.  Applications include
 simulation of action potential propagation, arrhythmia modeling, and
 cardiac resynchronization therapy planning.
@@ -35,7 +35,8 @@ class CardiacMonodomainGenerator(BaseGenerator):
                 "the bidomain equations under the assumption of equal "
                 "anisotropy ratios in intra- and extracellular conductivity "
                 "tensors.  The reaction term is provided by an ionic cell "
-                "model (e.g. Aliev-Panfilov, FitzHugh-Nagumo, ten Tusscher) "
+                "model (e.g. Bueno-Orovio minimal, FitzHugh-Nagumo, "
+                "ten Tusscher) "
                 "that describes local ionic currents.  The diffusion tensor "
                 "is anisotropic, aligned with the myocardial fiber "
                 "orientation.  The PROBLEM TYPE is 'Cardiac_Monodomain'.  "
@@ -97,9 +98,11 @@ class CardiacMonodomainGenerator(BaseGenerator):
                         },
                         "MODEL": {
                             "description": (
-                                "Ionic cell model name (e.g. "
-                                "'AlievPanfilov', 'FitzhughNagumo', "
-                                "'tenTusscher')"
+                                "Ionic cell model: 'MV' (Bueno-Orovio "
+                                "minimal model, default), 'FHN' "
+                                "(FitzHugh-Nagumo), 'TNNP' (ten Tusscher), "
+                                "'SAN' or 'INADA'; any other string aborts "
+                                "('Myocard Material type is not supported!')"
                             ),
                             "range": "string",
                         },
@@ -247,7 +250,7 @@ class CardiacMonodomainGenerator(BaseGenerator):
                 "name": "monodomain_3d",
                 "description": (
                     "3-D cardiac monodomain: action potential propagation "
-                    "in a tissue slab.  MAT_myocard with Aliev-Panfilov "
+                    "in a tissue slab.  MAT_myocard with a selectable "
                     "ionic model, anisotropic diffusion, UMFPACK solver."
                 ),
             },
@@ -329,6 +332,7 @@ class CardiacMonodomainGenerator(BaseGenerator):
                   DIFF3: <diffusion_normal>
                   PERTURBATION_DERIV: <perturbation_derivative>
                   MODEL: "<ionic_cell_model>"
+                  TIME_SCALE: <time_scale_factor>  # required; upstream decks use 1
 
             # == Initial condition: resting potential ==========================
             FUNCT<initial_potential_function_id>:
@@ -435,8 +439,7 @@ class CardiacMonodomainGenerator(BaseGenerator):
         # Check ionic model
         model = params.get("MODEL")
         known_models = {
-            "AlievPanfilov", "FitzhughNagumo", "tenTusscher",
-            "SanGarciaBueno", "Minimal",
+            "MV", "FHN", "TNNP", "SAN", "INADA",
         }
         if model is not None and model not in known_models:
             issues.append(

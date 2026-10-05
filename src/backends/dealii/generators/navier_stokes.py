@@ -1,6 +1,6 @@
 """deal.II Navier-Stokes generators and knowledge.
 
-Based on step-57 (stationary NS), step-35 (Boussinesq), step-55 (Stokes MPI).
+Based on step-57 (stationary NS), step-35 (transient NS, projection method), step-55 (Stokes MPI).
 """
 
 
@@ -256,7 +256,7 @@ def _navier_stokes_2d(params: dict) -> str:
 
 KNOWLEDGE = {
     "description": "Navier-Stokes (stationary and transient) — step-57, step-35, step-55",
-    "tutorial_steps": ["step-57 (stationary NS, Newton)", "step-35 (Boussinesq buoyancy)",
+    "tutorial_steps": ["step-57 (stationary NS, Newton)", "step-35 (incompressible NS, projection method)",
                        "step-55 (Stokes, MPI parallel)"],
     "function_space": "FESystem<dim>(FE_Q<dim>(2), dim, FE_Q<dim>(1), 1) — Taylor-Hood Q2/Q1",
     "solver": "Newton iteration for nonlinear convection term, UMFPACK or GMRES+ILU for linear sub-problems",

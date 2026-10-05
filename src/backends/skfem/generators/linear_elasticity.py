@@ -136,17 +136,20 @@ KNOWLEDGE = {
             "same small values as sigma=0 but is much slower. "
             "(Verified empirically 2026-08-03.)",
             "[API] Boundary identification by name (e.g., "
-            "basis.get_dofs(elements='left')) requires that the "
-            "mesh has had subdomains and boundaries TAGGED "
-            "explicitly. A bare mesh created by MeshTri() / "
-            "MeshQuad() carries no tags by default — querying "
-            "with an unknown tag raises ValueError 'Boundary "
-            "\\'left\\' not found' (catch via try/except, or "
-            "use skfem.Mesh.with_boundaries to tag first). "
-            "Signal: get_dofs(elements='left') with no tagging "
-            "raises ValueError mentioning the missing tag "
-            "name. (Verified empirically — see "
-            "boundary_not_tagged Tier-2 fixture.)",
+            "basis.get_dofs('left') or basis.get_dofs("
+            "facets='left')) requires that the mesh has had its "
+            "boundaries TAGGED explicitly. A bare mesh created "
+            "by MeshTri() / MeshQuad() carries no tags by "
+            "default — querying an unknown boundary name raises "
+            "ValueError 'Boundary \\'left\\' not found.' (catch "
+            "via try/except, or use skfem.Mesh.with_boundaries "
+            "to tag first). Note that get_dofs(elements='left') "
+            "is a SUBDOMAIN lookup (Mesh.with_subdomains) and "
+            "raises ValueError 'Subdomain \\'left\\' not found.', "
+            "even on a mesh tagged with with_boundaries. "
+            "Signal: a ValueError naming the missing tag. "
+            "(Verified empirically — see boundary_not_tagged "
+            "Tier-2 fixture.)",
         ],
     },
 }

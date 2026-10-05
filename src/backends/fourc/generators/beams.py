@@ -401,11 +401,15 @@ class BeamsGenerator(BaseGenerator):
                     "[API] Beam material names use CamelCase WITHOUT inner underscores: "
                     "MAT_BeamReissnerElastHyper (NOT MAT_Beam_Reissner_ElastHyper), "
                     "MAT_BeamKirchhoffElastHyper, MAT_BeamKirchhoffTorsionFreeElastHyper, "
-                    "MAT_BeamReissnerElastPlastic, and four '_ByModes' parameterization "
-                    "variants. The catalog previously had wrong underscore-separated forms. "
+                    "MAT_BeamReissnerElastPlastic, and three '_ByModes' parameterization "
+                    "variants (MAT_BeamReissnerElastHyper_ByModes, "
+                    "MAT_BeamKirchhoffElastHyper_ByModes, "
+                    "MAT_BeamKirchhoffTorsionFreeElastHyper_ByModes). The catalog "
+                    "previously had wrong underscore-separated forms. "
                     "Signal: invalid material name fails at YAML parse with "
                     "input_spec_builders.cpp 'Could not match this input'. Verified against "
-                    "4C 2026.3 MATERIALS schema 2026-06-01. "
+                    "4C's MATERIALS grammar 2026-06-01; the same seven names in 4C "
+                    "2026.2.0 and 2026.3.0 (2026-09-30). "
                 ),
                 (
                     "[API] BEAM3R supports LINE2/LINE3/LINE4/LINE5; BEAM3K supports "

@@ -151,8 +151,9 @@ KNOWLEDGE = {
             "combined with FE_DGQ on cells, trace unknowns live "
             "only on faces, cheaper than full DG.",
         "FE_DGP":
-            "DG monomial basis; alternative to FE_DGQ for "
-            "higher-order accurate transport.",
+            "DG P_k space with a Legendre (L2-orthonormal) basis; "
+            "alternative to FE_DGQ for higher-order accurate "
+            "transport.",
         "FE_Q_Hierarchical":
             "For hp-adaptive refinement around shock layers; "
             "combine with anisotropic refinement (step-30) so "
@@ -166,7 +167,7 @@ KNOWLEDGE = {
         "merge_triangulations": "Heterogeneous-coefficient demos (high-diff + low-diff patches).",
     },
     "solvers": [
-        "SolverBiCGStab<>             — non-symmetric system from convection term; best for SUPG",
+        "SolverBicgstab<>             — non-symmetric system from convection term; best for SUPG",
         "SolverGMRES<>                — robust alternative; works when BiCGStab stagnates",
         "SparseDirectUMFPACK          — for DG up to ~10^4 cells; block-diagonal mass makes direct solves cheap",
     ],

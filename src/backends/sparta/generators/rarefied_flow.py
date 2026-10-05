@@ -103,7 +103,11 @@ compute          tmax reduce max f_ftg
 # smaller than the local mean free path
 compute          nr grid all species nrho
 fix              fnr ave/grid all 10 20 200 c_nr[*]
-compute          lam lambda/grid f_fnr[*] f_ftg lambda knall
+# one species: fnr averages one value, so it is a per-grid VECTOR, named
+# f_fnr. With several species it is an array, named f_fnr[*]; SPARTA
+# 27Aug2026 refuses f_fnr[*] on a vector ('Cannot use wildcard with
+# f_fnr[*] because it does not produce multiple values').
+compute          lam lambda/grid f_fnr f_ftg lambda knall
 compute          knmin reduce min c_lam[2]
 timestep         {dt}
 stats            200
@@ -137,7 +141,9 @@ KNOWLEDGE = {
                                     "per-cell mean velocity removed",
             "compute lambda/grid": "compute <ID> lambda/grid <nrho-src> "
                                    "<temp-src> lambda knall — column 1 is the "
-                                   "mean free path, column 2 is Kn_cell",
+                                   "mean free path, column 2 is Kn_cell. A fix "
+                                   "as <nrho-src> is f_ID for one species, "
+                                   "f_ID[*] for several",
             "compute dt/grid": "compute <ID> dt/grid <grp> <tfrac> <cfrac> "
                                "<tau> <temp> <usq> <vsq> <wsq> — recommended "
                                "per-cell timestep",
@@ -161,13 +167,19 @@ KNOWLEDGE = {
             "(cells larger than a mean free path). SPARTA never checks this "
             "for you and never warns.",
 
-            "[Numerical] compute lambda/grid and compute dt/grid read from a "
-            "fix ave/grid that has produced no output yet, so on the first "
-            "stats line they return SPARTA's no-data sentinel, not a physical "
-            "value. The sentinel is BIG = 1e+20 (compute_lambda_grid.cpp:37), "
-            "written into lambda whenever a cell's number density is zero; the "
-            "Kn column then carries lambda/cell-size, so its magnitude depends "
-            "on your cell size (1e+24 at a 1e-4 m cell, 1e+25 at 1e-5 m). "
+            "[Numerical] compute lambda/grid reads from a fix ave/grid that "
+            "has produced no output yet, so on the first stats line it "
+            "returns SPARTA's no-data sentinel, not a physical value. The "
+            "sentinel is BIG = 1e+20 (compute_lambda_grid.cpp:37), written "
+            "into lambda whenever a cell's number density is zero; the "
+            "per-cell Kn column then carries lambda/cell-size, so its "
+            "magnitude depends on your cell size (1e+24 at a 1e-4 m cell, "
+            "1e+25 at 1e-5 m), which a compute reduce max "
+            "shows, while a compute reduce min reads exactly 1e+20 because "
+            "reduce min starts from 1e+20. compute dt/grid fed from the same "
+            "fixes returns 0 instead: it writes 0 for every cell with no "
+            "particles or zero tau, temperature or speed "
+            "(compute_dt_grid.cpp:594). "
             "Step 0 is NOT the only exposure: any cell that holds no particles "
             "keeps the sentinel on EVERY stats line, so on a grid refined past "
             "one particle per cell the maximum stays at 1e+20 forever while "
@@ -294,9 +306,9 @@ KNOWLEDGE = {
             "the analogous element geometry (id, v1x..v3z, xc/yc/zc, area, "
             "normx/normy/normz). "
             "Signal: 'ERROR: Compute reduce compute does not calculate a "
-            "per-grid array (../compute_reduce.cpp:232)' when you bracket a "
+            "per-grid array (../compute_reduce.cpp:232)' (line 236 in 27Aug2026) when you bracket a "
             "one-attribute property/grid, 'ERROR: Compute reduce compute does "
-            "not calculate a per-grid vector (../compute_reduce.cpp:229)' when "
+            "not calculate a per-grid vector (../compute_reduce.cpp:229)' (line 233 in 27Aug2026) when "
             "you do not bracket a multi-attribute one or a compute grid, "
             "'ERROR: Invalid keyword in compute property/grid command "
             "(../compute_property_grid.cpp:84)' for a flow quantity, and "
@@ -314,9 +326,9 @@ KNOWLEDGE = {
             "mode and two DIFFERENT input columns, so it cannot be used on a "
             "single-value reduce. "
             "Signal: 'ERROR: Stats compute does not compute scalar "
-            "(../stats.cpp:678)' when a per-particle or per-surf compute is "
+            "(../stats.cpp:678)' (line 787 in 27Aug2026) when a per-particle or per-surf compute is "
             "named in stats_style, and 'ERROR: Illegal compute reduce command "
-            "(../compute_reduce.cpp:168)' for a replace pair that names one "
+            "(../compute_reduce.cpp:168)' (line 170 in 27Aug2026) for a replace pair that names one "
             "column or a column past the end. (Verified 2026-08-07)",
 
 ],

@@ -210,29 +210,41 @@ except ImportError as e:
 
 
 def smoke_fourc() -> SmokeResult:
-    """Smoke test: check 4C binary runs --version."""
-    import os, shutil
+    """Smoke test: the 4C binary starts and prints its usage.
+
+    `4C --help` exits 0 and names the program ("Comprehensive Computational
+    Community Code") on a development build before 2026.2.0, on 4C 2026.2.0 and
+    on 4C 2026.3.0 alike. `--version` is not an option of 4C: all three exit 109
+    with "The following argument was not expected: --version", so the verdict
+    comes from the exit code and that text, never from the call merely
+    returning."""
     t0 = time.time()
-    binary = os.environ.get("FOURC_BINARY", "")
-    if not binary:
-        for p in [os.path.expanduser("~/4C/build/4C"), "/opt/4C/build/4C"]:
-            if Path(p).exists():
-                binary = p; break
+    # The backend's own finder, so the smoke test checks the binary openPASO
+    # will run (a Spack-built 4C included), not a shorter list of its own.
+    from backends.fourc.backend import _find_fourc_binary
+    found = _find_fourc_binary()
+    binary = str(found) if found else ""
     if not binary or not Path(binary).exists():
         return SmokeResult("fourc", False, error="Binary not found",
                            duration_ms=0)
+    # The libraries of a source build, but never for a Spack build.
+    from backends.fourc.backend import fourc_library_env
+    env = fourc_library_env(binary)
+    env.pop("DISPLAY", None)
     try:
-        r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
-        dt = (time.time() - t0) * 1000
-        version = ""
-        for line in (r.stdout + r.stderr).splitlines():
-            if "Multi-Physics" in line or "Release" in line:
-                version = line.strip(); break
-        return SmokeResult("fourc", True, version=version or "found",
-                           duration_ms=round(dt, 1))
+        r = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL, env=env)
     except Exception as e:
         return SmokeResult("fourc", False, error=str(e),
                            duration_ms=round((time.time()-t0)*1000, 1))
+    dt = round((time.time() - t0) * 1000, 1)
+    text = r.stdout + r.stderr
+    if r.returncode != 0 or "Comprehensive Computational Community Code" not in text:
+        tail = " ".join(text.split())[-300:]
+        return SmokeResult("fourc", False,
+                           error=f"`{binary} --help` exited {r.returncode}: {tail}",
+                           duration_ms=dt)
+    return SmokeResult("fourc", True, version="found", duration_ms=dt)
 
 
 # ── Registry ─────────────────────────────────────────────────

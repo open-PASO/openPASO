@@ -23,9 +23,10 @@ from core.registry import get_backend
 
 _4C_SCHEMAS = {
     "Scalar_Transport": {
-        "required_sections": ["PROBLEM TYPE", "SCALAR TRANSPORT DYNAMIC", "SOLVER 1", "MATERIALS", "TRANSPORT GEOMETRY"],
+        # <FIELD> GEOMETRY is optional: the mesh may equally come inline (NODE COORDS + <FIELD> ELEMENTS).
+        "required_sections": ["PROBLEM TYPE", "SCALAR TRANSPORT DYNAMIC", "SOLVER 1", "MATERIALS"],
         "dynamics_keys": {
-            "TIMEINTEGR": {"allowed": ["Stationary", "BDF2", "OneStepTheta"], "default": "Stationary"},
+            "TIMEINTEGR": {"allowed": ["Stationary", "One_Step_Theta", "BDF2", "Gen_Alpha"], "default": "One_Step_Theta"},
             "SOLVERTYPE": {"allowed": ["linear_full", "nonlinear"], "default": "linear_full"},
             "VELOCITYFIELD": {"allowed": ["zero", "function", "Navier_Stokes"], "default": "zero"},
         },
@@ -36,7 +37,8 @@ _4C_SCHEMAS = {
     "Structure": {
         "required_sections": ["PROBLEM TYPE", "STRUCTURAL DYNAMIC", "SOLVER 1", "MATERIALS"],
         "dynamics_keys": {
-            "DYNAMICTYPE": {"allowed": ["Statics", "GenAlpha", "GenAlphaLieGroup", "ExplEuler", "OneStepTheta"]},
+            "DYNAMICTYPE": {"allowed": ["Statics", "GenAlpha", "GenAlphaLieGroup", "OneStepTheta", "ExplicitEuler",
+                                        "CentrDiff", "AdamsBashforth2", "AdamsBashforth4"]},
         },
         "materials": ["MAT_Struct_StVenantKirchhoff", "MAT_ElastHyper", "MAT_Struct_PlasticNlnLogNeoHooke",
                        "MAT_BeamReissnerElastHyper", "MAT_BeamKirchhoffTorsionFreeElastHyper"],
@@ -44,9 +46,9 @@ _4C_SCHEMAS = {
         "element_categories": ["SOLID", "WALL", "BEAM3R", "BEAM3EB", "BEAM3K"],
     },
     "Fluid": {
-        "required_sections": ["PROBLEM TYPE", "FLUID DYNAMIC", "SOLVER 1", "MATERIALS", "FLUID GEOMETRY"],
+        "required_sections": ["PROBLEM TYPE", "FLUID DYNAMIC", "SOLVER 1", "MATERIALS"],
         "dynamics_keys": {
-            "TIMEINTEGR": {"allowed": ["Np_Gen_Alpha", "BDF2", "OneStepTheta", "Stationary"]},
+            "TIMEINTEGR": {"allowed": ["Stationary", "Np_Gen_Alpha", "Af_Gen_Alpha", "One_Step_Theta", "BDF2"]},
         },
         "materials": ["MAT_fluid"],
         "geometry_section": "FLUID GEOMETRY",
@@ -54,8 +56,7 @@ _4C_SCHEMAS = {
     },
     "Fluid_Structure_Interaction": {
         "required_sections": ["PROBLEM TYPE", "STRUCTURAL DYNAMIC", "FLUID DYNAMIC", "ALE DYNAMIC",
-                               "FSI DYNAMIC", "SOLVER 1", "MATERIALS", "STRUCTURE GEOMETRY", "FLUID GEOMETRY",
-                               "CLONING MATERIAL MAP"],
+                               "FSI DYNAMIC", "SOLVER 1", "MATERIALS", "CLONING MATERIAL MAP"],
         "materials": ["MAT_fluid", "MAT_ElastHyper", "MAT_Struct_StVenantKirchhoff"],
     },
 }
@@ -115,20 +116,12 @@ def _validate_4c_deep(content: str) -> list[str]:
     if problem_type == "Fluid_Structure_Interaction":
         if "CLONING MATERIAL MAP" not in data:
             errors.append("FSI requires CLONING MATERIAL MAP section")
-        if "FSI DYNAMIC" in data:
-            fsi = data["FSI DYNAMIC"]
-            if isinstance(fsi, dict) and "MONOLITHIC SOLVER" in fsi:
-                mono = fsi["MONOLITHIC SOLVER"]
-                if isinstance(mono, dict) and not mono.get("SHAPEDERIVATIVES"):
-                    warnings.append("FSI: SHAPEDERIVATIVES should be true in MONOLITHIC SOLVER")
+        # MONOLITHIC SOLVER is its own top-level section, not a key inside FSI DYNAMIC.
+        mono = data.get("FSI DYNAMIC/MONOLITHIC SOLVER")
+        if isinstance(mono, dict) and not mono.get("SHAPEDERIVATIVES"):
+            warnings.append("FSI: SHAPEDERIVATIVES should be true in FSI DYNAMIC/MONOLITHIC SOLVER")
 
-    # Known pitfall detection
-    if problem_type == "Scalar_Transport":
-        scatra = data.get("SCALAR TRANSPORT DYNAMIC", {})
-        if isinstance(scatra, dict):
-            if "VELOCITYFIELD" not in scatra:
-                warnings.append("PITFALL: VELOCITYFIELD should be 'zero' for pure diffusion (not omitted)")
-
+    # Known pitfall detection (VELOCITYFIELD needs no check: its default is "zero")
     if problem_type == "Structure":
         struct = data.get("STRUCTURAL DYNAMIC", {})
         if isinstance(struct, dict):
@@ -140,7 +133,7 @@ def _validate_4c_deep(content: str) -> list[str]:
                         kinem_needed = "nonlinear"
                         if struct.get("DYNAMICTYPE") == "Statics":
                             pass  # check in geometry
-            if struct.get("DYNAMICTYPE") in ("GenAlpha", "GenAlphaLieGroup", "ExplEuler"):
+            if struct.get("DYNAMICTYPE") in ("GenAlpha", "GenAlphaLieGroup", "ExplicitEuler"):
                 # Check DENS in materials
                 for mat in (materials if isinstance(materials, list) else []):
                     if isinstance(mat, dict):

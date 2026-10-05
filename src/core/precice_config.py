@@ -79,13 +79,16 @@ def validate_precice_spec(participants: list, data: list, exchanges: list, *,
     """Refuse a preCICE configuration that would run but not couple.
 
     Every check here corresponds to a config the generator used to emit happily:
-    an empty exchange list (preCICE aborts on a blank <exchange> block, but only
-    after every solver has started, so it reads as a solver failure), a
-    participant that reads a field nobody sends it (a bare KeyError out of the
-    generator, or worse a full receive-mesh block with no m2n behind it), a third
-    participant that appears in no exchange and therefore runs an uncoupled solo
-    time loop and exits 0, and a serial-implicit acceleration on data flowing the
-    wrong way, which preCICE refuses to load.
+    an empty exchange list (preCICE rejects that config in each participant's
+    own Participant constructor, before its version banner and without waiting
+    for a partner: "Tag <exchange> was not found but is required to occur at
+    least once."), a participant that reads a field nobody sends it (a bare
+    KeyError out of the generator, or worse a full receive-mesh block with no
+    m2n behind it), a third participant that appears in no exchange and is
+    therefore in no coupling scheme, which preCICE aborts in its Participant
+    constructor ("No coupling scheme defined for participant ...", exit 255),
+    and a serial-implicit acceleration on data flowing the wrong way, which
+    preCICE refuses to load.
 
     Returns advisory notes (worth saying, not worth refusing over) and raises
     ValueError, naming the offending entry, for the rest.
@@ -100,8 +103,9 @@ def validate_precice_spec(participants: list, data: list, exchanges: list, *,
     if not exchanges:
         raise ValueError(
             "no exchanges: an empty exchange list generates a config with no data "
-            "transfer at all. preCICE rejects it only once every solver has "
-            "started, so it looks like a solver failure rather than a setup one.")
+            "transfer at all. preCICE rejects it only at run time, as each solver "
+            "constructs its Participant (\"Tag <exchange> was not found but is "
+            "required to occur at least once.\"), not when the config is generated.")
     for ex in exchanges:
         for key in ("data", "from", "to"):
             if key not in ex:
@@ -133,9 +137,11 @@ def validate_precice_spec(participants: list, data: list, exchanges: list, *,
     orphan = [n for n in names if n not in touched]
     if orphan:
         raise ValueError(
-            f"participant(s) {orphan} take part in no exchange. preCICE accepts "
-            "that config, gives them no m2n and no place in the coupling scheme, "
-            "and they run an uncoupled solo time loop and exit 0.")
+            f"participant(s) {orphan} take part in no exchange. The generated "
+            "config gives them no m2n and no place in the coupling scheme, and "
+            "preCICE aborts each of them in its Participant constructor with "
+            "\"No coupling scheme defined for participant ...\" (exit 255) while "
+            "the others couple normally.")
     if len(participants) > 2:
         raise ValueError(
             f"{len(participants)} participants: this generator emits a two-participant "
@@ -195,7 +201,10 @@ def generate_precice_config(
         time_window, max_time: coupling time control
         max_iterations, convergence_tol: implicit-scheme controls (ignored for explicit)
         acceleration: {"type": "aitken"|"IQN-ILS", "data": data_name, "mesh": mesh_name,
-                       "initial_relaxation": float} — for implicit schemes
+                       "initial_relaxation": float} — for implicit schemes. Without it,
+                       serial-implicit relaxes a datum sent from the second participant to
+                       the first (preCICE requires that), and parallel-implicit relaxes every
+                       exchanged datum.
         mapping: "nearest-neighbor" | "nearest-projection" | "rbf"
 
     Returns:
@@ -286,14 +295,24 @@ def generate_precice_config(
                     "serial-implicit acceleration must use data exchanged from "
                     f"{names[1]} to {names[0]}; {acceleration.get('data')!r} is not "
                     f"(candidates: {back}). preCICE refuses such a config.")
-            acc_data = acceleration["data"] if acceleration else back[0]
+            acc_data = [acceleration["data"] if acceleration else back[0]]
+        elif acceleration:
+            acc_data = [acceleration["data"]]
         else:
-            acc_data = acceleration["data"] if acceleration else exchanges[0]["data"]
-        acc = acceleration or {"type": "aitken", "data": acc_data,
-                               "mesh": writer_mesh[acc_data][1],
-                               "initial_relaxation": initial_relaxation}
+            # A PARALLEL-implicit scheme relaxes EVERY exchanged field by default. Both
+            # participants solve from the other's previous iterate, so a relaxation on one
+            # field leaves the other unrelaxed. Measured 2026-09-30 with the served FEniCSx
+            # loop (a transient heat solid against a lumped wall model, 10 windows,
+            # max-iterations 50): Aitken on the heat flux alone ran every window to
+            # max-iterations, and the wall temperature ended NaN while both participants
+            # exited 0; Aitken on both fields converged to the serial-implicit wall
+            # temperature within 3e-9. preCICE 3.1.2 accepts several data in one Aitken block.
+            acc_data = [ex["data"] for ex in exchanges]
+        acc = acceleration or {"type": "aitken", "initial_relaxation": initial_relaxation}
         cs.append(f'    <acceleration:{acc["type"]}>')
-        cs.append(f'      <data mesh="{acc["mesh"]}" name="{acc["data"]}" />')
+        for dn in acc_data:
+            mesh_of = acc["mesh"] if acceleration else writer_mesh[dn][1]
+            cs.append(f'      <data mesh="{mesh_of}" name="{dn}" />')
         cs.append(f'      <initial-relaxation value="{acc.get("initial_relaxation",0.5)}" />')
         cs.append(f'    </acceleration:{acc["type"]}>')
     cs.append(f'  </coupling-scheme:{scheme}>')
@@ -480,8 +499,10 @@ def run_precice_coupling(
         max_time=max_time, time_window=time_window, **config_kw)
     cfg_path = work_dir / "precice-config.xml"
     cfg_path.write_text(cfg)
-    # preCICE APPENDS to its per-participant iteration logs. Stale ones from an
-    # earlier run in the same directory would be read as this run's evidence.
+    # preCICE re-creates (truncates) precice-<name>-iterations.log and
+    # -convergence.log only when an implicit scheme initializes. An explicit
+    # run, or one that dies before initialize(), leaves an earlier run's logs in
+    # place, where they would be read as this run's evidence.
     for stale in list(work_dir.glob("precice-*-iterations.log")) + \
             list(work_dir.glob("precice-*-convergence.log")):
         try:
@@ -512,15 +533,32 @@ def run_precice_coupling(
             lf = open(work_dir / f"{p['name']}.out", "w")
             # start_new_session so an MPI-launched participant's whole process
             # group can be killed; pr.kill() alone orphans the ranks.
-            procs[p["name"]] = (subprocess.Popen(
-                p["command"], cwd=work_dir, env=env, stdout=lf,
-                stderr=subprocess.STDOUT, text=True, start_new_session=True, stdin=subprocess.DEVNULL), lf)
+            try:
+                pr = subprocess.Popen(
+                    p["command"], cwd=work_dir, env=env, stdout=lf,
+                    stderr=subprocess.STDOUT, text=True, start_new_session=True,
+                    stdin=subprocess.DEVNULL)
+            except OSError as exc:
+                # A command that cannot be started at all (an interpreter path
+                # that does not exist). The participants already started wait in
+                # initialize() for it forever, so kill them before reporting.
+                # Measured before this: the call raised after a 10 s wait and
+                # left the partner running.
+                lf.close()
+                _kill_all()
+                raise OSError(exc.errno, f"participant {p['name']!r} could not be "
+                              f"started ({exc.strerror}: {p['command'][0]!r}); the "
+                              f"participants already started were killed") from exc
+            procs[p["name"]] = (pr, lf)
         # ONE shared deadline, and stop the moment a participant dies badly.
         # Waiting per participant with the FULL timeout meant a partner that
-        # crashed in milliseconds still cost the whole timeout (N x timeout in the
-        # worst case) while the survivor sat blocked on the m2n handshake — and
+        # crashed in milliseconds still cost the whole timeout (measured with
+        # that loop: 15.0 s at timeout=15 when one participant exited 1 at once;
+        # the first wait that timed out killed the rest, so one timeout, not N)
+        # while the survivor sat blocked on the m2n handshake — and
         # the hung participant's log, the only one that could explain the hang,
         # was never captured, because it was read only after a successful wait.
+        # A command that cannot be started at all is handled in the launch loop.
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
             for name, (pr, _lf) in procs.items():

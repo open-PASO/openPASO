@@ -50,9 +50,10 @@ KNOWLEDGE = {
         "Gc/l0 ∫ (d + l0^2 ∇d·∇w) dx "
         "= 2 (1-d) ψ⁺(u) w dx"),
     "function_space": (
-        "u: VectorFunctionSpace (P1 or P2); d: scalar "
-        "FunctionSpace P1. Both via basix.ufl.element — "
-        "u with shape=(gdim,), d scalar."),
+        "u: vector Lagrange space (P1 or P2; dolfinx 0.10 "
+        "has no VectorFunctionSpace); d: scalar "
+        "FunctionSpace P1. Both via fem.functionspace with "
+        "basix.ufl.element — u with shape=(gdim,), d scalar."),
     "solver": {
         "staggered": (
             "Alternate Newton on (u | d fixed) then "

@@ -34,12 +34,18 @@ The text below is the tool's own description, exactly as the AI model receives i
       plan    — recommended install route for `solver` on this OS,
                 incl. system deps (apt/brew), human notes, and
                 whether the route is verified on this OS. Nothing
-                executes. Optional `route` (pip|conda|binary|source)
-                forces an alternative.
+                executes. Optional `route` (pip|conda|binary|source|
+                spack) forces an alternative.
       install — execute the planned route. pip/conda run inline
                 (minutes); source builds start in the BACKGROUND
                 (30-120 min) — re-run with action='verify' when
                 done. binary routes return manual instructions.
+                route='spack' (dealii, sparta, fourc) builds the solver
+                and its dependencies with Spack in the BACKGROUND
+                (minutes for SPARTA, over an hour for 4C) from the
+                recipes openPASO ships; the result names the log. Re-run
+                with action='verify' when the log's last line is `[+]`
+                for the package itself.
       verify  — run the smoke test for `solver` and, on success,
                 persist its paths.
     
@@ -52,5 +58,5 @@ The text below is the tool's own description, exactly as the AI model receives i
     Args:
         action: status | plan | install | verify
         solver: backend name (required for plan/install/verify)
-        route:  optional route kind override (pip|conda|binary|source)
+        route:  optional route kind override (pip|conda|binary|source|spack)
     ```

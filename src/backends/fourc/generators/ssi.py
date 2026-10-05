@@ -121,7 +121,10 @@ class SSIGenerator(BaseGenerator):
                         "Defines concentration-dependent diffusion "
                         "coefficient, electronic conductivity, maximum "
                         "concentration, and open-circuit potential (OCP) "
-                        "model.  Used in the scalar transport field."
+                        "model.  Used in the scalar transport field.  The "
+                        "parameters below are those of 4C before 2026.3.0 "
+                        "(the 2026.2.0 release included); "
+                        "changed_in_4C_2026_3 gives 4C 2026.3.0's form."
                     ),
                     "parameters": {
                         "DIFF_PARA_NUM": {
@@ -171,8 +174,21 @@ class SSIGenerator(BaseGenerator):
                             ),
                         },
                     },
+                    "changed_in_4C_2026_3": (
+                        "4C 2026.3.0 replaced the function-id-plus-parameter "
+                        "form above. DIFF_COEF and COND are constants; "
+                        "DIFF_COEF_CONC_SCALE_FUNCT, DIFF_COEF_TEMP_SCALE_FUNCT, "
+                        "COND_CONC_SCALE_FUNCT and COND_TEMP_SCALE_FUNCT are "
+                        "optional FUNCT ids that scale them; the *_PARA_NUM / "
+                        "*_PARA pairs and OCP_PARA_NUM are gone, and an optional "
+                        "LITHIATION_BOUNDS group replaces X_MIN / X_MAX. 4C's "
+                        "own tests were migrated as DIFF_COEF_CONC_DEP_FUNCT: "
+                        "-1 with DIFF_PARA: [d] -> DIFF_COEF: d. openPASO's "
+                        "ssi, sti and ssti templates are served in the form "
+                        "your 4C reads."
+                    ),
                     "also_required_by_the_spec": (
-                        "DIFF_COEF_CONC_DEP_FUNCT, "
+                        "4C before 2026.3.0: DIFF_COEF_CONC_DEP_FUNCT, "
                         "DIFF_COEF_TEMP_SCALE_FUNCT, COND_CONC_DEP_FUNCT "
                         "and COND_TEMP_SCALE_FUNCT.  Upstream writes -1 for "
                         "the two _CONC_DEP_ ones (use the DIFF_PARA / "
@@ -495,6 +511,9 @@ class SSIGenerator(BaseGenerator):
     def _template_monolithic_elch_3d() -> str:
         return textwrap.dedent("""\
             # FORMAT TEMPLATE — all numerical values are placeholders.
+            # Written in the input grammar of 4C before 2026.3.0 (the 2026.2.0 release
+            # included); 4C 2026.3.0 renamed some of the keys below. The decks openPASO runs are served in the grammar of the
+            # 4C it finds.
             # ---------------------------------------------------------------
             # 3-D Monolithic Structure-Scalar Interaction (Electrochemistry)
             #

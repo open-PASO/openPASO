@@ -373,7 +373,7 @@ int main()
 
 KNOWLEDGE = {
     "description": "Heat equation: transient (step-26) with AMR, steady-state, time-stepping",
-    "tutorial_steps": ["step-26 (transient + AMR)", "step-86 (SUNDIALS ARKode)"],
+    "tutorial_steps": ["step-26 (transient + AMR)", "step-86 (PETSc TS via PETScWrappers::TimeStepper)"],
     "function_space": "FE_Q<dim>(1)",
     "solver": "CG + SSOR for each time step. SUNDIALS for adaptive time stepping",
     "time_stepping": "Theta method (0=forward Euler, 0.5=Crank-Nicolson, 1=backward Euler)",
@@ -404,7 +404,7 @@ KNOWLEDGE = {
     "solvers": [
         "SolverCG<>                   — Heat-equation stiffness K and mass matrix M are SPD; CG works for all theta in (0,1]",
         "SolverGMRES<>                — needed only when the time-step matrix becomes non-symmetric (rare; happens with full-coupled nonlinear source terms)",
-        "SUNDIALS::ARKode             — adaptive multi-step time integrator; step-86. Use when wall-time / step-count matters and dt is hard to estimate a priori",
+        "SUNDIALS::ARKode             — adaptive additive Runge-Kutta time integrator (no tutorial uses it; step-86 uses PETScWrappers::TimeStepper). Use when wall-time / step-count matters and dt is hard to estimate a priori",
     ],
     "preconditioners": [
         "PreconditionSSOR             — works on (M + dt*theta*K) at each step for moderate dt",

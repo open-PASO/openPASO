@@ -57,7 +57,7 @@ print("Eigenvalue solve complete.")
 
 KNOWLEDGE = {
     "eigenvalue": {
-        "description": "Eigenvalue problems — Laplace, elasticity vibration (examples 02, 03, 16, 21)",
+        "description": "Eigenvalue problems — Laplace, elasticity vibration (examples 03, 16, 21, 31)",
         "solver": "scipy.sparse.linalg.eigsh (Lanczos for symmetric generalized eigenvalue)",
         "pitfalls": [
             "[API] For Dirichlet eigenvalue problems, restrict "
