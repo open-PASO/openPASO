@@ -146,14 +146,17 @@ a Spack recipe, and builds the spec after each change until a build passes. open
 a run and starts it:
 
 ```bash
-openpaso install sparta --via spack-agent                 # repair openPASO's recipe where it fails here
-openpaso install febio --via spack-agent --agent claude   # write a recipe FEBio does not have yet
+openpaso install sparta --via spack-agent   # repair openPASO's recipe where it fails here
+openpaso install febio --via spack-agent    # write a recipe FEBio does not have yet
 ```
 
-- **Targets:** 4C, deal.II and SPARTA (openPASO's recipes) and FEBio (a new recipe).
+- **Targets:** 4C, deal.II and SPARTA (openPASO's recipes) and FEBio (a new recipe). openPASO
+  finds each build through Spack afterwards.
 - **Install spack-agent first** (Python 3.11 or newer), with the agent program it drives logged in.
-  That is the GitHub Copilot CLI by default; `--agent` names another one that your spack-agent
-  offers. `openpaso doctor` says whether spack-agent is installed.
+  The spack-agent this command installs drives the GitHub Copilot CLI and no other agent.
+  `--agent claude` or `--agent openai` need a spack-agent that offers them; openPASO asks the
+  installed one before anything starts and stops if it does not. `openpaso doctor` says whether
+  spack-agent is installed.
   ```bash
   python -m pip install "spack-agent @ git+https://github.com/Hereon-InstituteMS/spack-agent"
   ```
@@ -163,7 +166,9 @@ openpaso install febio --via spack-agent --agent claude   # write a recipe FEBio
   - a Spack wrapper that adds the recipes, as `--via spack` does;
   - the spack-agent configuration.
 - **Afterwards**, `git -C <the copy> diff` shows what the agent changed, and the command re-checks
-  the solver.
+  the solver. A later run starts again from openPASO's recipes and keeps the edited copy as
+  `recipes.previous`. Only one run per solver can go at a time; a second one stops before it
+  changes anything.
 - **The agent edits and builds on your machine, with your rights.** Each round is a full build
   (over an hour for 4C), so the command asks first; `--max-iterations` caps the rounds.
 

@@ -294,7 +294,6 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
                               max_iterations: int | None = None) -> int:
     """Let spack-agent repair or write the solver's Spack recipe and verify it by building the
     spec, then measure the result. Everything it writes is under openPASO's state directory."""
-    import shlex
     import shutil
     from core import spack as sp
     from core import spack_agent as sa
@@ -331,6 +330,28 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
         return 1
     print(f"{OK} Spack: {exe}")
     workspace = sa.workspace_dir(name)
+    # One run per solver at a time, from its plan on: a second one would replace the recipes and
+    # the source while the first one builds from them.
+    try:
+        with sa.hold_workspace(workspace):
+            return _spack_agent_session(name, row, entry, workspace, exe, agent_exe, yes, agent,
+                                        model, source, max_iterations)
+    except sa.WorkspaceBusy as exc:
+        print(f"{NO} {exc}. Nothing was changed; run this again once it has ended.")
+        return 1
+    except OSError as exc:
+        print(f"{NO} Could not prepare spack-agent's workspace: {exc}")
+        return 1
+
+
+def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe: str,
+                         agent_exe: str, yes: bool, agent: str | None, model: str | None,
+                         source: str | None, max_iterations: int | None) -> int:
+    """Plan, ask, prepare and run, with the solver's workspace held."""
+    import shlex
+    import shutil
+    from core import spack as sp
+    from core import spack_agent as sa
     recipe_path = f"packages/{entry['package_dir']}/package.py"
     shipped = sp.recipe_repository()
     has_recipe = shipped is not None and (shipped / recipe_path).is_file()
@@ -338,6 +359,11 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
     print(f"    Spec:      {entry['spec']}")
     what = "repair openPASO's" if has_recipe else "write a new one at"
     print(f"    Recipe:    {what} {recipe_path} (in a copy under {workspace})")
+    if sa.recipes_were_edited(workspace):
+        resume = [agent_exe, "--config", str(workspace / "spack-agent.toml"), "run", "--resume"]
+        print(f"    Earlier:   an earlier run's agent edited the copy there; this run starts again from "
+              f"openPASO's recipes and keeps that copy as {workspace / 'recipes.previous'}. To "
+              f"continue that run instead: {shlex.join(resume)}")
     cloned = not source and not (src / ".git").exists()
     print(f"    Source:    {src}" + (f" (a shallow clone of {entry['git']} at {entry['ref']})" if cloned else ""))
     who = agent or "spack-agent's default (the GitHub Copilot CLI)"
@@ -350,28 +376,33 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
         print("    Nothing was started.")
         return 1
     try:
-        workspace.mkdir(parents=True, exist_ok=True)
-        if not source and not (src / ".git").exists():
-            if src.exists():
-                shutil.rmtree(src)
-            clone = sa.clone_command(entry, src)
-            print(f"    {shlex.join(clone)}")
-            if subprocess.run(clone, stdin=subprocess.DEVNULL).returncode != 0:
-                print(f"{NO} The clone failed; nothing else was started.")
+        with sa.hold_session(workspace):
+            if not source and not (src / ".git").exists():
+                if src.exists():
+                    shutil.rmtree(src)
+                clone = sa.clone_command(entry, src)
+                print(f"    {shlex.join(clone)}")
+                if subprocess.run(clone, stdin=subprocess.DEVNULL).returncode != 0:
+                    print(f"{NO} The clone failed; nothing else was started.")
+                    return 1
+            elif not src.is_dir():
+                print(f"{NO} --source {src} is not a directory.")
                 return 1
-        elif not src.is_dir():
-            print(f"{NO} --source {src} is not a directory.")
-            return 1
-        recipes = sa.prepare_recipes(workspace)
-        wrapper = sa.write_spack_wrapper(workspace, exe, recipes)
-        config = sa.write_config(workspace, source=src, spec=entry["spec"], recipe_path=recipe_path,
-                                 context=entry["context"], spack_wrapper=wrapper, agent=agent,
-                                 model=model, max_iterations=max_iterations)
+            recipes = sa.prepare_recipes(workspace)
+            wrapper = sa.write_spack_wrapper(workspace, exe, recipes)
+            config = sa.write_config(workspace, source=src, spec=entry["spec"],
+                                     recipe_path=recipe_path, context=entry["context"],
+                                     spack_wrapper=wrapper, agent=agent, model=model,
+                                     max_iterations=max_iterations)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"{NO} Could not prepare spack-agent's workspace: {exc}")
         return 1
-    checked = subprocess.run(sa.check_command(agent_exe, config), cwd=workspace, capture_output=True,
-                             text=True, stdin=subprocess.DEVNULL)
+    try:
+        checked = subprocess.run(sa.check_command(agent_exe, config), cwd=workspace,
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        print(f"{NO} Could not start spack-agent ({agent_exe}): {exc}")
+        return 1
     if checked.returncode != 0:
         said = (checked.stdout + checked.stderr).strip()
         print(f"{NO} spack-agent does not accept the configuration openPASO wrote ({config}):")
@@ -404,7 +435,9 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
         variable, inside = entry["override"]
         target = prefix / inside if inside else prefix
         if target.exists():
-            print(f"{HM} The build is at {prefix}. To use it, set {variable}={target}")
+            lead = ("openPASO still uses another " + row["display_name"] + ", found earlier in its search"
+                    if code == 0 else "The build is at " + str(prefix))
+            print(f"{HM} {lead}. To use this build, set {variable}={target}")
     return code
 
 
@@ -413,6 +446,12 @@ def install(name: str, yes: bool = False, via: str | None = None, agent: str | N
             max_iterations: int | None = None) -> int:
     """Check first; install only what is missing, the way setup_backend would."""
     logging.disable(logging.INFO)
+    # Line by line: into a pipe or a log, block buffering printed these lines after the output
+    # of the commands they announce (measured with spack-agent).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):                    # pragma: no cover
+        pass
     rows = {r["name"]: r for r in _rows()}
     if name not in rows:
         print(f"{NO} Unknown solver '{name}'. Known: {', '.join(sorted(rows))}")
@@ -489,7 +528,8 @@ def main(argv: list[str] | None = None) -> int:
                       help="use this kind of route instead of the default one")
     p_in.add_argument("--agent", choices=["copilot", "claude", "openai"],
                       help="with --via spack-agent: the agent that plans the recipe edits "
-                           "(default: spack-agent's own, the GitHub Copilot CLI)")
+                           "(default: spack-agent's own, the GitHub Copilot CLI; another one needs "
+                           "a spack-agent that offers it)")
     p_in.add_argument("--model", help="with --via spack-agent: the agent's model")
     p_in.add_argument("--source", help="with --via spack-agent: a source checkout of the solver to "
                                        "read (default: a shallow clone of the release tag)")
@@ -502,7 +542,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "doctor":
         return doctor()
-    if args.via != "spack-agent" and (args.agent or args.model or args.source or args.max_iterations):
+    if args.via != "spack-agent" and any(
+            value is not None for value in (args.agent, args.model, args.source, args.max_iterations)):
         ap.error("--agent, --model, --source and --max-iterations go with --via spack-agent")
+    if args.max_iterations is not None and args.max_iterations < 1:
+        ap.error("--max-iterations must be 1 or more")
     return install(args.solver, yes=args.yes, via=args.via, agent=args.agent, model=args.model,
                    source=args.source, max_iterations=args.max_iterations)

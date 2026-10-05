@@ -24,6 +24,7 @@ spack-agent offers them) is spack-agent's choice unless `--agent` names one.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -85,16 +86,77 @@ TARGETS: dict[str, dict] = {
 
 
 def find_executable() -> str | None:
-    """spack-agent's command: the file SPACK_AGENT names, else `spack-agent` on PATH."""
+    """spack-agent's command: the file SPACK_AGENT names, else `spack-agent` on PATH. Absolute,
+    because openPASO starts it from the workspace: a relative name would then point elsewhere."""
     named = os.environ.get("SPACK_AGENT", "").strip()
     if named:
-        return named if os.path.isfile(named) and os.access(named, os.X_OK) else None
-    return shutil.which("spack-agent")
+        return os.path.abspath(named) if os.path.isfile(named) and os.access(named, os.X_OK) else None
+    found = shutil.which("spack-agent")
+    return os.path.abspath(found) if found else None
 
 
 def workspace_dir(solver: str) -> Path:
+    """Absolute even when the state directory is configured as a relative path, for the same
+    reason as find_executable."""
     from core.session_journal import state_dir  # noqa: PLC0415
-    return state_dir("spack-agent") / solver
+    return Path(os.path.abspath(state_dir("spack-agent") / solver))
+
+
+class WorkspaceBusy(Exception):
+    """Another run is using the solver's workspace."""
+
+
+@contextlib.contextmanager
+def _exclusive(path: Path, busy: str):
+    try:
+        import fcntl  # noqa: PLC0415  (POSIX only, like spack-agent itself)
+    except ImportError:                                   # pragma: no cover
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WorkspaceBusy(busy) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def hold_workspace(workspace: Path):
+    """Held for a whole `openpaso install --via spack-agent`, so a second one for the same solver
+    stops before it replaces the recipes or the source that a running build reads."""
+    return _exclusive(workspace / "openpaso.lock",
+                      f"another `openpaso install --via spack-agent` is using {workspace}")
+
+
+def hold_session(workspace: Path):
+    """spack-agent's own session lock, held while openPASO replaces the recipes and the
+    configuration. Every spack-agent command on this workspace takes that lock (<config
+    directory>/.spack-agent/session.lock, measured with spack-agent 01d2cd0), so one started by
+    hand, such as a `run --resume`, stops openPASO before it changes anything, and cannot start
+    meanwhile. openPASO lets go before it starts spack-agent, which takes the lock itself."""
+    return _exclusive(workspace / ".spack-agent" / "session.lock",
+                      f"a spack-agent command is running on {workspace}")
+
+
+def recipes_were_edited(workspace: Path) -> bool:
+    """Whether the workspace's recipe copy differs from the recipes it was copied from: an
+    earlier run's agent edited it."""
+    recipes = workspace / "recipes"
+    if not (recipes / ".git").is_dir():
+        return False
+    git = ["git", "-C", str(recipes)]
+    try:
+        dirty = subprocess.run([*git, "status", "--porcelain"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL).stdout.strip()
+        commits = subprocess.run([*git, "rev-list", "--count", "HEAD"], capture_output=True,
+                                 text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    except OSError:
+        return False
+    return bool(dirty) or commits not in ("", "1")
 
 
 def target(solver: str, route: dict | None) -> dict | None:
@@ -144,7 +206,7 @@ def write_config(workspace: Path, *, source: Path, spec: str, recipe_path: str, 
     lines += [f"backend = {_toml_string(agent)}"] if agent else []
     lines += [f"model = {_toml_string(model)}"] if model else []
     lines += ["", "[runner]", 'backend = "host"']
-    if max_iterations:
+    if max_iterations is not None:
         lines.append(f"max_iterations = {int(max_iterations)}")
     path = workspace / "spack-agent.toml"
     path.write_text("\n".join(lines) + "\n")
@@ -155,18 +217,31 @@ def prepare_recipes(workspace: Path) -> Path:
     """A fresh git copy of openPASO's recipe repository in the workspace; returns it.
 
     A new run starts from the recipes this openPASO ships. The copy is a git repository, so
-    the agent's edits can be read with `git -C <it> diff` afterwards."""
+    the agent's edits can be read with `git -C <it> diff` afterwards. A copy an earlier run's
+    agent edited is kept as recipes.previous (replacing an older one), not deleted."""
     from core.spack import recipe_repository  # noqa: PLC0415
     shipped = recipe_repository()
     if shipped is None:
         raise RuntimeError("this openPASO install carries no Spack recipes (data/spack is missing)")
     recipes = workspace / "recipes"
     if recipes.exists():
-        shutil.rmtree(recipes)
+        if recipes_were_edited(workspace):
+            previous = workspace / "recipes.previous"
+            if previous.exists():
+                shutil.rmtree(previous)
+            recipes.rename(previous)
+        else:
+            shutil.rmtree(recipes)
     shutil.copytree(shipped, recipes / "spack_repo" / shipped.name,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     git = ["git", "-C", str(recipes), "-c", "user.name=openPASO", "-c", "user.email=openpaso@localhost"]
-    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "openPASO's shipped recipes"]):
+    subprocess.run([*git, "init", "-q"], check=True, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # spack-agent's preflight compiles the recipe (measured: __pycache__/package.cpython-38.pyc),
+    # which is no edit of it
+    (recipes / ".git" / "info").mkdir(parents=True, exist_ok=True)
+    (recipes / ".git" / "info" / "exclude").write_text("__pycache__/\n*.pyc\n")
+    for args in (["add", "-A"], ["commit", "-q", "-m", "openPASO's shipped recipes"]):
         subprocess.run([*git, *args], check=True, stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return recipes
@@ -181,7 +256,7 @@ def write_spack_wrapper(workspace: Path, spack: str, recipes: Path) -> Path:
     (scope / "repos.yaml").write_text(f"repos:\n  openpaso: {json.dumps(str(repo))}\n")
     wrapper = workspace / "spack"
     wrapper.write_text("#!/bin/sh\n"
-                       f"exec {shlex.quote(spack)} -E -C {shlex.quote(str(scope))} \"$@\"\n")
+                       f"exec {shlex.quote(os.path.abspath(spack))} -E -C {shlex.quote(str(scope))} \"$@\"\n")
     wrapper.chmod(0o755)
     return wrapper
 

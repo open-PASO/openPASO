@@ -117,7 +117,16 @@ def _find_febio_binary() -> Optional[Path]:
             return c
 
     p = shutil.which("febio4") or shutil.which("febio3") or shutil.which("febio")
-    return Path(p) if p else None
+    if p:
+        return Path(p)
+    # A FEBio built by `openpaso install febio --via spack-agent` (the recipe is `febio` in the
+    # openpaso namespace) sits in a hashed prefix; Spack knows where. Asked last, because it
+    # starts a process where every step above costs a stat.
+    from core.spack import installed_prefix   # noqa: PLC0415
+    prefix = installed_prefix("febio")
+    if prefix is not None and (prefix / "bin" / "febio4").is_file():
+        return prefix / "bin" / "febio4"
+    return None
 
 
 _BODY_FORCE_TRAP = (
