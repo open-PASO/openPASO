@@ -167,9 +167,18 @@ def recipe_copy_state(workspace: Path) -> str:
 
 def show_new_files(recipes: Path) -> None:
     """Mark the files the agent created (FEBio's whole recipe) with git's intent-to-add, so that
-    `git diff` in the copy shows them: it shows no untracked file."""
-    subprocess.run(["git", "-C", str(recipes), "add", "--intent-to-add", "--all"],
-                   capture_output=True, stdin=subprocess.DEVNULL)
+    `git diff` in the copy shows them: it shows no untracked file. Only those: `add --all` also
+    staged a deleted file's removal, which plain `git diff` then left out (measured)."""
+    git = ["git", "-C", str(recipes)]
+    try:
+        untracked = subprocess.run([*git, "ls-files", "--others", "--exclude-standard", "-z"],
+                                   capture_output=True, stdin=subprocess.DEVNULL)
+        names = [os.fsdecode(name) for name in untracked.stdout.split(b"\0") if name]
+        if untracked.returncode == 0 and names:
+            subprocess.run([*git, "add", "--intent-to-add", "--", *names], capture_output=True,
+                           stdin=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def target(solver: str, route: dict | None) -> dict | None:
