@@ -29,6 +29,23 @@ logger = logging.getLogger("openpaso.workflows")
 FOURC_ROOT = Path(os.environ.get("FOURC_ROOT", ""))
 
 
+
+def _last_restart(control) -> tuple[int, float] | None:
+    """(step, time) of the last restart data a 4C run wrote, from its control
+    file, or None when there is none. The control file is a YAML list; each
+    `result` entry is one step written for restart."""
+    try:
+        groups = yaml.safe_load(Path(control).read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    best = None
+    for group in groups if isinstance(groups, list) else []:
+        result = group.get("result") if isinstance(group, dict) else None
+        if isinstance(result, dict) and isinstance(result.get("step"), int):
+            if best is None or result["step"] > best[0]:
+                best = (result["step"], float(result.get("time", 0.0)))
+    return best
+
 def register_workflow_tools(mcp: FastMCP):
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -359,11 +376,12 @@ def register_workflow_tools(mcp: FastMCP):
         most common source of wrong simulation results.
 
         Currently supported for 4C backend: sets PROBLEM TYPE RESTART to the
-        last step of the finished run; 4C reads that restart from the run's own
-        output and writes the continuation under the prefix output-1. The
-        finished run must have written a restart at that step (RESTARTEVERY in
-        its dynamics section decides that; Scalar_Transport's default is every
-        step).
+        last step the finished run wrote restart data for, read from its control
+        file, and extends NUMSTEP and MAXTIME from that step and its time; 4C
+        reads that restart from the run's own output and writes the
+        continuation under the prefix output-1. RESTARTEVERY in the dynamics
+        section decides which steps have restart data (Scalar_Transport's
+        default is every step), and 4C also writes one at the run's last step.
         For FEniCS/deal.II: re-run with modified parameters.
 
         Args:
@@ -390,18 +408,29 @@ def register_workflow_tools(mcp: FastMCP):
         except yaml.YAMLError as e:
             return f"Could not parse input file: {e}"
 
+        # The step to continue from is the last one the run wrote restart data
+        # for, not NUMSTEP: NUMSTEP is a stopping limit, and a run that reached
+        # MAXTIME first ends earlier (measured: NUMSTEP 20 and MAXTIME 5 stop at
+        # step 5; the control file then lists steps 2, 4 and 5 for RESTARTEVERY
+        # 2, since 4C also writes one at the last step).
+        last = _last_restart(job.work_dir / "output.control")
+        if last is None:
+            return ("No restart data found in output.control of the finished run: "
+                    "it wrote no restart (set RESTARTEVERY in its dynamics section) "
+                    "or it did not finish its first step.")
+        last_step, last_time = last
+
         # Find dynamics section and update
         for sec_name in ["SCALAR TRANSPORT DYNAMIC", "STRUCTURAL DYNAMIC", "FLUID DYNAMIC"]:
             if sec_name in data:
                 sec = data[sec_name]
-                old_numstep = sec.get("NUMSTEP", 0)
                 timestep = sec.get("TIMESTEP", 1.0)
-                sec["NUMSTEP"] = old_numstep + additional_steps
-                sec["MAXTIME"] = sec.get("MAXTIME", 0) + additional_steps * timestep
+                sec["NUMSTEP"] = last_step + additional_steps
+                sec["MAXTIME"] = last_time + additional_steps * timestep
                 # 4C has no RESTARTEVRY or RESTARTFROMSTEP key (a deck with them
                 # stops with "Could not match this input"); PROBLEM TYPE RESTART
                 # is the step to restart from when no --restart flag is given.
-                data.setdefault("PROBLEM TYPE", {})["RESTART"] = old_numstep
+                data.setdefault("PROBLEM TYPE", {})["RESTART"] = last_step
                 break
         else:
             return "Could not find dynamics section to modify for restart."
@@ -414,7 +443,8 @@ def register_workflow_tools(mcp: FastMCP):
         new_job = await backend.run(new_yaml, job.work_dir, np=1, timeout=timeout)
 
         if new_job.status == "completed":
-            return f"Restart completed in {new_job.elapsed:.1f}s. Extended to {old_numstep + additional_steps} steps."
+            return (f"Restart from step {last_step} (time {last_time:g}) completed in "
+                    f"{new_job.elapsed:.1f}s. Extended to {last_step + additional_steps} steps.")
         else:
             return f"Restart failed: {new_job.error}"
 

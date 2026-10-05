@@ -26,6 +26,7 @@ the reader what to do instead of sending them somewhere that does not exist.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -108,17 +109,25 @@ def forget() -> None:
 
 def _fourc_env() -> str:
     """What goes before the 4C binary in a served command: 4C's dependency
-    library path for a source build, nothing for a Spack build, which carries
-    its own library search path (backends.fourc.backend.fourc_library_env)."""
+    library path for a source build. A Spack build carries its own library
+    search path and must not see that directory
+    (backends.fourc.backend.fourc_library_env): nothing goes before it, unless
+    the caller's LD_LIBRARY_PATH holds the directory, and then the command
+    clears it the way the backend's own runs do. A Spack set to
+    `shared_linking: runpath` would otherwise load the source build's
+    libraries; the RPATH build measured here loads none of them either way."""
     try:
         from backends.fourc.backend import FOURC_DEPENDENCY_LIB, fourc_library_env
     except Exception:                                  # noqa: BLE001
         return ""
     binary = _resolve_one("{FOURC_BINARY}")
     if os.path.isfile(binary):
-        needed = fourc_library_env(binary).get("LD_LIBRARY_PATH", "").split(":")
-        if FOURC_DEPENDENCY_LIB not in needed:
-            return ""
+        needed = fourc_library_env(binary).get("LD_LIBRARY_PATH", "")
+        if FOURC_DEPENDENCY_LIB not in needed.split(":"):
+            inherited = [p.rstrip("/") for p in os.environ.get("LD_LIBRARY_PATH", "").split(":")]
+            if FOURC_DEPENDENCY_LIB not in inherited:
+                return ""
+            return f"LD_LIBRARY_PATH={shlex.quote(needed)} " if needed else "env -u LD_LIBRARY_PATH "
     return f"LD_LIBRARY_PATH={FOURC_DEPENDENCY_LIB} "
 
 

@@ -30,11 +30,13 @@ def public_attrs() -> set[str] | None:
     """Public attribute names on the top-level ``ngsolve`` module.
 
     Returns ``None`` if NGSolve is not installed.  The returned set
-    is the full public surface (~200 entries) rather than a curated
-    sub-list, so a contributor adding a typo'd identifier to a
-    template (e.g. ``BilinearFrom`` instead of ``BilinearForm``)
-    fails the catalog-consistency test regardless of which corner of
-    the API the typo lives in.
+    is the full public surface (~200 entries).  The catalog-consistency
+    test checks against it only the names on its watchlist
+    (``_NGSOLVE_CORE_IDENTIFIERS``) that the templates use, so a
+    watch-listed name NGSolve drops fails the test, while a typo of a
+    name that is not on the watchlist (e.g. ``BilinearFrom`` for
+    ``BilinearForm``) is never collected and passes.  Add a name to the
+    watchlist to have it checked.
     """
     try:
         import ngsolve  # type: ignore
