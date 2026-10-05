@@ -142,21 +142,34 @@ def hold_session(workspace: Path):
                       f"a spack-agent command is running on {workspace}")
 
 
-def recipes_were_edited(workspace: Path) -> bool:
-    """Whether the workspace's recipe copy differs from the recipes it was copied from: an
-    earlier run's agent edited it."""
+def recipe_copy_state(workspace: Path) -> str:
+    """The workspace's recipe copy: "absent"; "unchanged" from the recipes it was copied from;
+    "edited" by an earlier run's agent; or "unknown" when git cannot tell (git missing, the
+    copy's repository unreadable). Only an "unchanged" copy may be deleted: a recipe edit must
+    not be lost because the check failed."""
     recipes = workspace / "recipes"
+    if not recipes.exists():
+        return "absent"
     if not (recipes / ".git").is_dir():
-        return False
+        return "unknown"
     git = ["git", "-C", str(recipes)]
     try:
-        dirty = subprocess.run([*git, "status", "--porcelain"], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL).stdout.strip()
+        status = subprocess.run([*git, "status", "--porcelain"], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL)
         commits = subprocess.run([*git, "rev-list", "--count", "HEAD"], capture_output=True,
-                                 text=True, stdin=subprocess.DEVNULL).stdout.strip()
+                                 text=True, stdin=subprocess.DEVNULL)
     except OSError:
-        return False
-    return bool(dirty) or commits not in ("", "1")
+        return "unknown"
+    if status.returncode != 0 or commits.returncode != 0:
+        return "unknown"
+    return "edited" if status.stdout.strip() or commits.stdout.strip() != "1" else "unchanged"
+
+
+def show_new_files(recipes: Path) -> None:
+    """Mark the files the agent created (FEBio's whole recipe) with git's intent-to-add, so that
+    `git diff` in the copy shows them: it shows no untracked file."""
+    subprocess.run(["git", "-C", str(recipes), "add", "--intent-to-add", "--all"],
+                   capture_output=True, stdin=subprocess.DEVNULL)
 
 
 def target(solver: str, route: dict | None) -> dict | None:
@@ -218,20 +231,21 @@ def prepare_recipes(workspace: Path) -> Path:
 
     A new run starts from the recipes this openPASO ships. The copy is a git repository, so
     the agent's edits can be read with `git -C <it> diff` afterwards. A copy an earlier run's
-    agent edited is kept as recipes.previous (replacing an older one), not deleted."""
+    agent edited, or one git cannot check, is kept as recipes.previous (replacing an older
+    one), not deleted."""
     from core.spack import recipe_repository  # noqa: PLC0415
     shipped = recipe_repository()
     if shipped is None:
         raise RuntimeError("this openPASO install carries no Spack recipes (data/spack is missing)")
     recipes = workspace / "recipes"
-    if recipes.exists():
-        if recipes_were_edited(workspace):
-            previous = workspace / "recipes.previous"
-            if previous.exists():
-                shutil.rmtree(previous)
-            recipes.rename(previous)
-        else:
-            shutil.rmtree(recipes)
+    state = recipe_copy_state(workspace)
+    if state in ("edited", "unknown"):
+        previous = workspace / "recipes.previous"
+        if previous.exists():
+            shutil.rmtree(previous)
+        recipes.rename(previous)
+    elif state == "unchanged":
+        shutil.rmtree(recipes)
     shutil.copytree(shipped, recipes / "spack_repo" / shipped.name,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     git = ["git", "-C", str(recipes), "-c", "user.name=openPASO", "-c", "user.email=openpaso@localhost"]

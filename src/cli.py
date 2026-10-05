@@ -318,6 +318,10 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
         print(f"{NO} Ruff is not on PATH. spack-agent's host runner checks every recipe with it: "
               "python -m pip install ruff")
         return 1
+    if shutil.which("git") is None:
+        print(f"{NO} git is not on PATH. openPASO keeps spack-agent's recipe copy in a git "
+              "repository and clones the solver's source with it.")
+        return 1
     exe, passed_over = sp.usable_spack()
     for reason in passed_over:
         print(f"{HM} Not using it: {reason}.")
@@ -359,11 +363,15 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
     print(f"    Spec:      {entry['spec']}")
     what = "repair openPASO's" if has_recipe else "write a new one at"
     print(f"    Recipe:    {what} {recipe_path} (in a copy under {workspace})")
-    if sa.recipes_were_edited(workspace):
+    state = sa.recipe_copy_state(workspace)
+    if state in ("edited", "unknown"):
         resume = [agent_exe, "--config", str(workspace / "spack-agent.toml"), "run", "--resume"]
-        print(f"    Earlier:   an earlier run's agent edited the copy there; this run starts again from "
-              f"openPASO's recipes and keeps that copy as {workspace / 'recipes.previous'}. To "
-              f"continue that run instead: {shlex.join(resume)}")
+        kept = workspace / "recipes.previous"
+        why = ("an earlier run's agent edited the copy there" if state == "edited"
+               else "git cannot tell whether an earlier run edited the copy there")
+        print(f"    Earlier:   {why}; this run starts again from openPASO's recipes and keeps that "
+              f"copy as {kept}" + (", replacing the one kept there before" if kept.exists() else "")
+              + f". To continue that run instead: {shlex.join(resume)}")
     cloned = not source and not (src / ".git").exists()
     print(f"    Source:    {src}" + (f" (a shallow clone of {entry['git']} at {entry['ref']})" if cloned else ""))
     who = agent or "spack-agent's default (the GitHub Copilot CLI)"
@@ -417,6 +425,7 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
     except OSError as exc:
         print(f"{NO} Could not start spack-agent: {exc}")
         return 1
+    sa.show_new_files(recipes)
     status = shlex.join([agent_exe, "--config", str(config), "status"])
     if done.returncode != 0:
         print(f"{NO} spack-agent ended without a passing build (exit {done.returncode}). Its "
