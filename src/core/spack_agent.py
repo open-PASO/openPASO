@@ -165,6 +165,29 @@ def recipe_copy_state(workspace: Path) -> str:
     return "edited" if status.stdout.strip() or commits.stdout.strip() != "1" else "unchanged"
 
 
+def head_commit(recipes: Path) -> str | None:
+    """The copy's current commit. Taken right after prepare_recipes, it is the commit of the
+    shipped recipes, which every later diff of the copy is taken against: the agent has a shell
+    in the copy and may stage or commit, which a plain `git diff` does not show."""
+    try:
+        done = subprocess.run(["git", "-C", str(recipes), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL)
+    except OSError:
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def changed_since(recipes: Path, base: str) -> bool:
+    """Whether the copy differs from the commit `base`: edited, deleted, staged, committed and
+    (once show_new_files marked them) new files. True when git cannot tell."""
+    try:
+        done = subprocess.run(["git", "-C", str(recipes), "diff", "--quiet", base, "--"],
+                              capture_output=True, stdin=subprocess.DEVNULL)
+    except OSError:
+        return True
+    return done.returncode != 0
+
+
 def show_new_files(recipes: Path) -> None:
     """Mark the files the agent created (FEBio's whole recipe) with git's intent-to-add, so that
     `git diff` in the copy shows them: it shows no untracked file. Only those: `add --all` also

@@ -400,6 +400,7 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
                 print(f"{NO} --source {src} is not a directory.")
                 return 1
             recipes = sa.prepare_recipes(workspace)
+            base = sa.head_commit(recipes)
             wrapper = sa.write_spack_wrapper(workspace, exe, recipes)
             config = sa.write_config(workspace, source=src, spec=entry["spec"],
                                      recipe_path=recipe_path, context=entry["context"],
@@ -429,16 +430,19 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
         print(f"{NO} Could not start spack-agent: {exc}")
         return 1
     sa.show_new_files(recipes)
+    # Against the shipped recipes' commit: the agent may have staged or committed its edits.
+    diff = shlex.join(["git", "-C", str(recipes), "diff", base[:12]] if base
+                      else ["git", "-C", str(recipes), "status"])
     status = shlex.join([agent_exe, "--config", str(config), "status"])
     if done.returncode != 0:
         print(f"{NO} spack-agent ended without a passing build (exit {done.returncode}). Its "
-              f"session, scripts and logs are in {workspace / '.spack-agent'}. Where it stands: "
-              f"{status}; to continue: {shlex.join([agent_exe, '--config', str(config), 'run', '--resume'])}")
+              f"session, scripts and logs are in {workspace / '.spack-agent'}. Its recipe edits so "
+              f"far: {diff}. Where it stands: {status}; to continue: "
+              f"{shlex.join([agent_exe, '--config', str(config), 'run', '--resume'])}")
         return done.returncode
-    changed = subprocess.run(["git", "-C", str(recipes), "status", "--short"], capture_output=True,
-                             text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    changed = sa.changed_since(recipes, base) if base else True
     print(f"{OK} spack-agent's build passed. Its recipe: {recipes / 'spack_repo' / 'openpaso' / recipe_path}"
-          + (f" (changes: git -C {recipes} diff)" if changed else " (unchanged from openPASO's)"))
+          + (f" (changes: {diff})" if changed else " (unchanged from openPASO's)"))
     sp.remember_executable(exe)
     sp.forget()
     code, message = _probe(name, row, smoke=True)

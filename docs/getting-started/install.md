@@ -165,8 +165,9 @@ openpaso install febio --via spack-agent    # write a recipe FEBio does not have
   - the solver's source, cloned at the release tag unless `--source` names your own checkout;
   - a Spack wrapper that adds the recipes, as `--via spack` does;
   - the spack-agent configuration.
-- **Afterwards**, `git -C <the copy> diff` shows what the agent changed, new files included, and
-  the command re-checks the solver. A later run starts again from openPASO's recipes and keeps
+- **Afterwards**, the command prints a `git diff` against the copy's first commit. It shows
+  everything the agent changed, also what it staged or committed, and new files. Then the
+  command re-checks the solver. A later run starts again from openPASO's recipes and keeps
   the edited copy as `recipes.previous`. Only one run per solver can go at a time; a second one
   stops before it changes anything.
 - **The agent edits and builds on your machine, with your rights.** Each round is a full build
