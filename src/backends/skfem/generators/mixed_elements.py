@@ -481,7 +481,10 @@ KNOWLEDGE = {
             "ElementQuadRT1, ElementTetRT1 and ElementTetN1 (also "
             "ElementTriCCR of ElementTriP2B and ElementTriMini of "
             "ElementTriP1B), and the lowest-order Nedelec space is called "
-            "N1 on triangles but N0 on tetrahedra. Signal: "
+            "N1 on every shape that has one (ElementTriN1, ElementQuadN1, "
+            "ElementTetN1); ElementTetN0 is only a backwards-compatibility "
+            "alias of ElementTetN1 and the only N0-named class, so no "
+            "triangle class carries an N0 name. Signal: "
             "type(ElementTriRT0()).__name__ printing 'ElementTriRT1', and "
             "two rows of a survey that agree to every digit.",
         ],

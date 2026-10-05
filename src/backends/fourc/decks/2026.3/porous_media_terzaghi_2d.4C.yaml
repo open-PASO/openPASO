@@ -1,0 +1,233 @@
+TITLE:
+  - "Terzaghi 1-D consolidation, solved as a 2-D poroelastic column (QUAD4)."
+  - "Saturated soil column 0.1 x 1.0, surface load q=1 ramped on over 0.05 s,"
+  - "drained at the top (p=0), impervious base and sides, lateral rollers."
+  - "The excess pore pressure starts at ~q everywhere and dissipates upwards;"
+  - "the settlement tends to the drained oedometric value q*H/E_oed —"
+  - "evaluate that for your own parameters rather than expecting a number."
+  - "NOTE: 4C 2026.3.0 writes the 2-D pore pressure as its own PRESSURE array"
+  - "(switched on below) and a two-component velocity; 4C 2026.2.0 writes that"
+  - "array as NaN and the pore pressure as a third velocity component."
+PROBLEM TYPE:
+  PROBLEMTYPE: "Poroelasticity"
+PROBLEM SIZE:
+  DIM: 2
+POROELASTICITY DYNAMIC:
+  COUPALGO: "Monolithic"
+  NUMSTEP: 80
+  MAXTIME: 2.0
+  TIMESTEP: 0.025
+  ITEMAX: 25
+  TOLINC_GLOBAL: 1e-08
+  TOLRES_GLOBAL: 1e-08
+  NORM_INC: "AbsGlobal"
+  NORM_RESF: "AbsGlobal"
+  SECONDORDER: false
+  CONTIPARTINT: true
+  RESULTSEVERY: 2
+  RESTARTEVERY: 1000
+  LINEAR_SOLVER: 1
+STRUCTURAL DYNAMIC:
+  INT_STRATEGY: "Standard"
+  DYNAMICTYPE: "OneStepTheta"
+  DAMPING: "Material"
+  LINEAR_SOLVER: 1
+STRUCTURAL DYNAMIC/ONESTEPTHETA:
+  THETA: 1.0
+FLUID DYNAMIC:
+  LINEAR_SOLVER: 3
+  THETA: 1.0
+FLUID DYNAMIC/POROUS-FLOW STABILIZATION:
+  SUPG: false
+  GRAD_DIV: false
+  RSTAB: "rstab_gls"
+  DEFINITION_TAU: "Franca_Madureira_Valentin_Badia_Codina"
+  EVALUATION_TAU: "integration_point"
+  EVALUATION_MAT: "integration_point"
+SOLVER 1:
+  SOLVER: "UMFPACK"
+SOLVER 2:
+  SOLVER: "UMFPACK"
+SOLVER 3:
+  SOLVER: "UMFPACK"
+IO/RUNTIME VTK OUTPUT:
+  INTERVAL_STEPS: 2
+  OUTPUT_DATA_FORMAT: "ascii"
+IO/RUNTIME VTK OUTPUT/STRUCTURE:
+  OUTPUT_STRUCTURE: true
+  DISPLACEMENT: true
+IO/RUNTIME VTK OUTPUT/FLUID:
+  OUTPUT_FLUID: true
+  VELOCITY: true
+  # the pore pressure: its own array from 4C 2026.3.0 on (before, a NaN array and a third
+  # velocity component)
+  PRESSURE: true
+CLONING MATERIAL MAP:
+  - SRC_FIELD: "structure"
+    SRC_MAT: 1
+    TAR_FIELD: "porofluid"
+    TAR_MAT: 3
+MATERIALS:
+  - MAT: 1
+    MAT_StructPoro:
+      MATID: 2
+      POROLAWID: 10
+      INITPOROSITY: 0.4
+  - MAT: 10
+    MAT_PoroLawNeoHooke:
+      BULKMODULUS: 1e+07
+      PENALTYPARAMETER: 0.001
+  - MAT: 2
+    MAT_ElastHyper:
+      NUMMAT: 1
+      MATIDS: [4]
+      DENS: 1.0
+  - MAT: 4
+    ELAST_CoupNeoHooke:
+      YOUNG: 1000
+      NUE: 0.2
+  - MAT: 3
+    MAT_FluidPoro:
+      DYNVISCOSITY: 1.0
+      DENSITY: 1.0
+      PERMEABILITY: 0.001
+FUNCT1:
+  - COMPONENT: 0
+    SYMBOLIC_FUNCTION_OF_SPACE_TIME: "a"
+  - VARIABLE: 0
+    NAME: "a"
+    TYPE: "multifunction"
+    NUMPOINTS: 3
+    TIMES: [0.0, 0.05, 1000.0]
+    DESCRIPTION: ["0.5*(1-cos(t*pi/0.05))", "1.0"]
+DESIGN LINE NEUMANN CONDITIONS:
+  - E: 4
+    NUMDOF: 2
+    ONOFF: [0, 1]
+    VAL: [0.0, -1.0]
+    FUNCT: [0, 1]
+DESIGN LINE DIRICH CONDITIONS:
+  - E: 1
+    NUMDOF: 2
+    ONOFF: [1, 0]
+    VAL: [0, 0]
+    FUNCT: [0, 0]
+  - E: 2
+    NUMDOF: 2
+    ONOFF: [1, 0]
+    VAL: [0, 0]
+    FUNCT: [0, 0]
+  - E: 3
+    NUMDOF: 2
+    ONOFF: [1, 1]
+    VAL: [0, 0]
+    FUNCT: [0, 0]
+DESIGN LINE PORO DIRICH CONDITIONS:
+  - E: 1
+    NUMDOF: 3
+    ONOFF: [1, 0, 0]
+    VAL: [0, 0, 0]
+    FUNCT: [0, 0, 0]
+  - E: 2
+    NUMDOF: 3
+    ONOFF: [1, 0, 0]
+    VAL: [0, 0, 0]
+    FUNCT: [0, 0, 0]
+  - E: 3
+    NUMDOF: 3
+    ONOFF: [1, 1, 0]
+    VAL: [0, 0, 0]
+    FUNCT: [0, 0, 0]
+  - E: 4
+    NUMDOF: 3
+    ONOFF: [0, 0, 1]
+    VAL: [0, 0, 0]
+    FUNCT: [0, 0, 0]
+DESIGN LINE PORO PARTIAL INTEGRATION:
+  - E: 4
+DESIGN SURFACE POROCOUPLING CONDITION:
+  - E: 1
+DLINE-NODE TOPOLOGY:
+  - "NODE 1 DLINE 1"
+  - "NODE 3 DLINE 1"
+  - "NODE 5 DLINE 1"
+  - "NODE 7 DLINE 1"
+  - "NODE 9 DLINE 1"
+  - "NODE 11 DLINE 1"
+  - "NODE 13 DLINE 1"
+  - "NODE 15 DLINE 1"
+  - "NODE 17 DLINE 1"
+  - "NODE 19 DLINE 1"
+  - "NODE 21 DLINE 1"
+  - "NODE 2 DLINE 2"
+  - "NODE 4 DLINE 2"
+  - "NODE 6 DLINE 2"
+  - "NODE 8 DLINE 2"
+  - "NODE 10 DLINE 2"
+  - "NODE 12 DLINE 2"
+  - "NODE 14 DLINE 2"
+  - "NODE 16 DLINE 2"
+  - "NODE 18 DLINE 2"
+  - "NODE 20 DLINE 2"
+  - "NODE 22 DLINE 2"
+  - "NODE 1 DLINE 3"
+  - "NODE 2 DLINE 3"
+  - "NODE 21 DLINE 4"
+  - "NODE 22 DLINE 4"
+DSURF-NODE TOPOLOGY:
+  - "NODE 1 DSURFACE 1"
+  - "NODE 2 DSURFACE 1"
+  - "NODE 3 DSURFACE 1"
+  - "NODE 4 DSURFACE 1"
+  - "NODE 5 DSURFACE 1"
+  - "NODE 6 DSURFACE 1"
+  - "NODE 7 DSURFACE 1"
+  - "NODE 8 DSURFACE 1"
+  - "NODE 9 DSURFACE 1"
+  - "NODE 10 DSURFACE 1"
+  - "NODE 11 DSURFACE 1"
+  - "NODE 12 DSURFACE 1"
+  - "NODE 13 DSURFACE 1"
+  - "NODE 14 DSURFACE 1"
+  - "NODE 15 DSURFACE 1"
+  - "NODE 16 DSURFACE 1"
+  - "NODE 17 DSURFACE 1"
+  - "NODE 18 DSURFACE 1"
+  - "NODE 19 DSURFACE 1"
+  - "NODE 20 DSURFACE 1"
+  - "NODE 21 DSURFACE 1"
+  - "NODE 22 DSURFACE 1"
+NODE COORDS:
+  - "NODE 1 COORD 0.0000 0.0000 0.0"
+  - "NODE 2 COORD 0.1000 0.0000 0.0"
+  - "NODE 3 COORD 0.0000 0.1000 0.0"
+  - "NODE 4 COORD 0.1000 0.1000 0.0"
+  - "NODE 5 COORD 0.0000 0.2000 0.0"
+  - "NODE 6 COORD 0.1000 0.2000 0.0"
+  - "NODE 7 COORD 0.0000 0.3000 0.0"
+  - "NODE 8 COORD 0.1000 0.3000 0.0"
+  - "NODE 9 COORD 0.0000 0.4000 0.0"
+  - "NODE 10 COORD 0.1000 0.4000 0.0"
+  - "NODE 11 COORD 0.0000 0.5000 0.0"
+  - "NODE 12 COORD 0.1000 0.5000 0.0"
+  - "NODE 13 COORD 0.0000 0.6000 0.0"
+  - "NODE 14 COORD 0.1000 0.6000 0.0"
+  - "NODE 15 COORD 0.0000 0.7000 0.0"
+  - "NODE 16 COORD 0.1000 0.7000 0.0"
+  - "NODE 17 COORD 0.0000 0.8000 0.0"
+  - "NODE 18 COORD 0.1000 0.8000 0.0"
+  - "NODE 19 COORD 0.0000 0.9000 0.0"
+  - "NODE 20 COORD 0.1000 0.9000 0.0"
+  - "NODE 21 COORD 0.0000 1.0000 0.0"
+  - "NODE 22 COORD 0.1000 1.0000 0.0"
+STRUCTURE ELEMENTS:
+  - "1 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 1 2 4 3 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "2 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 3 4 6 5 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "3 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 5 6 8 7 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "4 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 7 8 10 9 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "5 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 9 10 12 11 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "6 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 11 12 14 13 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "7 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 13 14 16 15 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "8 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 15 16 18 17 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "9 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 17 18 20 19 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "10 SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4 19 20 22 21 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"

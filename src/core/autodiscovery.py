@@ -167,6 +167,19 @@ def _probe_binary(name: str, backend: str, search_patterns: list[str],
     )
 
 
+def _probe_backend_finder(backend: str, module: str, function: str) -> Optional[ProbeResult]:
+    """What the backend's own finder returns, as a probe result (None if nothing)."""
+    try:
+        import importlib
+        found = getattr(importlib.import_module(module), function)()
+    except Exception:  # noqa: BLE001 -- a finder that cannot run found nothing
+        return None
+    if not found:
+        return None
+    return ProbeResult(backend=backend, found=True, confidence="definite",
+                       location=str(found), details={"source": f"resolver:{function}"})
+
+
 def _probe_source_root(backend: str, env_var: str,
                        search_patterns: list[str]) -> Optional[dict]:
     """Check for source code root (developer mode)."""
@@ -258,7 +271,7 @@ def discover_backends() -> list[ProbeResult]:
         results.append(fenics_conda or fenics_pip)
 
     # Binary solvers
-    results.append(_probe_binary(
+    fourc_result = _probe_binary(
         "4C", "fourc",
         search_patterns=[
             "~/4C/build/4C",
@@ -272,7 +285,19 @@ def discover_backends() -> list[ProbeResult]:
             *(str(d / sub) for d in _desktop_dirs()
               for sub in ("4C/build/4C", "4C-src/4C/build/4C")),
         ],
-    ))
+    )
+    # The backends' own finders know more places than these lists (FOURC_ROOT,
+    # a Spack build); ask them before reporting "not found", the way the
+    # deal.II probe below does, so this tool and discover agree.
+    if not fourc_result.found:
+        fourc_result = _probe_backend_finder("fourc", "backends.fourc.backend",
+                                             "_find_fourc_binary") or fourc_result
+    results.append(fourc_result)
+    sparta_result = _probe_binary("spa_serial", "sparta", search_patterns=[])
+    if not sparta_result.found:
+        sparta_result = _probe_backend_finder("sparta", "backends.sparta.backend",
+                                              "_find_sparta_binary") or sparta_result
+    results.append(sparta_result)
     # deal.II is often installed via conda-forge (env layout
     # ~/miniconda3/envs/<env>/include/deal.II/), but the
     # _probe_binary helper only walks hardcoded paths. Probe

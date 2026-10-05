@@ -1,7 +1,7 @@
 """NGSolve advanced physics generators and knowledge.
 
 Covers:
-  dg_methods             – DG for advection/diffusion (dglagrange / L2 spaces)
+  dg_methods             – DG for advection/diffusion (L2 spaces with dgjumps=True)
   contact                – Contact/obstacle using penalty method
   time_dependent_ns      – Transient Navier-Stokes with IMEX (full channel)
   mhd                    – Magnetohydrodynamics (coupled Maxwell + NS, 2.5-D)
@@ -12,14 +12,14 @@ Covers:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. DG methods (advection-diffusion with dglagrange spaces)
+# 1. DG methods (advection-diffusion with L2 dgjumps spaces)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _dg_methods_2d(params: dict) -> str:
     """FORMAT TEMPLATE — values are defaults, determine appropriate values for your specific problem.
 
     Interior-penalty DG for general advection-diffusion on [0,1]²
-    using the modern dglagrange space variant."""
+    using the L2(mesh, order=k, dgjumps=True) space."""
     order = params.get("order", 3)
     eps = params.get("diffusion", 0.005)
     maxh = params.get("maxh", 0.06)
@@ -1328,8 +1328,9 @@ KNOWLEDGE = {
                 "[Numerical] DG bilinear form is NOT "
                 "symmetric when advection is present "
                 "(the upwind term is one-sided); pure diffusion "
-                "SIP DG IS symmetric. Use GMRes (or BiCGStab) "
-                "for the unsymmetric system. "
+                "SIP DG IS symmetric. Use solvers.GMRes for "
+                "the unsymmetric system (NGSolve's Python API "
+                "has no BiCGStab). "
                 "Signal: of the two alternatives the old text "
                 "offered, only the second occurs. "
                 "ngsolve.krylovspace CGSolver raises NOTHING — "
@@ -1768,8 +1769,10 @@ KNOWLEDGE = {
                 "convective term leaves the Stokes drag. Two "
                 "practical notes from running it: use "
                 "inverse='umfpack' explicitly, because the "
-                "default factoriser hangs on this saddle-point "
-                "system, and take drag and lift from the "
+                "default factoriser depends on how NGSolve was "
+                "built (pardiso, else mumps, else umfpack, else "
+                "sparsecholesky; on the 6.2.2604 PyPI wheel it "
+                "already is umfpack), and take drag and lift from the "
                 "RESIDUAL functional tested against a function "
                 "that is one on the cylinder rather than from a "
                 "boundary stress integral. (Verified 2026-08-06 "

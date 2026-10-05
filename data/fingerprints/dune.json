@@ -1,0 +1,20 @@
+{
+  "solver": "dune",
+  "timestamp": "2026-05-07T23:08:25.641306",
+  "dune.fem": {
+    "importable": false,
+    "version": null
+  },
+  "dune.grid": {
+    "importable": false,
+    "version": null
+  },
+  "dune.ufl": {
+    "importable": false,
+    "version": null
+  },
+  "api": {
+    "dune.fem.space": false,
+    "dune.fem.function": false
+  }
+}

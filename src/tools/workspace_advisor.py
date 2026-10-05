@@ -493,7 +493,12 @@ _SOLVER_MARKERS = (
     "KRATOS ___", "Importing    Kratos", "ResidualBasedLinearStrategy",
     "BlockBuildDofArrayUtility", "Setup Dofs Time",
     "Newton-Raphson", "CONVERGENCE CHECK",
-    "DOLFINX", "dolfinx", "Solving linear variational problem",
+    # dolfinx 0.10 prints nothing at the default log level; spdlog lines
+    # `[<time>] [info] ...` appear after dolfinx.log.set_log_level(LogLevel.INFO),
+    # the PETSc lines with -ksp_monitor / -snes_monitor, and the word "dolfinx"
+    # only as a path in the traceback of a failed run (measured). "Solving linear
+    # variational problem" is legacy DOLFIN and is never printed.
+    "dolfinx", "] [info] ", "KSP Residual norm", "SNES Function norm",
     "deallog", "DEAL_II", "Starting value", "Convergence step",
     "NGSolve", "assemble VOL", "call pardiso", "iteration 1 err",
     # DUNE-fem's ACTUAL console on this install, measured rather than guessed.
@@ -1352,7 +1357,7 @@ def _early_artefact_check(workdir: Path, written: Path) -> str:
                      "ROWS GROW WITH THE LEVEL",
                      "IS NOT THE DISAGREEMENT IN YOUR FILES",
                      "IDENTICALLY ZERO ON BOTH SIDES",
-                     "NEGATED TO THE LAST BIT")
+                     "NEGATED TO THE LAST BIT", "ONE VALUE ALONG THE WHOLE INTERFACE")
             hard = [f for f in found
                     if any(k in f.get("finding", "") for k in _HARD)]
             if hard:
@@ -1892,8 +1897,9 @@ def deliverable_findings_after_worker(workdir: Path) -> str:
     # correct cells -- a quarter of the work that goes on to be right -- so it
     # is not precise enough to interrupt a run with. It stays in the hand-in
     # audit, where the same statement costs nothing.
+    decks = _febio_decks_after_worker(workdir)
     if not found:
-        return ""
+        return decks
     seen, uniq = set(), []
     for f in found:
         key = str(f.get("finding", ""))[:80]
@@ -1906,4 +1912,28 @@ def deliverable_findings_after_worker(workdir: Path) -> str:
             + "\n".join(f"  * {f.get('finding', '')}" for f in uniq[:4])
             + ("\n  ... and %d more" % (len(uniq) - 4) if len(uniq) > 4 else "")
             + "\nEvery one of these is read straight off your own files by "
-              "whoever judges the result.")
+              "whoever judges the result." + decks)
+
+
+def _febio_decks_after_worker(workdir: Path) -> str:
+    """The defects of the newest FEBio deck in each folder of the work dir, named from its text ('' if none).
+
+    A WORKER TAKES ITS DECK FINDINGS WITH IT. Measured on a coupled round: a worker's run check named three
+    true defects of its FEBio deck at 5.4 minutes, the worker reported DONE, and its parent learned of them
+    at 13.8 minutes, after a second side and a whole ladder had run on that deck."""
+    try:
+        from tools.febio_deck_lint import lint_deck            # noqa: PLC0415
+        newest: dict = {}
+        for q in list(Path(workdir).glob("*.feb")) + list(Path(workdir).glob("*/*.feb")):
+            if q.is_file() and (q.parent not in newest or q.stat().st_mtime > newest[q.parent].stat().st_mtime):
+                newest[q.parent] = q
+        said = []
+        for q in sorted(newest.values()):
+            for f in lint_deck(q.read_text(errors="replace"))[:3]:
+                said.append(f"  * {q.relative_to(workdir)}: {f}")
+    except Exception:                                          # noqa: BLE001
+        return ""
+    if not said:
+        return ""
+    return ("\n\n[the FEBio deck the worker left, checked against its own text -- FEBio runs some of these "
+            "without a word:]\n" + "\n".join(said[:6]))

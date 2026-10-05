@@ -1583,7 +1583,7 @@ not copied from a docstring:
 | scikit-fem | yes       | yes     | a Python script          | coupled to FEniCSx and NGSolve, all four role/position combinations |
 | DUNE-fem   | yes       | yes     | a Python script          | coupled to FEniCSx and deal.II, both roles |
 | deal.II    | yes       | yes     | Python wrapper + C++ exe | coupled to FEniCSx and DUNE-fem, both roles |
-| FEBio      | yes       | yes     | Python wrapper + XML     | FEBio-to-FEBio, both roles — ELASTICITY, not heat: FEBio 4 has no heat module |
+| FEBio      | yes       | yes     | Python wrapper + XML     | FEBio-to-FEBio, both roles, on the ELASTIC analogue: FEBio 4 has no heat module, and the participant does not use its thermo-fluid conduction route |
 | Kratos     | yes       | yes     | a Python script          | Neumann side coupled to the real 4C binary against an analytic reference; Dirichlet side against FEniCSx — but in ITS OWN interpreter, see below |
 | SPARTA     | yes       | not natively | Python wrapper + deck | coupled to a thermal shell and CONVERGED once the residual is judged against its measured Monte-Carlo noise floor; no flux BC exists, only an indirect radiative-equilibrium route |
 
@@ -1810,10 +1810,17 @@ the points TRANSPOSED relative to the obvious layout. dolfinx wants three
 coordinate columns even in 2-D, and `compute_colliding_cells` returns an
 adjacency list, so you must take `.links(i)[0]` per point rather than
 indexing it. NGSolve's `mesh(px, py)` returns a mesh point that the
-GridFunction is then called on -- it is not `gfu(px, py)`.
+GridFunction is then called on. `gfu(px, py)` also works on a GridFunction and
+gives the same value, but any other CoefficientFunction called as `cf(px, py)`
+returns a PointEvaluationFunctional, not a number -- `cf(mesh(px, py))` is the
+form that works for both.
 
-A point that no cell covers does not raise: dolfinx returns an empty link
-list, and an interpolant asked outside its mesh will happily extrapolate. If
+A point that no cell covers is handled differently by each code. scikit-fem's
+`basis.probes` raises ValueError "Point is outside of the mesh.", and NGSolve
+raises NgException: "point out of domain" from `gfu(px, py)`, "Meshpoint not
+in mesh!" from `gfu(mesh(px, py))` (`mesh(px, py)` itself does not raise).
+dolfinx's `compute_colliding_cells` returns an empty link list without
+complaint, so the `.links(i)[0]` above raises IndexError. If
 your subdomain does not contain the whole probe grid -- and in a coupled
 problem it does not, each side owns part of it -- select the points inside
 YOUR extent before evaluating, and write only those rows.
@@ -3205,8 +3212,9 @@ def _fenics() -> str:
         "Both converged with non-matching interface meshes.",
         "fenics", _launch_py(),
         '''\
-* `LinearProblem` in dolfinx 0.9+ REQUIRES `petsc_options_prefix`. Omit it and
-  the constructor raises before anything is solved.
+* `LinearProblem` in dolfinx 0.10 REQUIRES the keyword-only
+  `petsc_options_prefix` (the keyword does not exist in 0.9.x). Omit it and
+  the constructor raises TypeError before anything is solved.
 * An interface Dirichlet BC from partner data is a `fem.Function` whose array
   you fill at the interface DOFs, then `fem.dirichletbc(function, dofs)` — the
   two-argument form. The scalar form `fem.dirichletbc(value, dofs, V)` cannot
@@ -3214,8 +3222,12 @@ def _fenics() -> str:
 * For the Neumann side you need `meshtags` + a subdomain `ds` measure. A bare
   `ufl.ds` applies the flux to the WHOLE boundary, including the outer
   Dirichlet edge, which is silently wrong rather than an error.
-* `dmesh.meshtags` wants the facet indices SORTED. Unsorted indices are
-  accepted and then tag the wrong facets.
+* `dmesh.meshtags` wants the facet indices SORTED and unique, with the values
+  permuted alongside, and the release build does not check it. In serial an
+  unsorted array still integrates correctly. Under MPI, an unsorted array that
+  contains ghost facets (e.g. from `locate_entities`) makes `ds(tag)`
+  integrate the wrong facets, because the ghost trimming assumes sorted
+  indices.
 * `V.tabulate_dof_coordinates()` gives the DOF coordinates that
   `x.array` is indexed by — use those, not the mesh geometry nodes, or the
   interface values land on the wrong entries for anything above P1.
@@ -3487,7 +3499,7 @@ def why_4c_did_not_finish():
                 _why.append("CALCFLUX_BOUNDARY is set but no `SCATRA FLUX CALC LINE CONDITIONS` (SURF in 3-D) entry "
                             "names the interface, and 4C refuses flux output without one")
             _blocks = _re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\\s*$)", _txt, flags=_re.M)
-            _topo = set(_re.findall(r"\\b(DNODE|DLINE|DSURFACE|DVOL)\\s+(\\d+)", _txt))
+            _topo = set(_re.findall(r"\\b(DNODE|DLINE|DSURF|DVOL)\\w*\\s+(\\d+)", _txt))   # DSURF(ACE), DVOL(UME)
             for _b in _blocks:
                 _head = _b.split(":", 1)[0].strip()
                 _kw = _re.search(r"\\b(POINT|LINE|SURF|VOL)\\b", _head) if _head.endswith("CONDITIONS") else None
@@ -3497,7 +3509,7 @@ def why_4c_did_not_finish():
                 _noid = [e for e in _entries if not _re.search(r"\\bE:\\s*\\d+|NODE_SET_NAME", e)]
                 if _noid:
                     _why.append(f"{len(_noid)} entr{'y' if len(_noid) == 1 else 'ies'} in {_head} without `E: <id>` (or NODE_SET_NAME)")
-                _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURFACE", "VOL": "DVOL"}[_kw.group(1)]
+                _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURF", "VOL": "DVOL"}[_kw.group(1)]
                 _ids = _re.findall(r"\\bE:\\s*(\\d+)", _b)
                 _missing = sorted({i for i in _ids if (_kind, i) not in _topo}, key=int)
                 if _missing:
@@ -3567,11 +3579,13 @@ atexit.register(_diagnose_at_exit)
 # numbers across ALL condition families. A Dirichlet block restarting at `E: 1`
 # silently rebinds the interface DNODEs and zeroes the field -- number the
 # families continuously. And this build writes scatra VTU by default with NO
-# `VTK` section; adding one is rejected as an invalid section. WRITE NO `IO:`
-# SECTION AT ALL -- no VERBOSITY, no RUNTIME VTK OUTPUT, no PREFIX: measured
-# in three trial decks tonight, every `IO:` block aborted the read with
-# "Could not match this input"; the VTU files appear under out-vtk-files/
-# without it.
+# `VTK` section; adding one is rejected as an invalid section. An `IO:`
+# section is valid in a Scalar_Transport deck, but only with IO's own keys:
+# VERBOSITY takes minimal|standard|verbose|debug (or capitalised), there is no
+# PREFIX key (only PREFIX_GROUP_ID), and RUNTIME VTK OUTPUT is not an IO key
+# but its own top-level section `IO/RUNTIME VTK OUTPUT`. An unknown IO key or
+# value aborts the read with "Could not match this input"; the VTU files
+# appear under out-vtk-files/ without any IO section.
 #
 # Run 4C with the binary at config `fourc_bin` (env FOURC_BIN; discover(
 # query='list') prints it on THIS install) and its dependency libraries on
@@ -3612,13 +3626,13 @@ for _lg in sorted(glob.glob("*.log")):
 import re as _re
 for _dk in sorted(glob.glob("*.4C.yaml")) or sorted(glob.glob("*.yaml")):
     _txt = open(_dk, errors="ignore").read()
-    _topo = set(_re.findall(r"\\b(DNODE|DLINE|DSURFACE|DVOL)\\s+(\\d+)", _txt))
+    _topo = set(_re.findall(r"\\b(DNODE|DLINE|DSURF|DVOL)\\w*\\s+(\\d+)", _txt))   # DSURF(ACE), DVOL(UME)
     _lost = []
     for _b in _re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\\s*$)", _txt, flags=_re.M):
         _head = _b.split(":", 1)[0].strip()
         _kw = _re.search(r"\\b(POINT|LINE|SURF|VOL)\\b", _head) if _head.endswith("CONDITIONS") else None
         if _kw:   # every condition family with a geometry word (SCATRA FLUX CALC LINE CONDITIONS too)
-            _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURFACE", "VOL": "DVOL"}[_kw.group(1)]
+            _kind = {"POINT": "DNODE", "LINE": "DLINE", "SURF": "DSURF", "VOL": "DVOL"}[_kw.group(1)]
             _lost += [f"{_head} E {x}" for x in _re.findall(r"\\bE:\\s*(\\d+)", _b) if (_kind, x) not in _topo]
     if _lost:
         raise SystemExit(f"DECK CHECK: {_dk} puts conditions on E ids that no *-NODE TOPOLOGY section defines "
@@ -3916,10 +3930,12 @@ def _ngsolve() -> str:
   region, so setting the outer Dirichlet value and then the interface value
   loses one of them — and the run finishes with a plausible, WRONG answer, not
   an error. Put every Dirichlet value into ONE `mesh.BoundaryCF({...})`.
-* `Integrate(grad(gfu)[0], mesh, definedon=mesh.Boundaries("..."))` RETURNS
-  EXACTLY 0.0. An H1 GridFunction's gradient has no boundary trace. Use the
-  reaction/residual method — `a.mat * gfu.vec - f.vec` restricted to the
-  interface DOFs — which is also the more accurate flux.
+* On an x = const interface, `Integrate(grad(gfu)[0], mesh,
+  definedon=mesh.Boundaries("..."))` RETURNS EXACTLY 0.0: on boundary elements
+  an H1 GridFunction's `grad(gfu)` is the TANGENTIAL (surface) gradient, with
+  no normal component. `BoundaryFromVolumeCF(grad(gfu))` gives the volume
+  gradient there. Use the reaction/residual method — `a.mat * gfu.vec - f.vec`
+  restricted to the interface DOFs — which is also the more accurate flux.
 * `SplineGeometry.AddRectangle(..., bcs=(...))` names the edges in the order
   bottom, right, top, left. Getting that order wrong silently puts the
   interface condition on the wrong edge.
@@ -4042,7 +4058,8 @@ def _fsi() -> str:
         "the VTU back, so it runs under an ordinary python with numpy and "
         "meshio, not under 4C). Running the pair once with each is how you find "
         "out whether an answer depends on one structure code. Two things worth "
-        "knowing before you use the 4C one: its WALL QUAD4 is bilinear and "
+        "knowing before you use the 4C one: its QUAD4 (WALL before 4C "
+        "2026.2.0, SOLID from 2026.2.0 on) is bilinear and "
         "shear-locks in bending, so a plate a few elements thick comes out too "
         "stiff and the mesh has to be refined until that bias is below whatever "
         "you are asserting; and a spatially varying surface traction goes in as "
@@ -4667,15 +4684,28 @@ checkpoint calls, always.
   * `pyprecice` must match `libprecice`'s major version. A mismatch shows up as
     an ImportError or an immediate segfault, not as a helpful message.
   * The participant NAME, the MESH name and the DATA names in your script must
-    match the spec EXACTLY, character for character. preCICE aborts on a
-    mismatch, but only after both sides have connected.
-  * A stale `precice-run/` directory in `work_dir` from a killed run makes the
-    next run hang on connect. Delete it before re-running.
-  * A PARTICIPANT THAT NEVER STARTS MAKES THE OTHER BLOCK FOREVER. preCICE has
-    no connect timeout. If one `command` is wrong — bad interpreter, missing
-    module — the partner sits in `initialize()` until openPASO's `timeout` fires,
-    and because the orchestrator waits on the participants one after another
-    the real wall-clock cost is N x timeout. Run each participant's command by
+    match the spec EXACTLY, character for character. A wrong participant name
+    aborts in the `Participant` constructor and a wrong mesh name at
+    `set_mesh_vertices`, both at once and without the partner (`... is not
+    defined in the preCICE configuration` / `The mesh named "X" is unknown to
+    preCICE`). Only a wrong DATA name surfaces after both sides have connected,
+    at the first `read_data` / `write_data` that uses it (`The given data "X"
+    is unknown to preCICE mesh "M"`).
+  * A stale `precice-run/` directory in `work_dir` from a killed run breaks the
+    next one: the participant that publishes the connection file (the m2n
+    `connector=`) aborts at once with `Unable to establish connection as a
+    connection file already exists at "./precice-run/..."`, and its partner,
+    if launched by hand, blocks in `initialize()`. Delete it before re-running.
+  * A PARTICIPANT THAT NEVER CONNECTS MAKES THE OTHER BLOCK. preCICE has no
+    connect timeout; openPASO watches all participants against ONE shared
+    `timeout`. A `command` that exits at once (a missing module, exit 1) gets
+    the others killed within a second, and the error names it. A `command` that
+    runs but never reaches preCICE leaves the partner in `initialize()` until
+    `timeout`, then both are killed (one timeout, not one per participant). A
+    `command` that cannot start at all (an interpreter path that does not
+    exist) fails the call at once with "No such file or directory", naming
+    the participant and the path, and the participants already started are
+    killed. Run each participant's command by
     hand once (it will block at initialize; that is the correct symptom) before
     coupling.
   * `mapping="rbf"` generates INVALID XML — preCICE v3 needs a
@@ -4687,7 +4717,10 @@ checkpoint calls, always.
     returns only a short tail, so your solver's own prints are usually NOT in
     the returned `logs`. Write your diagnostics to a file in `work_dir`.
   * `set_mesh_vertices` expects an (N, dimensions) array. Passing 3-column
-    coordinates to a `dimensions=2` config is a shape error at initialize time.
+    coordinates to a `dimensions=2` config fails at once in
+    `set_mesh_vertices`, before initialize: `AssertionError: Dimensions of
+    vertex coordinates in set_mesh_vertices does not match with dimensions in
+    problem definition. Provided dimensions: 3, expected dimensions: 2`.
 
 ## 4. WHAT preCICE DOES THAT `couple` DOES NOT
 
@@ -4703,10 +4736,11 @@ preCICE adapter at all, which on this install is most of them.
 ## 5. ADAPTER REALITY CHECK
 
 preCICE's own adapter ecosystem (OpenFOAM, CalculiX, SU2, FEniCS via
-`fenicsprecice`, deal.II via a community adapter) is separate from whether a
-backend can be driven as a plain participant here. What matters for
-`couple_precice` is only whether `import precice` works in that backend's
-interpreter and whether you can drive that backend's time loop from Python.
+`fenicsprecice`, deal.II via the official `precice/dealii-adapter`) is
+separate from whether a backend can be driven as a plain participant here.
+What matters for `couple_precice` is only whether `import precice` works in
+that backend's interpreter and whether you can drive that backend's time loop
+from Python.
 Per-backend verdicts: `knowledge(topic='precice', solver='<name>')`.
 '''
 
@@ -4814,10 +4848,18 @@ avoided in the participant that fixture couples:
     interface value ends up with one of them gone — and the run completes with
     a plausible, wrong answer. Put every Dirichlet value into ONE
     `mesh.BoundaryCF({...})` and `Set` once.
-  * `Integrate(grad(gfu)[0], mesh, definedon=mesh.Boundaries("..."))` RETURNS
-    EXACTLY 0.0. An H1 GridFunction's gradient has no boundary trace, so this
-    silently reports zero flux. Use the reaction/residual method instead: form
-    `a.mat * gfu.vec - f.vec` and sum it over the boundary DOFs.
+  * On an x = const interface, `Integrate(grad(gfu)[0], mesh,
+    definedon=mesh.Boundaries("..."))` RETURNS EXACTLY 0.0: on boundary
+    elements an H1 GridFunction's `grad(gfu)` is the TANGENTIAL (surface)
+    gradient, with no normal component, so this silently reports zero flux.
+    `BoundaryFromVolumeCF(grad(gfu))` gives the volume gradient there. Use the
+    reaction/residual method instead: form `a.mat * gfu.vec - f.vec` and sum it
+    over the boundary's VERTEX DOFs (`fes.GetDofNrs(NodeId(VERTEX, v))`). At
+    order 1 those are all of its DOFs. From order 2 on, the boundary also
+    carries edge DOFs of NGSolve's hierarchical basis, and their residuals are
+    not part of the flux: adding them shifted the total by the same amount at
+    every mesh size, while the vertex-DOF sum matched an exactly representable
+    flux to round-off at orders 2 and 3.
   * Applying an incoming flux is a `LinearForm` term `g * v * ds("interface")`,
     with `g` a `CoefficientFunction`; build it by fitting or interpolating the
     incoming samples, since preCICE hands you values at YOUR vertices.
@@ -4872,9 +4914,10 @@ at all:
   * DUNE-fem JIT-COMPILES EACH DISTINCT SCHEME. Measured on a cold cache here
     that is MINUTES, not the "about a minute" this note used to claim — the two
     schemes of a Dirichlet-Neumann heat participant took about seven. Build and
-    COMPILE the scheme ONCE, BEFORE `precice.Participant(...)` — a throw-away
-    `scheme.solve(...)` is what actually triggers the compile, so constructing
-    the scheme is not enough — or the partner blocks on connect while you wait.
+    COMPILE the scheme ONCE, BEFORE `precice.Participant(...)` — constructing it
+    is what compiles: `galerkin(...)` builds its JIT modules inside the
+    constructor and the first `scheme.solve(...)` builds none, so no throw-away
+    solve is needed — or the partner blocks on connect while you wait.
     Make the coupled boundary datum a `dune.ufl.Constant` (or a discrete
     function) and MUTATE it each window instead of rebuilding the scheme, or
     you pay that compile on every coupling iteration.''',
@@ -4916,8 +4959,9 @@ with the file exchange replaced by the preCICE calls below.
   * The C++ API mirrors the Python one: `precice::Participant`,
     `setMeshVertices`, `readData`, `writeData`, `advance`,
     `requiresWritingCheckpoint` / `requiresReadingCheckpoint`.
-  * Community deal.II preCICE adapters exist upstream, but none is needed for
-    this: linking the library directly is what was proven here.''',
+  * An official preCICE deal.II adapter (github.com/precice/dealii-adapter)
+    exists upstream, but none is needed for this: linking the library directly
+    is what was proven here.''',
     },
     "kratos": {
         "title": "Kratos Multiphysics",
@@ -4945,9 +4989,10 @@ part, and it is harder than for any other backend here:
       - breaks `cyprecice`, which is a compiled extension built against ONE
         numpy ABI — import it next to a different numpy and it fails with
         `numpy.core.multiarray failed to import`.
-    What works is a NARROW shim: a directory of symlinks to exactly `precice`,
-    `cyprecice` (package and `.so`), `numpy`, `numpy.libs` and `mpi4py`, and
-    that directory on `PYTHONPATH`. preCICE then gets the numpy it was built
+    What works is a NARROW shim: a directory of symlinks to exactly the
+    `precice` package, the `cyprecice.cpython-*.so` extension module (there is
+    no `cyprecice` package), `numpy`, `numpy.libs` and `mpi4py`, and that
+    directory on `PYTHONPATH`. preCICE then gets the numpy it was built
     against and Kratos keeps everything else of its own.
   * PROBE THE WHOLE GATE, not half of it. `import KratosMultiphysics` alone
     picks the wrong interpreter: this host has a system Python that imports
@@ -5084,9 +5129,13 @@ as an XML-writing / log-parsing wrapper. Call
 def _febio() -> str:
     return _payload(
         "FEBio",
-        "**Either side — but NOT for heat.** FEBio 4 has no heat module "
-        "(FEBioHeat was removed upstream and survives only as a plugin), so a "
-        "conduction participant is impossible here. The shipped script solves "
+        "**Either side — on the ELASTIC analogue, not heat.** FEBio 4 has no "
+        "heat module (FEBioHeat was removed upstream and survives only as a "
+        "plugin), but conduction is still possible: the thermo-fluid module "
+        "with every fluid velocity DOF fixed solves Fourier conduction (the "
+        "heat_3d_bar template), and per-node `prescribed fluid temperature` "
+        "maps and per-face `fluid heat flux` maps carry interface data. The "
+        "shipped script does not use that route; it solves "
         "the exact linear analogue instead: a uniaxial-strain elastic bar, "
         "where displacement plays the role of temperature and the P-wave "
         "modulus the role of conductivity. Both roles were run as a real "
@@ -5291,8 +5340,10 @@ def _dune() -> str:
   interpolating the coordinate functions into the same space and reading
   `.as_numpy` — `space.interpolate(x[0]).as_numpy` gives the x of every dof, in
   dof order.
-* `structuredGrid` CARRIES NO BOUNDARY IDS. Select the outer and interface
-  boundaries with a coordinate predicate,
+* `structuredGrid` CARRIES ONLY ITS GEOMETRIC BOUNDARY IDS: in 2-D 1 = x-min,
+  2 = x-max, 3 = y-min, 4 = y-max, usable as `ds(k)` and as
+  `DirichletBC(space, g, k)`, and no user-assigned tags. Select a boundary that
+  is not a whole side of the box with a coordinate predicate,
   `conditional(lt(abs(x[0] - X_IFACE), 1e-8), 1, 0)`, and use the same
   indicator both for the Dirichlet BC and to MASK the Neumann `ds` term. An
   unmasked `ds` puts the interface flux on the whole boundary.

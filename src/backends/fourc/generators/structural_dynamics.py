@@ -446,6 +446,9 @@ class StructuralDynamicsGenerator(BaseGenerator):
     _TEMPLATES: dict[str, str] = {
         "genalpha_2d": """\
 # FORMAT TEMPLATE — all numerical values are placeholders.
+# Written in the input grammar of 4C before 2026.2.0 (the WALL element); from
+# 4C 2026.2.0 on a 2-D solid is SOLID with THICKNESS and PLANE_ASSUMPTION. The decks openPASO runs are served in the grammar of the
+# 4C it finds.
 TITLE:
   - "Structural dynamics -- 2D impact with GenAlpha time integration"
 PROBLEM SIZE:

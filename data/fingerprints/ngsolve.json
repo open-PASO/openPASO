@@ -1,0 +1,24 @@
+{
+  "solver": "ngsolve",
+  "timestamp": "2026-05-07T23:08:25.029295",
+  "ngsolve": {
+    "importable": true,
+    "version": "6.2.2604"
+  },
+  "netgen": {
+    "importable": true,
+    "version": "unknown"
+  },
+  "api": {
+    "ngsolve.H1": true,
+    "ngsolve.HCurl": true,
+    "ngsolve.HDiv": true,
+    "ngsolve.VectorH1": true,
+    "ngsolve.BilinearForm": true,
+    "ngsolve.LinearForm": true,
+    "ngsolve.GridFunction": true,
+    "ngsolve.Mesh": true,
+    "ngsolve.VTKOutput": true,
+    "netgen.occ.OCCGeometry": true
+  }
+}

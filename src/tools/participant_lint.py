@@ -213,9 +213,13 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "facet tags come from the lowercase FUNCTION in the mesh module: "
      "dolfinx.mesh.meshtags(mesh, mesh.topology.dim - 1, indices, values)"),
     ("fenics", r"dolfinx\.nls\.NewtonSolver|from\s+dolfinx\.nls\s+import\s+NewtonSolver",
-     "ImportError: cannot import name 'NewtonSolver' from 'dolfinx.nls'",
-     "the Newton solver is in the petsc submodule: `import dolfinx.nls.petsc` "
-     "then dolfinx.nls.petsc.NewtonSolver"),
+     "ImportError: cannot import name 'NewtonSolver' from 'dolfinx.nls' (the attribute "
+     "form: AttributeError: module 'dolfinx.nls' has no attribute 'NewtonSolver')",
+     "on dolfinx 0.10 use dolfinx.fem.petsc.NonlinearProblem(F, u, bcs=[...], "
+     "petsc_options_prefix='nl_').solve() (PETSc SNES); dolfinx.nls.petsc.NewtonSolver "
+     "still exists but is deprecated (the DeprecationWarning is hidden by default) and "
+     "takes a dolfinx.fem.petsc.NewtonSolverNonlinearProblem -- handed a NonlinearProblem "
+     "it raises AttributeError: 'NonlinearProblem' object has no attribute 'a'"),
     ("fenics", r"\b(?:conditional|lt|gt|le|ge)\s*\([^\n]*?\)\s*[|&]",
      "TypeError: unsupported operand type(s) for |: 'Conditional' and 'Conditional'",
      "UFL conditions combine with Or(a, b) and And(a, b) from ufl, not with "
@@ -229,7 +233,7 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "reads as a backend fault -- one recorded run called it a segfault and "
      "abandoned the backend with Or already on its own import line"),
     ("fenics", r"\bufl\.Eq\s*\(",
-     "ImportError: cannot import name 'Eq' from 'ufl'",
+     "AttributeError: module 'ufl' has no attribute 'Eq'",
      "a variational equation is written with the operator, `a == L`; ufl.eq is "
      "a BOOLEAN comparison for conditionals and is not it"),
     ("skfem", r"\.ndof\b",
@@ -318,7 +322,7 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "TypeError: unsupported operand type(s) for *: 'int' and 'property'", _SKFEM_ELEMENT_FIX),
     # ── NGSolve ───────────────────────────────────────────────────────────
     ("ngsolve", r"\.AddVertex\s*\(",
-     "AttributeError: 'SplineGeometry' object has no attribute 'AddVertex'",
+     "AttributeError: 'netgen.libngpy._geom2d.SplineGeometry' object has no attribute 'AddVertex'",
      "a rectangle is geo.AddRectangle((X0, Y0), (X1, Y1), bcs=(bottom, right, top, left)); "
      "single points are AddPoint(x, y) / AppendPoint(x, y), with SEPARATE coordinates"),
     ("ngsolve", r"from\s+ngsolve\s+import\s*\([^)]*\b(?:CG|GMRes|MinRes)\b|from\s+ngsolve\s+import[^\n(]*\b(?:CG|GMRes|MinRes)\b",
@@ -326,13 +330,13 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "the Krylov solvers live in ngsolve.solvers (CG, GMRes, MinRes): "
      "`from ngsolve.solvers import CG` (measured on this install)"),
     ("ngsolve", r"\.AddRect\s*\(",
-     "AttributeError: 'SplineGeometry' object has no attribute 'AddRect'",
+     "AttributeError: 'netgen.libngpy._geom2d.SplineGeometry' object has no attribute 'AddRect'",
      "the call is AddRectangle, spelled in full"),
     ("ngsolve", r"\.Faces\s*\(\s*\)|\.Vertices\s*\(\s*\)|\.Edges\s*\(\s*\)",
-     "AttributeError: 'Mesh' object has no attribute 'Faces' (or 'Vertices')",
+     "AttributeError: 'ngsolve.comp.Mesh' object has no attribute 'Faces' (or 'Vertices', 'Edges')",
      "the mesh iterators are LOWERCASE properties: mesh.vertices, mesh.faces, mesh.edges"),
     ("ngsolve", r"\bfes\.Dofs\s*\(",
-     "AttributeError: 'H1' object has no attribute 'Dofs'",
+     "AttributeError: 'ngsolve.comp.H1' object has no attribute 'Dofs'",
      "a vertex's dof is fes.GetDofNrs(NodeId(VERTEX, vert.nr))[0]; the free set is fes.FreeDofs()"),
     ("ngsolve", r"\.vertexnr\b|NodeId\([^)]*\)\.index\b|\bv\.index\b",
      "AttributeError: the node object has no 'vertexnr' / 'index'",
@@ -385,7 +389,8 @@ _TRAPS: tuple[tuple[str, str, str, str], ...] = (
      "TypeError: __getitem__(): incompatible function arguments (a BitArray is not an index)",
      "take numbers out with v.FV().NumPy() or np.array(v), and assign through v.data"),
     ("ngsolve", r"CoefficientFunction\s*\(\s*(lambda|[A-Z_]+SRC)|(?<![A-Za-z_])CF\s*\(\s*lambda",
-     "TypeError: incompatible constructor arguments (a Python function is not a CoefficientFunction)",
+     "ValueError: Cannot make CoefficientFunction from <function ...> of type <class 'function'> "
+     "(a Python function is not a CoefficientFunction)",
      "sample the function at the vertices into a P1 GridFunction and integrate that; a GridFunction "
      "IS a CoefficientFunction"),
     # A MATRIX WRITTEN AS A PYTHON LIST. Measured on this install: CoefficientFunction([[a, b], [c, d]])
@@ -979,9 +984,11 @@ _ERROR_FIXES: tuple = (
      "parent -- add `import dolfinx.fem.petsc` (or `from dolfinx.fem.petsc "
      "import LinearProblem`) and the attribute appears"),
     (("fenics",), "cannot import name 'NewtonSolver' from 'dolfinx.nls'",
-     "FEniCSx: the Newton solver is in the petsc submodule -- `import "
-     "dolfinx.nls.petsc` then dolfinx.nls.petsc.NewtonSolver. The same shape as "
-     "dolfinx.fem.petsc: importing the parent does not bring it in"),
+     "FEniCSx: on dolfinx 0.10 the nonlinear solve is "
+     "dolfinx.fem.petsc.NonlinearProblem(F, u, bcs=[...], petsc_options_prefix='nl_').solve() "
+     "(PETSc SNES). dolfinx.nls.petsc.NewtonSolver lives in the petsc submodule (importing "
+     "dolfinx.nls does not bring it in), is deprecated, and takes a "
+     "dolfinx.fem.petsc.NewtonSolverNonlinearProblem, not a NonlinearProblem"),
     (("fenics",), "'MatrixCSR' object has no attribute 'assemble'", "FEniCSx: " + _DOLFINX_CSR_FIX),
     (("fenics",), "'MatrixCSR' object has no attribute 'mat'", "FEniCSx: " + _DOLFINX_CSR_FIX),
     (("fenics",), "'MatrixCSR' object has no attribute 'shape'", "FEniCSx: " + _DOLFINX_CSR_FIX),
@@ -1175,6 +1182,15 @@ _ERROR_FIXES: tuple = (
     (("dealii",), "is not a class, struct, or union type",
      "deal.II: a solver takes the VECTOR type as its template argument, not the number type -- "
      "SolverCG<Vector<double>> cg(control), not SolverCG<double>"),
+    # MEASURED ON A COUPLED ELASTICITY ROUND: seven runs of one deal.II side stopped on this line and nothing
+    # answered it. The side had re-typed the served program without its ASSEMBLY stop, and its strain did not
+    # look at which component a dof belongs to. Rebuilt here: that strain stops exactly so.
+    (("dealii",), "UMFPACK reports that the matrix is singular",
+     "deal.II: the matrix UMFPACK factorized is singular, it has a null space. Measured in the served elastic "
+     "program: a strain eps(phi_i) that does not look at which component dof i belongs to (built from "
+     "fe_values.shape_grad(i, q) for every i) stops exactly so; the served ASSEMBLY stop measures system_matrix on "
+     "the rigid motions and the uniform strains before any solve and names it there, so a program written "
+     "without that stop meets this line instead"),
     # A NAME THAT IS NOT REGISTERED IS ANSWERED FOR WHAT IT NAMES. One entry keyed on "is not
     # registered" answered a missing CONDITION with the conduction ELEMENT. Kratos 10.3.0 says which
     # kind it is, in two shapes each (measured): CreateNewElement / CreateNewCondition follow the
@@ -1440,6 +1456,15 @@ _UNNAMED_CRASH = ("the program was KILLED BY SIGSEGV (exit 139, 'dumped core'): 
                   "get_dof_indices. `python -X faulthandler <script>` prints the Python line a crash died on. "
                   "Measured on this install.")
 _OTHER_CODE = re.compile(r"envs/dune[-\w]*/bin/python|/dune/|dolfinx|ngsolve|netgen|skfem|\bdune\.")
+# A FEBio CRASH WHILE IT READS ITS DECK. Measured on a coupled elasticity round: every FEBio run of one cell
+# over 13 minutes ended in a segmentation fault right after "Reading file <deck> ...", and the answer it
+# got named Kratos and deal.II causes. On this install FEBio 4.12 crashes so on an <elem> whose node ids
+# are separated by spaces (one such element is enough; the same deck with commas runs).
+_FEBIO_READ_CRASH = re.compile(r"^.*Reading file \S+ \.\.\.\s*$", re.M)
+_FEBIO_CRASH = ("FEBio crashed while it read the deck (a segmentation fault right after 'Reading file ...', "
+                "before FEBio could print an error): measured on this install, FEBio 4.12 does so on an <elem> "
+                "whose node ids are separated by spaces, where it reads one comma-separated list. Write every "
+                "id list of the deck comma-separated.")
 
 # A RUN ENDED FROM OUTSIDE, IN PETSC'S WORDS. dune-fem starts PETSc, and PETSc's signal handler
 # turns the SIGTERM that `timeout N` sends after N seconds into "PETSC ERROR: Caught signal number
@@ -1553,7 +1578,9 @@ def findings_from_output(output: str, command: str = "") -> list:
     # A KRATOS CRASH, OR ONE WHOSE CODE THE OUTPUT DOES NOT NAME, IS ANSWERED TOO (see _KRATOS_CRASH).
     elif _CRASH.search(text):
         _seen = text + "\n" + (command if isinstance(command, str) else "")
-        if "kratos" in codes or re.search(r"KratosMultiphysics|\bKRATOS\b", _seen):
+        if _FEBIO_READ_CRASH.search(text) and re.search(r"febio|\.feb\b", _seen, re.I):
+            out.append(_FEBIO_CRASH)
+        elif "kratos" in codes or re.search(r"KratosMultiphysics|\bKRATOS\b", _seen):
             out.append(_KRATOS_CRASH)
         elif not codes and not _OTHER_CODE.search(_seen):
             out.append(_UNNAMED_CRASH)
@@ -1667,7 +1694,28 @@ _FFV = ("FEFaceValues holds no dof numbers: the dofs of the face's cell are cell
         "indices a std::vector<types::global_dof_index> of fe.n_dofs_per_cell() entries, and shape_value(i, q) "
         "runs over all of that cell's dofs, i from 0 to fe.n_dofs_per_cell() - 1 (for FE_Q it is zero for a dof "
         "off that face)")
+_HOLE2_NAMES = ("stress and body_force are the two names hole 2 of the served elastic program leaves for hole 3 "
+                "and the served lines after it: declared inside a { } block they end at its closing brace, and the "
+                "build stops exactly so (measured); a hole 2 left empty stops the same way. Declare both at the "
+                "level of main, outside any block")
+_STRAIN = ("the strain of shape function i of a two-component FESystem is fe_values[FEValuesExtractors::Vector(0)]"
+           ".symmetric_gradient(i, q), a SymmetricTensor<2, 2>")
 _DEALII_FIRST_ERRORS = (
+    # THE ELASTIC PROGRAM'S HOLE 2, AND THREE TWO-COMPONENT FIRST ERRORS. Measured on a coupled elasticity
+    # round: both cells that filled hole 2 wrapped it in braces and drew "a hole left empty"; one cell
+    # rewrote its whole program over these first errors. Each was compiled on this install.
+    (("dealii_side_elastic.cc", "'stress' was not declared in this scope"), _HOLE2_NAMES),
+    (("dealii_side_elastic.cc", "'body_force' was not declared in this scope"), _HOLE2_NAMES),
+    (("conversion from", "Tensor<2", "to non-scalar type", "Tensor<1"),
+     "the gradient of a two-component shape function, fe_values[FEValuesExtractors::Vector(0)].gradient(i, q), is "
+     "a Tensor<2, 2>; one component's gradient is fe_values.shape_grad_component(i, q, c), a Tensor<1, 2>, and "
+     + _STRAIN),
+    (("SymmetricTensor<", "has no member named 'trace'"),
+     "trace is a free function, trace(e), and the identity is unit_symmetric_tensor<2>() (both in "
+     "deal.II/base/symmetric_tensor.h)"),
+    (("no matching function", "::shape_grad("),
+     "shape_grad(i, q) takes two arguments and is the gradient of the one nonzero component of shape function i; "
+     "a named component's is shape_grad_component(i, q, c), and " + _STRAIN),
     (("undefined reference to", "AffineConstraints<double>::distribute<dealii::SparseMatrix"), _DISTRIBUTE),
     (("no matching function", "AffineConstraints<double>::distribute(dealii::SparseMatrix"), _DISTRIBUTE),
     (("no matching function", "AffineConstraints<double>::distribute(dealii::Vector<double>&, dealii::Vector"),

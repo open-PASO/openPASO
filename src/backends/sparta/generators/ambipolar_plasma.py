@@ -51,7 +51,7 @@ surf_modify      1 collide wall
 fix              ambi ambipolar e N+ N2+ NO+ O+ O2+
 collide          vss species air.vss relax variable
 # 'vibrate discrete' is safe HERE only because every species in air.species has
-# vibdof <= 2: particle.cpp:177 aborts with 'Discrete vibrational info for
+# vibdof <= 2: particle.cpp:177 (line 176 in 27Aug2026) aborts with 'Discrete vibrational info for
 # species <X> not read in' for any vibdof > 2 species that has no 'vibfile' on
 # its species line. Do not copy this line onto a CO2 deck.
 collide_modify   vremax 1000 yes vibrate discrete rotate smooth
@@ -90,9 +90,12 @@ KNOWLEDGE = {
             "collide_modify": "collide_modify ambipolar yes — required for the "
                               "collision routines to treat the attached "
                               "electrons",
-            "mixture copy/delete": "mixture <new> copy <old> ; mixture <new> "
+            "mixture copy/delete": "mixture <old> copy <new> ; mixture <new> "
                                    "delete <species> — the standard way to "
-                                   "build an electron-free inflow mixture",
+                                   "build an electron-free inflow mixture "
+                                   "(examples/ambi/in.ambi: 'mixture species "
+                                   "copy noelectron' then 'mixture "
+                                   "noelectron delete e')",
             "react": "react tce <file> — the ionisation channels live in the "
                      "reaction file, so ambipolar without react produces no "
                      "ions at all",
@@ -127,7 +130,7 @@ KNOWLEDGE = {
             "by 'mixture <new> delete e' — the copy target is the SECOND "
             "argument, which is the opposite of how it reads. An earlier wording "
             "gave it as 'mixture <new> copy <old>', which aborts with 'ERROR: "
-            "New mixture copy mixture already exists (../mixture.cpp:439)' "
+            "New mixture copy mixture already exists (../mixture.cpp:439)' (line 443 in 27Aug2026) "
             "because the name being created already exists. The upstream deck "
             "examples/ambi/in.ambi is the reference: 'mixture species copy "
             "noelectron' then 'mixture noelectron delete e'. "
@@ -155,7 +158,7 @@ KNOWLEDGE = {
             "ambipolar collision path is only switched on by the collide_modify "
             "line. The reverse is loud: 'collide_modify ambipolar yes' with no "
             "'fix ambipolar' defined aborts with 'ERROR: Collision ambipolar "
-            "without fix ambipolar (../collide.cpp:293)'. "
+            "without fix ambipolar (../collide.cpp:293)' (line 328 in 27Aug2026). "
             "Signal: for the silent direction, do NOT use the electron count "
             "the way an earlier wording said. It claimed that 'once ions "
             "appear, the electron count must track the total ion count' and "
@@ -172,13 +175,17 @@ KNOWLEDGE = {
             "accumulate = the ambipolar path is ON; a growing electron column "
             "= the collide_modify line is MISSING.",
 
-            "[Setup] 'surf_react <ID> prob <file>' validates every probability "
-            "in the file against the species list, so a surface-reaction file "
-            "written for a different species set fails at read time, not at "
-            "run time. "
+            "[Setup] 'surf_react <ID> prob <file>' only parses the file when "
+            "the command is read. At the start of the first run, reactions "
+            "whose species are not declared are dropped silently, so a file "
+            "written for a different species set is accepted with no error. "
+            "The remaining reactions are then checked so that each reactant "
+            "species' probabilities sum to <= 1. "
             "Signal: 'ERROR: Surface reaction probability for a species > 1.0 "
-            "(../surf_react_prob.cpp:287)' — usually it means the file's "
-            "column layout does not line up with your declared species.",
+            "(../surf_react_prob.cpp:287)' at run start (SPARTA 24Sep2025; "
+            "27Aug2026 raises it from line 292) — the active "
+            "reactions of one reactant species have probabilities summing to "
+            "more than 1.",
 
 "[Setup] An external body force needs THREE lines that agree, and "
             "getting two of them right leaves a run that is silently "
@@ -198,7 +205,7 @@ KNOWLEDGE = {
             "Signal: for the silent case there is NO signal — compare a "
             "temperature or mean kinetic energy against the same deck with the "
             "fix deleted and see whether anything moved. The loud cases are "
-            "'ERROR: External field fix ID not found (../update.cpp:221)' when "
+            "'ERROR: External field fix ID not found (../update.cpp:221)' (line 240 in 27Aug2026) when "
             "the global line names something that is not a fix, 'ERROR: "
             "Variable for fix field/grid is invalid style "
             "(../fix_field_grid.cpp:105)' for an equal-style variable where a "

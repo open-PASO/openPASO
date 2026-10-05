@@ -1,0 +1,19 @@
+{
+  "solver": "skfem",
+  "timestamp": "2026-05-07T23:08:25.332959",
+  "skfem": {
+    "importable": true,
+    "version": "12.0.1"
+  },
+  "api": {
+    "skfem.MeshTri": true,
+    "skfem.MeshQuad": true,
+    "skfem.MeshTet": true,
+    "skfem.ElementTriP1": true,
+    "skfem.ElementTriP2": true,
+    "skfem.Basis": true,
+    "skfem.asm": true,
+    "skfem.solve": true,
+    "skfem.condense": true
+  }
+}

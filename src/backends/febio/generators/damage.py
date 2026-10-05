@@ -143,7 +143,9 @@ KNOWLEDGE = {
                              "`DC von Mises stress`, `DC Drucker "
                              "shear stress`, `DC max shear stress`, "
                              "`DC max normal stress`, `DC max normal "
-                             "Lagrange strain`.",
+                             "Lagrange strain`, `DC octahedral shear "
+                             "strain`, `DC octahedral natural strain`, "
+                             "`DC Drucker-Prager`, `DC Deshpande-Fleck`.",
                 "_verified": (
                     "LIVE-VERIFIED 2026-08-03 on FEBio "
                     "4.12.0.86045466d — this exact material runs a "

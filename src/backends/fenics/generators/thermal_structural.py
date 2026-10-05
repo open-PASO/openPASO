@@ -26,7 +26,8 @@ KNOWLEDGE = {
         "the elastic Form is sigma = C : (eps(u) - eps_th). Signal: "
         "writing the RHS as alpha * DeltaT * v * dx (forgetting Id) "
         "couples thermal expansion only into a single component \u2014 the "
-        "dolfinx VectorH1 displacement Function develops anisotropic "
+        "dolfinx vector Lagrange displacement Function "
+        "(fem.functionspace(domain, ('Lagrange', 1, (gdim,)))) develops anisotropic "
         "strain in the XDMFFile output that does not match the "
         "expected free-expansion alpha*DeltaT in all directions. "
         "(Audit 2026-06-02.)",
@@ -41,16 +42,26 @@ KNOWLEDGE = {
         "uses the full 3D Lame lambda \u2014 do NOT swap in plane-stress "
         "lambda_star = 2*lambda*mu/(lambda+2*mu) for a thin-plate "
         "approximation unless explicitly modelling plane stress. "
-        "Signal: a dolfinx plane_strain Function tip deflection "
-        "differs from the analytic plane_stress reference by a factor "
-        "(1-nu) at nu=0.3. (Audit 2026-06-02.)",
+        "Signal: under this template's thermal load the plane-strain "
+        "displacement is about (1+nu) times the plane-stress one, not "
+        "(1-nu): eps_zz = 0 adds nu*alpha*dT to the in-plane thermal "
+        "strain. Measured at nu=0.3 with the bottom edge clamped and T "
+        "linear in x: 1.31 to 1.32 times in max |u|, max |u_x| and "
+        "max |u_y|. "
+        "(Audit 2026-06-02; factor measured 2026-10-01.)",
         "[Input] A mechanical Dirichlet BC is required to remove the "
         "null space (translation + rotation rigid-body modes) \u2014 "
         "without it, GAMG and even direct solvers may fail. Signal: "
-        "running the PETScKrylovSolver on the structural step without "
-        "any dirichletbc on the VectorH1 displacement reports "
-        "KSPSolve: DIVERGED_INDEFINITE_PC or stalls with residual "
-        "~1e0; pinning one node fixes it. (Audit 2026-06-02.)",
+        "solving the structural step with this template's LinearProblem "
+        "(ksp_type cg, pc_type gamg; dolfinx has no PETScKrylovSolver) "
+        "without any dirichletbc on the vector displacement space "
+        "raises nothing, and problem.solver.getConvergedReason() is -4 "
+        "(DIVERGED_DTOL) after 11 iterations; only with "
+        "ksp_error_if_not_converged does solve() raise PETSc error "
+        "code 91, 'KSPSolve() has not converged, reason DIVERGED_DTOL'. "
+        "Pinning one node fixes it (reason 2 after 15 iterations). "
+        "(Audit 2026-06-02; re-measured 2026-10-01 on dolfinx 0.10.0, "
+        "40x40 mesh.)",
     ],
     "materials": {
         "E": {"range": [1e3, 1e12], "unit": "Pa"},

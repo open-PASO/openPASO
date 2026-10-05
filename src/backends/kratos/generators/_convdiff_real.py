@@ -49,9 +49,15 @@ it, and each one had a wrong first guess:
     read it as "not available in version 10.3.0" and abandoned the codes its
     task prescribed. A name that IS absent fails differently, inside
     CreateNewCondition: `The Condition "ThermalFace2D" is not registered!`.
-  * Kratos prints from C++ streams. An in-process `os.dup2` redirect of fd 1
-    captured ZERO bytes. If a log has to show which code ran, run the solve in
-    a SUBPROCESS and capture that.
+  * Kratos prints from C++ streams, and both they and Python's print() are
+    buffered when stdout is a file or a pipe. An in-process `os.dup2` redirect
+    of fd 1 captured ZERO bytes when fd 1 was restored without a flush: the
+    buffered output is written at exit, after the redirect is undone. Calling
+    KM.Logger.Flush() and sys.stdout.flush() before restoring fd 1 (or running
+    Python unbuffered, PYTHONUNBUFFERED=1) captured the Kratos lines too. A
+    Python-level redirect (contextlib.redirect_stdout) never sees the C++
+    output. If a log has to show which code ran, running the solve in a
+    SUBPROCESS and capturing that avoids all of this.
 """
 from __future__ import annotations
 

@@ -17,7 +17,10 @@ import re
 import subprocess
 from pathlib import Path
 
-_TOPO_WORDS = ("DNODE", "DLINE", "DSURFACE", "DVOL")
+# The entry words each topology section takes (4C_io_input_file_utils.cpp: the word must equal the
+# section's, or be DSURFACE in DSURF-NODE TOPOLOGY or DVOLUME in DVOL-NODE TOPOLOGY).
+_TOPO_WORDS = {"DNODE-NODE TOPOLOGY": ("DNODE",), "DLINE-NODE TOPOLOGY": ("DLINE",),
+               "DSURF-NODE TOPOLOGY": ("DSURF", "DSURFACE"), "DVOL-NODE TOPOLOGY": ("DVOL", "DVOLUME")}
 _E_IS_A_DESIGN_ID = (' -- E is the DESIGN-ENTITY id of the topology section (the number after DNODE/DLINE/DSURFACE/DVOL), never a node number: a node joins entity E through a topology line `NODE <n> DNODE <E>`, so a condition on E 9 needs a `"NODE 9 DNODE 9"`-style entry, not a node 9')
 _TOPOLOGY_PAIRS = ('the pairs are section `DNODE-NODE TOPOLOGY` with entries `NODE <n> DNODE <id>`, `DLINE-NODE TOPOLOGY` with `DLINE`, `DSURF-NODE TOPOLOGY` with entries `NODE <n> DSURFACE <id>` (section word DSURF, entry word DSURFACE), `DVOL-NODE TOPOLOGY` with `DVOL`')
 _VALID_CACHE: dict[str, set] = {}
@@ -33,10 +36,15 @@ def grammar(bin_path, ld: str | None = None) -> dict:
     g = {"sections": set(), "elements": set(), "materials": {}}
     try:
         if key and Path(key).is_file():
-            env = dict(os.environ)
+            # The library path the backend runs this binary with (4C's
+            # dependency directory for a source build, never for a Spack
+            # build), after any the caller names.
+            from backends.fourc.backend import fourc_library_env   # noqa: PLC0415
+            env = fourc_library_env(key)
             if ld:
-                env["LD_LIBRARY_PATH"] = f"{ld}:{env.get('LD_LIBRARY_PATH', '')}"
-            dump = subprocess.run([key, "-p"], capture_output=True, text=True, timeout=180, env=env, stdin=subprocess.DEVNULL).stdout
+                env["LD_LIBRARY_PATH"] = ":".join(p for p in (ld, env.get("LD_LIBRARY_PATH", "")) if p)
+            dump = subprocess.run([key, "-p"], capture_output=True, text=True, timeout=180, env=env,
+                                  stdin=subprocess.DEVNULL).stdout
             g["sections"] = set(re.findall(r"^    - name: (.+?)\s*$", dump, re.M)) | set(
                 re.findall(r"^  - ([A-Z][A-Z0-9 _/.:-]*?)\s*$", dump.split("legacy_string_sections:", 1)[-1], re.M)) | {"TITLE"}
             g["elements"] = set(re.findall(r"^  ([A-Z][A-Z0-9_]*):\s*$",
@@ -307,6 +315,18 @@ def lint_deck(text: str, cfg: dict | None = None) -> list[str]:
     """Deck defects measured on worker decks (each one made 4C stop or solve the wrong problem). `cfg` is
     the config.json beside the deck when the caller has it: its `iface` names a box side's interface."""
     why: list[str] = []
+    # A topology entry whose word does not belong to its section: 'Wrong design node name: <word>.
+    # Expected <section word>.' in a known section, 'Section ... is not a valid section name.' in any other.
+    badkw = sorted({w for b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", text, flags=re.M)
+                    for w in re.findall(r'"NODE\s+\d+\s+(D[A-Z]+)\s+\d+"', b)
+                    if w not in _TOPO_WORDS.get(b.split(":", 1)[0].strip(), ())})
+    # 4C also takes the entry words DSURF in DSURF-NODE TOPOLOGY and DVOLUME in DVOL-NODE TOPOLOGY for
+    # the same entities; read them there as DSURFACE and DVOL so every check below sees them.
+    _alias = {"DSURF-NODE TOPOLOGY": ("DSURF", "DSURFACE"), "DVOL-NODE TOPOLOGY": ("DVOLUME", "DVOL")}
+    text = "".join(
+        re.sub(rf'("NODE\s+\d+\s+){_alias[h][0]}(\s+\d+")', rf"\g<1>{_alias[h][1]}\g<2>", b)
+        if (h := b.split(":", 1)[0].strip()) in _alias else b
+        for b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", text, flags=re.M))
     why += _yaml_parse_error(text)
     secs = re.findall(r"^([A-Z][A-Z0-9 _/.:-]*?):\s*$", text, re.M)
     dup = sorted({x for x in secs if secs.count(x) > 1})
@@ -351,14 +371,14 @@ def lint_deck(text: str, cfg: dict | None = None) -> list[str]:
                        "DESIGN LINE / POINT DIRICH CONDITIONS (NUMDOF 1)")
         if "CALCFLUX_BOUNDARY" not in text or "FLUX CALC" not in text:
             why.append('a consistent boundary flux needs CALCFLUX_BOUNDARY "diffusive" AND a `SCATRA FLUX CALC LINE CONDITIONS` entry on the interface line')
-        if re.search(r"^IO:\s*$", text, re.M):
-            why.append("an `IO:` section in a Scalar_Transport deck is rejected; the VTU appears without it")
     if re.search(r'PROBLEMTYPE:\s*"?Thermo"?\s*$', text, re.M):
         why.append("PROBLEMTYPE Thermo writes no scatra flux output and knows no CALCFLUX_BOUNDARY; a consistent heat flux comes from Scalar_Transport")
-    badkw = sorted({w for w in re.findall(r'"NODE\s+\d+\s+(D[A-Z]+)\s+\d+"', text) if w not in _TOPO_WORDS})
     if badkw:
-        why.append(f"topology entries use {', '.join(badkw)} -- the entity words are DNODE, DLINE, DSURFACE, DVOL "
-                   "(anything else defines nothing and 4C silently drops the conditions on it); " + _TOPOLOGY_PAIRS)
+        why.append(f"topology entries use {', '.join(badkw)} -- the entity word must match its section: "
+                   "DNODE-NODE TOPOLOGY takes DNODE, DLINE-NODE TOPOLOGY DLINE, DSURF-NODE TOPOLOGY DSURF or "
+                   "DSURFACE, DVOL-NODE TOPOLOGY DVOL or DVOLUME; a wrong word stops 4C with 'Wrong design node "
+                   "name: <word>. Expected <section word>.', a topology section of any other name with 'Section "
+                   "'<name>' is not a valid section name.'; " + _TOPOLOGY_PAIRS)
     topo = set(re.findall(r"\b(DNODE|DLINE|DSURFACE|DVOL)\s+(\d+)", text))
     for b in re.split(r"^(?=[A-Z][A-Z0-9 _/.:-]*?:\s*$)", text, flags=re.M):
         head = b.split(":", 1)[0].strip()
@@ -482,13 +502,15 @@ def _degenerate_elements(text: str) -> list[str]:
 
 def _double_star_in_functions(text: str) -> list[str]:
     """`**` inside a 4C function expression: the parser has no such operator (measured: `-12*x**3*y/5`
-    rejected from 4C_utils_symbolic_expression.cpp with 'Token expected'); the task texts write their
+    stops in 4C_utils_symbolic_expression.cpp with 'Error while parsing: ... Expected a primary
+    expression.', on a development build before 4C 2026.2.0, on 4C 2026.2.0 and on 4C 2026.3.0); the task texts write their
     source terms in Python notation, so a copied expression carries it. Every occurrence, not the first."""
     out = []
     for m in re.finditer(r'(SYMBOLIC_FUNCTION_OF_SPACE_TIME|SYMBOLIC_FUNCTION_OF_TIME|VARFUNCTION|COMPONENT\s+\d+\s+SYMBOLIC_FUNCTION_OF_SPACE_TIME)[^\n]*?["\']([^"\'\n]*\*\*[^"\'\n]*)["\']', text):
         expr = m.group(2)
         out.append(f"function expression '{expr[:70]}' uses `**`: 4C's expression parser has no `**` (it stops with "
-                   f"'Token expected'); write `^` for every power in the expression, not only the first")
+                   f"'Error while parsing: ... Expected a primary expression.'); write `^` for every power in "
+                   f"the expression, not only the first")
     return out
 
 
@@ -1227,8 +1249,10 @@ def looks_like_deck(text: str) -> bool:
 
 
 def binary_and_ld() -> tuple[str | None, str | None]:
-    """The installed 4C binary (FOURC_BINARY, else the backend's finder) and the library path its
-    `-p` dump needs. (None, None) when there is no binary: then section names are not judged."""
+    """The installed 4C binary (FOURC_BINARY, else the backend's finder) and any library path its
+    `-p` dump needs beyond the one grammar() gives it: none, since grammar() runs the binary with
+    the backend's own rule. (None, None) when there is no binary: then section names are not
+    judged."""
     _bin = os.environ.get("FOURC_BINARY")
     if not (_bin and Path(_bin).is_file()):
         _bin = None
@@ -1238,10 +1262,7 @@ def binary_and_ld() -> tuple[str | None, str | None]:
             _bin = str(found) if found else None
         except Exception:                               # noqa: BLE001
             _bin = None
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if Path("/opt/4C-dependencies/lib").is_dir() and "4C-dependencies" not in ld:
-        ld = "/opt/4C-dependencies/lib" + (":" + ld if ld else "")
-    return _bin, (ld or None)
+    return _bin, None
 
 
 def deck_judgement(text: str) -> list[str]:

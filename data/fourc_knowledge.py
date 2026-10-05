@@ -2,7 +2,7 @@
 Comprehensive 4C Multiphysics knowledge catalogue.
 
 Based on systematic reading of ALL 4C source code.
-73 modules, 40 problem types, 120+ materials, 130+ conditions, 20+ cell types.
+73 modules, 41 problem types, 120+ materials, 130+ conditions, 20+ cell types.
 
 This is the single source of truth for 4C domain knowledge in openPASO.
 """
@@ -19,7 +19,7 @@ FOURC_KNOWLEDGE = {
         "output": "VTU via IO/RUNTIME VTK OUTPUT sections",
         "build": "CMake (cd build && cmake --build . -j$(nproc))",
         "modules": 73,
-        "problem_types": 40,
+        "problem_types": 41,  # 4C 2026.1.0 has 40 (no Reduced_Lung_1D_Pipe_Flow)
         "material_models": "120+",
         "condition_types": "130+",
         "entrypoint_dispatch": {
@@ -28,9 +28,13 @@ FOURC_KNOWLEDGE = {
             "description": (
                 "Authoritative Core::ProblemType -> solver-driver mapping. "
                 "Every 4C input YAML's PROBLEM TYPE section selects ONE of "
-                "these 36 enum values; misspellings hit the default arm "
-                "and raise FOUR_C_THROW \"solution of unknown problemtype "
-                "<X> requested\"."
+                "these 41 problem types, written as the PROBLEMTYPE string key "
+                "of Core::string_to_problem_type_map() (e.g. "
+                "Fluid_Structure_Interaction -> fsi), not as the enum name "
+                "that keys this table (porofluid_pressure_based is the one "
+                "name that is both); a misspelled value, or an enum name such "
+                "as fsi, stops input reading with 'Could not match this input' "
+                "before entrypoint_switch() runs."
             ),
             "problem_types": {
                 "structure": "caldyn_drt()",
@@ -76,23 +80,32 @@ FOURC_KNOWLEDGE = {
                 "np_support": "MultiScale::np_support_drt()",
             },
             "Signal": (
-                "[Input] Mis-typed PROBLEM TYPE in input YAML fails the "
-                "switch-case in entrypoint_switch() and FOUR_C_THROWs "
-                "with literal text 'solution of unknown problemtype "
-                "<value> requested'. Common confusions: "
-                "'fluid_struct_interaction' or 'fsi3d' instead of 'fsi'; "
-                "'thermo_structural_interaction' instead of 'tsi'; "
-                "'porous' instead of 'poroelast'. Check this table for "
-                "the exact spelling. (File walk apps/global_full/"
-                "4C_global_full_entrypoint_switch.cpp 2026-06-02.)"
+                "[Input] A mis-typed PROBLEMTYPE is rejected while the input "
+                "is read, before entrypoint_switch() runs: 'Could not match "
+                "this input', with the line \"[!] Candidate "
+                "deprecated_selection 'PROBLEMTYPE' has wrong value, possible "
+                "values: Ale|ArterialNetwork|...\" listing the accepted "
+                "strings. Those are the string keys of "
+                "Core::string_to_problem_type_map() (e.g. "
+                "Fluid_Structure_Interaction, Thermo_Structure_Interaction, "
+                "Poroelasticity), not the enum names that key this table "
+                "(fsi, tsi, poroelast; porofluid_pressure_based is both): "
+                "PROBLEMTYPE: \"fsi\" is rejected the same way. The default "
+                "arm 'solution of unknown problemtype <X> requested' cannot "
+                "be reached from input. (Measured on a "
+                "development build before 4C 2026.2.0, on 4C 2026.2.0 and on "
+                "4C 2026.3.0.)"
             ),
         },
         "cli_arguments": {
-            "source": "apps/global_full/4C_global_full_io.cpp",
+            "source": "apps/global_full/4C_global_full_main.cpp (parse_command_line) + apps/global_full/4C_global_full_io.cpp",
             "description": (
                 "Command-line arguments for nested-group parallelism and "
-                "I/O configuration. Parsed in setup_global_problem() "
-                "and validated by validate_argument_cross_compatibility()."
+                "I/O configuration. Parsed with CLI11 in parse_command_line() "
+                "(4C_global_full_main.cpp), which then calls "
+                "validate_argument_cross_compatibility() and "
+                "assign_group_layout() (4C_global_full_io.cpp); "
+                "setup_global_problem() receives the parsed arguments."
             ),
             "flags": {
                 "--ngroup=N":           "Number of nested-parallelism groups (default 1).",
@@ -100,7 +113,7 @@ FOURC_KNOWLEDGE = {
                 "--nptype=<type>":      "Nested parallelism type (mandatory when --ngroup>1).",
                 "<input> <output>":     "Positional pair(s). Multiple pairs allowed when --nptype=separateInputFiles or nestedMultiscale.",
                 "--parameters":         "Parameters-dump mode (skips io_pairs validation). When set, the cross-compat validator does NOT require <input> <output> count to match --ngroup.",
-                "--diffgroup=N":        "Diff-mode group ID (default -1 = disabled). Used to compare outputs across nested groups.",
+                "--nptype=diffgroup0|diffgroup1": "Diff mode; there is no --diffgroup flag (4C rejects it: 'The following argument was not expected'). Sets the diff group (default -1 = disabled) to 0 or 1 so that two separate (serial/parallel) 4C runs can compare vectors/matrices/results; another suffix stops with 'Only diffgroup0 and diffgroup1 are allowed.'",
                 "--interactive":        "Interactive mode (default false).",
                 "--restart=N":          "Restart step (default 0 = no restart).",
                 "--restartfrom=<id>":   "Output identifier to restart from. With nested parallelism, can be specified per-group via repeated flag.",
@@ -399,23 +412,27 @@ FOURC_KNOWLEDGE = {
                         "BENCHMARK_ENABLE_TESTING=OFF to skip "
                         "google-benchmark's own internal tests."),
                     "FOUR_C_ENABLE_FULL_BENCHMARK_TESTS": (
+                        "In 4C 2026.3.0; not in cmake/setup_tests.cmake of 4C 2026.2.0 and earlier. "
                         "bool, default OFF, ONLY visible when "
                         "FOUR_C_WITH_GOOGLE_BENCHMARK=ON. OFF "
                         "means dry-run mode (10s timeout); ON "
                         "means real benchmark execution (600s "
                         "timeout × FOUR_C_TEST_TIMEOUT_SCALE)."),
                     "FOUR_C_BENCHMARK_TESTS_COLLECTION_FILE": (
+                        "In 4C 2026.3.0; not in cmake/setup_tests.cmake of 4C 2026.2.0 and earlier. "
                         "PATH, default ${PROJECT_BINARY_DIR}/"
                         "benchmark_test_results.json. Output JSON "
                         "where 4C aggregates benchmark results via "
                         "four_c_collect_benchmark_test_results."),
                     "FOUR_C_ENABLE_FULL_PERFORMANCE_TESTS": (
+                        "In 4C 2026.3.0; not in cmake/setup_tests.cmake of 4C 2026.2.0 and earlier. "
                         "bool, default OFF. Switches performance "
                         "tests between full and minimal execution. "
                         "Distinct from FOUR_C_ENABLE_FULL_BENCHMARK_"
                         "TESTS — performance tests are 4C-internal, "
                         "benchmark tests use Google Benchmark."),
                     "FOUR_C_PERFORMANCE_TESTS_COLLECTION_FILE": (
+                        "In 4C 2026.3.0; not in cmake/setup_tests.cmake of 4C 2026.2.0 and earlier. "
                         "PATH, default ${PROJECT_BINARY_DIR}/"
                         "performance_test_results.json."),
                 },
@@ -428,6 +445,7 @@ FOURC_KNOWLEDGE = {
                         "unit-test timeout (set when "
                         "FOUR_C_WITH_GOOGLETEST=ON)."),
                     "BENCHMARK_TEST_TIMEOUT": (
+                        "In 4C 2026.3.0; not in cmake/setup_tests.cmake of 4C 2026.2.0 and earlier. "
                         "10 (dry-run) or 600 (full) * "
                         "FOUR_C_TEST_TIMEOUT_SCALE."),
                     "FOUR_C_INSTALL_PREFIX": (
@@ -476,8 +494,9 @@ FOURC_KNOWLEDGE = {
                     "defaults to 4 in DEBUG builds (line 8-12) "
                     "vs 1 in Release/RelWithDebInfo. This silently "
                     "quadruples ALL test timeouts (UNITTEST_TIMEOUT "
-                    "40s, GLOBAL_TIMEOUT 480s, BENCHMARK_TIMEOUT "
-                    "2400s in full-benchmark mode) when the user "
+                    "40s, GLOBAL_TIMEOUT 480s, and in 4C 2026.3.0 "
+                    "BENCHMARK_TEST_TIMEOUT 2400s in full-benchmark "
+                    "mode) when the user "
                     "switches between Debug and Release without "
                     "changing CMakeCache.txt. CI run-time diffs "
                     "between Debug and Release jobs often surface "
@@ -1176,10 +1195,12 @@ FOURC_KNOWLEDGE = {
             "  element section:  STRUCTURE ELEMENTS\n"
             "  3D element line:  <eid> SOLID <CELLTYPE> <nodes...> MAT <m> "
             "KINEM linear|nonlinear\n"
-            "  2D element line:  <eid> WALL <CELLTYPE> <nodes...> MAT <m> "
-            "KINEM <k> EAS <e> THICK <t> STRESS_STRAIN <s> GP <a> <b>\n"
-            "                    (2D needs ALL SIX keys, and SOLID owns no "
-            "2D cell type)\n"
+            "  2D element line:  4C before 2026.2.0: <eid> WALL <CELLTYPE> <nodes...> "
+            "MAT <m> KINEM <k> EAS <e> THICK <t> STRESS_STRAIN <s> GP <a> <b>\n"
+            "                    (ALL SIX keys; SOLID owns no 2D cell type there)\n"
+            "                    4C 2026.2.0 and later: <eid> SOLID <CELLTYPE> <nodes...> "
+            "MAT <m> KINEM <k> THICKNESS <t> PLANE_ASSUMPTION <s>\n"
+            "                    (no WALL; `4C -p` of an older build lists WALL)\n"
             "  material:         MAT_Struct_StVenantKirchhoff with YOUNG, "
             "NUE, DENS (DENS required even under Statics)\n"
             "  convergence:      TOLDISP (update norm) and TOLRES (residual "
@@ -1258,6 +1279,7 @@ RESULT DESCRIPTION:
 
         # ---- COMPLETE RUNNABLE DECK, 2D ----
         "minimal_working_input_2d": """\
+# 4C before 2026.2.0 (WALL). For 4C 2026.2.0 and later use minimal_working_input_2d_solid.
 # 2D plane-strain square, hand-written mesh. The box generator cannot make
 # 2D cells, so 2D always uses the inline route.
 PROBLEM SIZE:
@@ -1310,6 +1332,73 @@ NODE COORDS:              # in a 2D problem every z MUST be 0.0
 STRUCTURE ELEMENTS:
   # WALL, not SOLID, and all six keys are required
   - "1 WALL QUAD4 1 2 3 4 MAT 1 KINEM linear EAS none THICK 1.0 STRESS_STRAIN plane_strain GP 2 2"
+RESULT DESCRIPTION:
+  - STRUCTURE:
+      DIS: "structure"
+      NODE: 2
+      QUANTITY: "dispx"
+      VALUE: 0.0
+      TOLERANCE: 1.0e30   # record mode: abs(diff) prints the true value
+""",
+
+        # ---- THE SAME 2D DECK FOR 4C 2026.3.0 ----
+        # Run on 4C 2026.2.0 and 2026.3.0: both record the same displacement as
+        # the WALL deck on a 2026.2.0 development build (8.52459016393e-3,
+        # relative difference 1e-14).
+        "minimal_working_input_2d_solid": """\
+# 4C 2026.2.0 and later (no WALL; the 2D element is SOLID with THICKNESS and
+# PLANE_ASSUMPTION). 2D plane-strain square, hand-written mesh. The box generator cannot make
+# 2D cells, so 2D always uses the inline route.
+PROBLEM SIZE:
+  DIM: 2
+PROBLEM TYPE:
+  PROBLEMTYPE: "Structure"
+STRUCTURAL DYNAMIC:
+  DYNAMICTYPE: "Statics"
+  TIMESTEP: 1.0
+  NUMSTEP: 1
+  MAXTIME: 1.0
+  TOLDISP: 1.0e-10
+  TOLRES: 1.0e-09
+  MAXITER: 30
+  LINEAR_SOLVER: 1
+SOLVER 1:
+  SOLVER: "UMFPACK"
+  NAME: "Structure_Solver"
+MATERIALS:
+  - MAT: 1
+    MAT_Struct_StVenantKirchhoff:
+      YOUNG: 1000.0
+      NUE: 0.3
+      DENS: 1.0
+DESIGN LINE DIRICH CONDITIONS:
+  - E: 1
+    NUMDOF: 2               # 2 in 2D, not 3
+    ONOFF: [1, 1]
+    VAL: [0.0, 0.0]
+    FUNCT: [0, 0]
+FUNCT1:
+  - SYMBOLIC_FUNCTION_OF_SPACE_TIME: "t"
+DESIGN LINE NEUMANN CONDITIONS:
+  - E: 2                  # right edge: pulled in +x
+    NUMDOF: 2
+    ONOFF: [1, 0]
+    VAL: [10.0, 0.0]
+    FUNCT: [1, 0]
+    TYPE: "Live"
+DLINE-NODE TOPOLOGY:
+  - "NODE 1 DLINE 1"
+  - "NODE 4 DLINE 1"
+  - "NODE 2 DLINE 2"
+  - "NODE 3 DLINE 2"
+NODE COORDS:              # in a 2D problem every z MUST be 0.0
+  - "NODE 1 COORD 0.0 0.0 0.0"
+  - "NODE 2 COORD 1.0 0.0 0.0"
+  - "NODE 3 COORD 1.0 1.0 0.0"
+  - "NODE 4 COORD 0.0 1.0 0.0"
+STRUCTURE ELEMENTS:
+  # 4C 2026.2.0 and later: SOLID with THICKNESS and PLANE_ASSUMPTION
+  - "1 SOLID QUAD4 1 2 3 4 MAT 1 KINEM linear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
 RESULT DESCRIPTION:
   - STRUCTURE:
       DIS: "structure"
@@ -1450,7 +1539,7 @@ RESULT DESCRIPTION:
                 "example": '"1 SOLID HEX8 1 2 3 4 5 6 7 8 MAT 1 KINEM nonlinear TECH eas_full"',
             },
             "WALL": {
-                "_note": "This is the 2D solid element. SOLID owns no 2D cell type.",
+                "_note": "The 2D solid element of 4C before 2026.2.0; SOLID owns no 2D cell type there. 4C 2026.2.0 and later have no WALL: see 'SOLID (2D, 4C 2026.2.0 and later)'.",
                 "cell_types": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
                 "_cell_types_that_do_NOT_work": (
                     "`4C --parameters` also lists NURBS4 and NURBS9 under "
@@ -1472,6 +1561,24 @@ RESULT DESCRIPTION:
                     "points for tri element'."
                 ),
                 "example": '"1 WALL QUAD4 1 2 3 4 MAT 1 KINEM nonlinear EAS none THICK 1.0 STRESS_STRAIN plane_strain GP 2 2"',
+            },
+            "SOLID (2D, 4C 2026.2.0 and later)": {
+                "_note": "The 2D solid element of 4C 2026.2.0 and later (earlier builds have WALL instead). Each cell type below ran on 4C 2026.2.0 and on 2026.3.0.",
+                "cell_types": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
+                "required_keys": ["MAT", "KINEM", "THICKNESS", "PLANE_ASSUMPTION"],
+                "KINEM": "linear | nonlinear",
+                "THICKNESS": "Out-of-plane thickness.",
+                "PLANE_ASSUMPTION": "plane_strain | plane_stress",
+                "TECH": (
+                    "QUAD4 only; the other 2D cells take no TECH key. none "
+                    "(default) or eas_full, and eas_full needs KINEM "
+                    "nonlinear. KINEM linear with eas_full, and eas_mild or "
+                    "fbar with either KINEM, stop with 'Your element "
+                    "formulation with cell type QUAD4, kinematic type <k>, "
+                    "element technology <t> and prestress type none does not "
+                    "exist'."
+                ),
+                "example": '"1 SOLID QUAD4 1 2 3 4 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"',
             },
             "SOLIDSCATRA": {
                 "cell_types": ["HEX8", "HEX27", "TET4", "TET10", "NURBS27"],
@@ -1558,15 +1665,17 @@ RESULT DESCRIPTION:
                     "WALL and 'SOLID QUAD4' aborts with \"Element 'SOLID' "
                     "does not seem to know cell type 'quad4'.\"; if SOLID "
                     "lists QUAD4/TRI3 then 'WALL' aborts with \"Unknown "
-                    "type 'WALL' of finite element\". On the build this "
-                    "catalogue was verified against, WALL owns 2D."
+                    "type 'WALL' of finite element\". Measured: a 2026.2.0 "
+                    "development build registers WALL for 2D, the 2026.2.0 and "
+                    "2026.3.0 releases the 2D SOLID and no WALL."
                 ),
-                "WALL QUAD4": "4-node quadrilateral. Six required keys: MAT, KINEM, EAS, THICK, STRESS_STRAIN, GP.",
-                "WALL QUAD8": "8-node serendipity quad, same six required keys.",
-                "WALL QUAD9": "9-node full biquadratic quad, same six required keys.",
-                "WALL TRI3":  "3-node triangle, same six required keys.",
-                "WALL TRI6":  "6-node quadratic triangle, same six required keys.",
-                "WALL NURBS4 / NURBS9": "DO NOT USE. `4C --parameters` lists these under WALL but they are not registered; the element type is WALLNURBS, and asking for them under WALL gives the misleading \"Unknown type 'WALL' of finite element\".",
+                "WALL QUAD4": "4C before 2026.2.0: 4-node quadrilateral. Six required keys: MAT, KINEM, EAS, THICK, STRESS_STRAIN, GP.",
+                "WALL QUAD8": "4C before 2026.2.0: 8-node serendipity quad, same six required keys.",
+                "WALL QUAD9": "4C before 2026.2.0: 9-node full biquadratic quad, same six required keys.",
+                "WALL TRI3":  "4C before 2026.2.0: 3-node triangle, same six required keys.",
+                "WALL TRI6":  "4C before 2026.2.0: 6-node quadratic triangle, same six required keys.",
+                "SOLID QUAD4 / QUAD8 / QUAD9 / TRI3 / TRI6": "4C 2026.2.0 and later: the same cells under SOLID. Four required keys: MAT, KINEM, THICKNESS, PLANE_ASSUMPTION.",
+                "WALL NURBS4 / NURBS9": "4C before 2026.2.0: DO NOT USE. `4C --parameters` lists these under WALL but they are not registered; the element type is WALLNURBS, and asking for them under WALL gives the misleading \"Unknown type 'WALL' of finite element\".",
             },
             "1D_beam": {
                 "BEAM3R": "Simo-Reissner beam (shear-deformable, geometrically exact)",
@@ -1588,7 +1697,7 @@ RESULT DESCRIPTION:
         "element_technologies": {
             "none": "Standard displacement-based formulation",
             "fbar": "F-bar method (volumetric locking treatment for hex8)",
-            "eas_mild": "Enhanced Assumed Strain (mild enrichment, 7 modes for hex8)",
+            "eas_mild": "Enhanced Assumed Strain (mild enrichment, 9 modes for hex8)",
             "eas_full": "Enhanced Assumed Strain (full enrichment, 21 modes for hex8)",
             "shell_ans": "Assumed Natural Strain for shells (shear locking treatment)",
             "shell_eas": "EAS for shells",
@@ -1613,7 +1722,7 @@ RESULT DESCRIPTION:
         # Full 2D element line, so it can be copied rather than assembled.
         # See structure_elements_section/WALL above for the key rules.
         "wall_element_params": (
-            "A complete WALL line, in section STRUCTURE ELEMENTS:\n"
+            "4C before 2026.2.0. A complete WALL line, in section STRUCTURE ELEMENTS:\n"
             '  - "1 WALL QUAD4 1 2 3 4 MAT 1 KINEM nonlinear EAS none '
             'THICK 1.0 STRESS_STRAIN plane_strain GP 2 2"\n'
             "All six keys are required. KINEM linear|nonlinear; EAS "
@@ -1621,6 +1730,16 @@ RESULT DESCRIPTION:
             "thickness; STRESS_STRAIN plane_strain|plane_stress; GP is two "
             "integers, '2 2' for QUAD4, '3 3' for QUAD9, and '<n> 0' for "
             "TRI3/TRI6."
+        ),
+        "solid_2d_element_params": (
+            "4C 2026.2.0 and later (no WALL). A complete 2D SOLID line, in section "
+            "STRUCTURE ELEMENTS:\n"
+            '  - "1 SOLID QUAD4 1 2 3 4 MAT 1 KINEM nonlinear THICKNESS 1.0 '
+            'PLANE_ASSUMPTION plane_strain"\n'
+            "All four keys are required. KINEM linear|nonlinear; THICKNESS "
+            "is the out-of-plane thickness; PLANE_ASSUMPTION "
+            "plane_strain|plane_stress; QUAD4 alone takes TECH, none or "
+            "eas_full (eas_full needs KINEM nonlinear)."
         ),
 
         "pitfalls": [
@@ -1635,7 +1754,10 @@ RESULT DESCRIPTION:
                 "Determine which one this build registers before writing "
                 "anything: `4C --parameters` lists, per element type, the "
                 "cell types it owns. If SOLID's list is 3D-only, 2D is "
-                "WALL's. Signal: both were confirmed by triggering them - the "
+                "WALL's (measured: a 2026.2.0 development build registers WALL, "
+                "the 2026.2.0 and 2026.3.0 releases the 2D SOLID and no WALL). "
+                "Signal: both were confirmed by "
+                "triggering them - the "
                 "wrong 2D element type gives \"Element 'SOLID' does not "
                 "seem to know cell type 'quad4'.\" (note the cell type is "
                 "echoed in LOWERCASE), and an element type this build does "
@@ -1649,7 +1771,7 @@ RESULT DESCRIPTION:
                 "than hard-coding either."
             ),
             (
-                "[Input] STRUCTURE ELEMENTS: WALL TRI3 and TRI6 take GP as "
+                "[Input] STRUCTURE ELEMENTS (the WALL of 4C before 2026.2.0): WALL TRI3 and TRI6 take GP as "
                 "'<n> 0', NOT '<n> <n>'. 'GP 3 3' on a triangle is fatal. "
                 "Signal: 'Unknown number of Gauss points for tri element' "
                 "from w1/4C_w1_input.cpp. 'GP 3 0' on the same element runs. "
@@ -1657,7 +1779,7 @@ RESULT DESCRIPTION:
                 "'eas-technology not implemented for tri3 elements'."
             ),
             (
-                "[Input] STRUCTURE ELEMENTS: WALL does NOT own NURBS4/NURBS9 even "
+                "[Input] STRUCTURE ELEMENTS (4C before 2026.2.0): WALL does NOT own NURBS4/NURBS9 even "
                 "though `4C --parameters` lists them under WALL. The "
                 "registered element type for isogeometric 2D cells is "
                 "WALLNURBS. Signal: \"Unknown type 'WALL' of finite "
@@ -1755,7 +1877,7 @@ RESULT DESCRIPTION:
                 "for beam elements raises \"Element 'SOLID' does not seem "
                 "to know cell type 'line2'.\" from "
                 "fem/general/element/4C_fem_general_element_definition.cpp "
-                "— the SOLID/WALL factories register volume/surface cell "
+                "— the SOLID/WALL (WALL: 4C before 2026.2.0) factories register volume/surface cell "
                 "types only, so the ELEMENT TYPE is recognised and the CELL "
                 "TYPE is not. Use BEAM3R / BEAM3K / BEAM3EB with the "
                 "appropriate LINE2/LINE3 cell type and TRIADS. (An earlier "
@@ -1777,7 +1899,9 @@ RESULT DESCRIPTION:
             (
                 "[API] The 2D structural element name is "
                 "VERSION-DEPENDENT and the two spellings share no "
-                "keywords. On 4C 2026.2.0-dev the SOLID factory "
+                "keywords. On a development build of March 2026 "
+                "(it reports 2026.2.0-dev; the 2026.2.0 release "
+                "already has the 2-D SOLID) the SOLID factory "
                 "registers 3D cell types ONLY (hex8, hex18, hex20, "
                 "hex27, tet4, tet10, wedge6, pyramid5, nurbs27) and "
                 "2D lives in the separate WALL factory, whose input "
@@ -1787,7 +1911,7 @@ RESULT DESCRIPTION:
                 "<b>'. All six of MAT / KINEM / EAS / THICK / "
                 "STRESS_STRAIN / GP are required, GP is a "
                 "two-integer vector, and there is no THICKNESS or "
-                "PLANE_ASSUMPTION keyword. From 4C 2026.3 the 2D "
+                "PLANE_ASSUMPTION keyword. From the 4C 2026.2.0 release on, the 2D "
                 "families were folded into SOLID with the "
                 "THICKNESS / PLANE_ASSUMPTION spelling instead. "
                 "Decide which build you are on before writing a 2D "
@@ -1801,7 +1925,7 @@ RESULT DESCRIPTION:
                 "SOLID-era build; \"Required value 'GP' not found in "
                 "input line\" from input_spec_builders means WALL "
                 "was right but the GP pair was omitted. (Verified by "
-                "execution 2026-08-03: on 4C 2026.2.0-dev the full "
+                "execution 2026-08-03: on that development build the full "
                 "WALL QUAD4 line ran to exit 0, 'SOLID QUAD4' failed "
                 "with the cell-type message with and without DIM: 2, "
                 "and the upstream deck tests/input_files/"
@@ -1951,66 +2075,69 @@ RESULT DESCRIPTION:
                 "use": "Linear elastic (small strain) or geometric nonlinear",
             },
             "MAT_Struct_ThermoStVenantK": {
-                "params": "YOUNG (array), NUE, DENS, THEXPANS, INITTEMP, THERMOMAT",
+                "params": "YOUNGNUM (int, required: the number of YOUNG values), YOUNG (list of YOUNGNUM values), NUE, DENS, THEXPANS, INITTEMP (4C before 2026.3.0 also: THERMOMAT, optional, default -1)",
                 "use": "Linear elastic with thermal expansion coupling (for TSI)",
-                "notes": "THERMOMAT links to a MAT_Fourier for thermal properties",
+                "notes": "Before 4C 2026.3.0 only: THERMOMAT can link a MAT_Fourier; 4C 2026.3.0 removed the key. The thermal field takes its MAT_Fourier from the CLONING MATERIAL MAP in both",
             },
         },
 
         "hyperelastic": {
             "MAT_ElastHyper": "Toolbox: combine summands (NeoHooke + volumetric, etc.)",
+            # Each summand is its own MATERIALS entry, listed in the MATIDS of
+            # MAT_ElastHyper / MAT_ViscoElastHyper.
             "summands": {
-                "coupNeoHooke": "Neo-Hooke (coupled form): W = C1*(I1-3) + 1/(2*D1)*(J-1)^2",
-                "couploganeohooke": "Logarithmic Neo-Hooke: W = mu/2*(I1-3) - mu*ln(J) + lam/2*ln(J)^2",
-                "coupMooneyRivlin": "Mooney-Rivlin (coupled): W = C1*(I1-3) + C2*(I2-3)",
-                "isoNeoHooke": "Isochoric Neo-Hooke (incompressible split)",
-                "isoOgden": "Isochoric Ogden (stretch-based)",
-                "isoYeoh": "Isochoric Yeoh (polynomial in I1)",
-                "coupBlatzKo": "Blatz-Ko (compressible rubber-like)",
-                "coupSimoPister": "Simo-Pister model",
-                "coupAnisoExpo": "Anisotropic exponential fiber model (soft tissue)",
-                "coupAnisoNeoHooke": "Anisotropic Neo-Hooke fiber",
+                "ELAST_CoupNeoHooke": "Neo-Hooke (coupled form; YOUNG, NUE): W = c*(I1-3) + c/beta*(J^(-2*beta)-1), beta = nu/(1-2*nu)",
+                "ELAST_CoupLogNeoHooke": "Logarithmic Neo-Hooke: W = mu/2*(I1-3) - mu*ln(J) + lam/2*ln(J)^2",
+                "ELAST_CoupMooneyRivlin": "Mooney-Rivlin (coupled; C1, C2, C3): W = c1*(I1-3) + c2*(I2-3) - (2*c1+4*c2)*ln(J) + c3*(J-1)^2",
+                "ELAST_IsoNeoHooke": "Isochoric Neo-Hooke (incompressible split)",
+                "ELAST_IsoOgden": "Isochoric Ogden (stretch-based)",
+                "ELAST_IsoYeoh": "Isochoric Yeoh (polynomial in I1)",
+                "ELAST_CoupBlatzKo": "Blatz-Ko (compressible rubber-like)",
+                "ELAST_CoupSimoPister": "Simo-Pister model",
+                "ELAST_CoupAnisoExpo": "Anisotropic exponential fiber model (soft tissue)",
+                "ELAST_CoupAnisoNeoHooke": "Anisotropic Neo-Hooke fiber",
             },
             "volumetric": {
-                "volOgden": "Ogden volumetric penalty",
-                "volPenalty": "Standard penalty: κ/2*(J-1)^2",
-                "volSussmanBathe": "Sussman-Bathe volumetric",
+                "ELAST_VolOgden": "Ogden volumetric penalty",
+                "ELAST_VolPenalty": "Penalty (EPSILON, GAMMA): W = eps*(J^gamma + J^(-gamma) - 2)",
+                "ELAST_VolSussmanBathe": "Sussman-Bathe volumetric",
             },
         },
 
         "viscoelastic": {
             "MAT_ViscoElastHyper": "Viscohyperelastic with Maxwell branches",
-            "generalizedMaxwell": "Generalized Maxwell (Standard Linear Solid)",
-            "fractionalSLS": "Fractional Standard Linear Solid",
+            "VISCO_GenMax": "Standard Linear Solid visco summand (before 4C 2026.3.0)",
+            "VISCO_GeneralizedGenMax": "Generalized Maxwell branches (before 4C 2026.3.0; 4C 2026.3.0 has VISCO_GeneralizedMaxwell with VISCO_GeneralizedMaxwellBranch entries instead)",
+            "VISCO_Fract": "Fractional Standard Linear Solid (before 4C 2026.3.0; 4C 2026.3.0 has VISCO_FSLS instead)",
         },
 
         "plasticity": {
-            "MAT_PlLinElast": "Small-strain von Mises plasticity (YOUNG, NUE, YIELD, SATHARDENING, etc.)",
-            "MAT_PlNlnLogNeoHooke": "Finite strain von Mises + logarithmic Neo-Hooke",
-            "MAT_PlDruckPrag": "Drucker-Prager plasticity (pressure-dependent yield)",
-            "MAT_PlGTN": "Gurson-Tvergaard-Needleman (ductile damage)",
-            "MAT_CrystPlast": "Crystal plasticity (single crystal, multiple slip systems)",
-            "MAT_PlElastHyper": "Hyperelastic + finite strain von Mises (semi-smooth Newton)",
+            "MAT_Struct_PlasticLinElast": "Small-strain von Mises plasticity (YOUNG, NUE, DENS, YIELD, ISOHARD, KINHARD, TOL)",
+            "MAT_Struct_PlasticNlnLogNeoHooke": "Finite strain von Mises + logarithmic Neo-Hooke",
+            "MAT_Struct_DruckerPrager": "Drucker-Prager plasticity (pressure-dependent yield)",
+            "MAT_Struct_PlasticGTN": "Gurson-Tvergaard-Needleman (ductile damage)",
+            "MAT_crystal_plasticity": "Crystal plasticity (single crystal, multiple slip systems)",
+            "MAT_PlasticElastHyper": "Hyperelastic + finite strain von Mises (semi-smooth Newton)",
         },
 
         "biological": {
             "MAT_ConstraintMixture": "Constrained mixture model for arterial growth/remodeling",
-            "MAT_GrowthRemodelElastHyper": "Growth and remodeling hyperelastic",
+            "MAT_GrowthRemodel_ElastHyper": "Growth and remodeling hyperelastic",
             "MAT_Muscle_Combo": "Active strain muscle model (combo)",
             "MAT_Muscle_Giantesio": "Giantesio active strain muscle",
-            "MAT_Myocard": "Myocardial tissue with electrophysiology (FHN, TenTusscher, etc.)",
+            "MAT_myocard": "Myocardial tissue with electrophysiology (FHN, TenTusscher, etc.)",
         },
 
         "fluid": {
-            "MAT_Fluid": "Newtonian fluid (DYNVISCOSITY, DENSITY)",
-            "MAT_CarreauYasuda": "Carreau-Yasuda shear-thinning",
-            "MAT_HerschelBulkley": "Herschel-Bulkley yield stress fluid",
-            "MAT_Sutherland": "Temperature-dependent viscosity (Sutherland law)",
+            "MAT_fluid": "Newtonian fluid (DYNVISCOSITY, DENSITY)",
+            "MAT_carreauyasuda": "Carreau-Yasuda shear-thinning",
+            "MAT_herschelbulkley": "Herschel-Bulkley yield stress fluid",
+            "MAT_sutherland": "Temperature-dependent viscosity (Sutherland law)",
         },
 
         "thermal": {
             "MAT_Fourier": "Fourier heat conduction (CAPA=heat capacity, CONDUCT=conductivity)",
-            "MAT_Soret": "Soret effect (thermodiffusion coupling)",
+            "MAT_soret": "Soret effect (thermodiffusion coupling)",
         },
 
         "scalar_transport": {
@@ -2027,19 +2154,20 @@ RESULT DESCRIPTION:
         },
 
         "particle": {
-            "MAT_Particle_SPH_Fluid": "SPH fluid particle",
-            "MAT_Particle_DEM": "DEM particle",
-            "MAT_Particle_PD": "Peridynamic particle (bond-based)",
+            "MAT_ParticleSPHFluid": "SPH fluid particle",
+            "MAT_ParticleDEM": "DEM particle",
+            "MAT_ParticlePD": "Peridynamic particle (bond-based)",
         },
 
-        # Beam material names from 4C 2026.3 schema (MATERIALS
+        # Beam material names from 4C's MATERIALS grammar (MATERIALS
         # section enum). Catalog previously had wrong delimiter:
         # 'MAT_Beam_Reissner_ElastHyper' (underscore-separated)
         # is NOT a valid 4C material name — real format is
         # 'MAT_BeamReissnerElastHyper' (CamelCase, only one
         # underscore between MAT and the beam family). Wrong
         # names fail at YAML parse with input_spec_builders.cpp
-        # 'Could not match this input'. Verified 2026-06-01.
+        # 'Could not match this input'. Verified 2026-06-01; the
+        # same names in 4C 2026.2.0 and 2026.3.0 (2026-09-30).
         "beam": {
             "MAT_BeamReissnerElastHyper": "Simo-Reissner beam hyperelastic (default for BEAM3R)",
             "MAT_BeamReissnerElastHyper_ByModes": "Reissner beam, parametrized by deformation modes",
@@ -2059,17 +2187,18 @@ RESULT DESCRIPTION:
         "problemtype": "Fluid",
         "yaml_section": "FLUID DYNAMIC",
 
-        # FLUID DYNAMIC/TIMEINTEGR enum (4C 2026.3 schema —
+        # FLUID DYNAMIC/TIMEINTEGR enum (4C's input grammar —
         # 4C_schema.json). NOTE: different from STRUCTURAL
         # DYNAMIC/DYNAMICTYPE — the fluid enum has Af_/Np_
         # prefixes on Gen_Alpha and underscores on
-        # One_Step_Theta. Verified 2026-06-01.
+        # One_Step_Theta. Verified 2026-06-01; the same five values
+        # in 4C 2026.2.0 and 2026.3.0 (2026-09-30).
         "time_integration": {
             "Af_Gen_Alpha": "Alpha-form generalized-alpha (alpha-f weighting on the residual)",
-            "Np_Gen_Alpha": "N+1 generalized-alpha (default for incompressible NS)",
+            "Np_Gen_Alpha": "N+1 generalized-alpha (the TIMEINTEGR default is One_Step_Theta)",
             "BDF2": "2nd order backward difference formula",
             "One_Step_Theta": "One-step-theta (note underscores — NOT 'OneStepTheta')",
-            "Stationary": "Steady-state RANS or Stokes",
+            "Stationary": "Steady state (stationary Navier-Stokes or Stokes; 4C has no RANS model)",
         },
 
         "stabilization": {
@@ -2079,10 +2208,13 @@ RESULT DESCRIPTION:
             "PSPG": "Pressure stabilization Petrov-Galerkin",
         },
 
+        # FLUID DYNAMIC/TURBULENCE MODEL PHYSICAL_MODEL values; 4C has no RANS or
+        # k-epsilon model.
         "turbulence_models": [
-            "Dynamic Smagorinsky (LES)",
-            "Dynamic Vreman (LES)",
-            "k-epsilon (RANS, via additional scatra equations)",
+            "Smagorinsky / Smagorinsky_with_van_Driest_damping (LES)",
+            "Dynamic_Smagorinsky (LES)",
+            "Vreman / Dynamic_Vreman (LES)",
+            "Multifractal_Subgrid_Scales",
         ],
 
         "ale": "ALE formulation for moving meshes (ale2, ale3 elements)",
@@ -2195,8 +2327,9 @@ RESULT DESCRIPTION:
             "physics — wrong for fluid + scatra. Signal: wrong "
             "enum value fails at YAML parse with "
             "input_spec_builders.cpp 'Could not match this "
-            "input'. Verified empirically against 4C 2026.3 "
-            "schema 2026-06-01.",
+            "input'. Verified empirically against 4C's schema "
+            "2026-06-01; the same value sets in 4C 2026.2.0 "
+            "and 2026.3.0 (2026-09-30).",
         ],
     },
 
@@ -2726,9 +2859,10 @@ RESULT DESCRIPTION:
         "problemtype": "Thermo_Structure_Interaction",
         "yaml_sections": ["STRUCTURAL DYNAMIC", "THERMAL DYNAMIC", "TSI DYNAMIC"],
 
-        # COUPALGO enum values from 4C 2026.3 schema
+        # COUPALGO enum values from 4C's input grammar
         # (TSI DYNAMIC/COUPALGO). Verified via 4C_schema.json
-        # 2026-06-01. Names that LOOK obvious are NOT — the
+        # 2026-06-01, and the same seven in 4C 2026.2.0 and
+        # 2026.3.0 (2026-09-30). Names that LOOK obvious are NOT — the
         # underscore between 'iterstagg' and the variant is
         # load-bearing, 'fixedrel' is actually 'fixedrelax',
         # and the monolithic variant is 'tsi_monolithic'
@@ -2754,7 +2888,7 @@ RESULT DESCRIPTION:
             "plane_strain_2d variant: a one-element-thick HEX8 slab with u_z "
             "fixed on all nodes.",
             "MAT_Struct_ThermoStVenantK (structural material with thermal expansion)",
-            "MAT_Fourier (thermal material linked via THERMOMAT parameter)",
+            "MAT_Fourier (thermal material, reached through the CLONING MATERIAL MAP; 4C before 2026.3.0 could also name it with THERMOMAT, which 4C 2026.3.0 removed)",
             "CLONING MATERIAL MAP: SRC_FIELD structure → TAR_FIELD thermo",
             "Two LINEAR_SOLVERs: one for thermal, one for structural",
             "FUNCT for INITIALFIELD: SYMBOLIC_FUNCTION_OF_SPACE_TIME for initial temperature",
@@ -2762,11 +2896,12 @@ RESULT DESCRIPTION:
 
         "pitfalls": [
             (
-                "[Input] 4C has NO 2D TSI elements — the element module is "
-                "solid_scatra_3D_ele and every TSI corpus test is 3D. Signal: "
-                "a 2D thermo-mechanical deck dead-ends EVERY way on current "
-                "builds. WALL QUAD4 + MAT_Struct_ThermoStVenantK aborts with "
-                "'Unsupported solid element type!' from src/tsi/"
+                "[Input] 4C runs NO 2D TSI (measured on a 2026.2.0 "
+                "development build and on the 2026.2.0 and 2026.3.0 "
+                "releases), and every TSI corpus test is 3D. Signal: a 2D "
+                "thermo-mechanical deck dead-ends EVERY way on all three. "
+                "On the development build, WALL QUAD4 + MAT_Struct_ThermoStVenantK aborts "
+                "with 'Unsupported solid element type!' from src/tsi/"
                 "4C_tsi_utils.cpp — TSI's clone strategy rejects anything "
                 "that is not a SolidScatra element before a material is ever "
                 "evaluated, so you do NOT get the material-law message the "
@@ -2774,8 +2909,13 @@ RESULT DESCRIPTION:
                 "element' in 4C_w1_mat.cpp is real code but is never "
                 "reached). SOLID QUAD4 and SOLIDSCATRA QUAD4 both abort with "
                 "\"Element '<name>' does not seem to know cell type 'quad4'\" "
-                "(4C_fem_general_element_definition.cpp): SOLIDSCATRA "
-                "declares only hex8, hex27, tet4, tet10 and nurbs27. "
+                "(4C_fem_general_element_definition.cpp): there SOLIDSCATRA "
+                "declares only hex8, hex27, tet4, tet10 and nurbs27. On "
+                "2026.2.0 and 2026.3.0 there is no WALL, and SOLID QUAD4 and SOLIDSCATRA "
+                "QUAD4 (with THICKNESS and PLANE_ASSUMPTION) pass the input "
+                "check, build the structure and then abort with the same "
+                "'Unsupported solid element type!' from src/tsi/"
+                "4C_tsi_utils.cpp. "
                 "For 2D plane "
                 "strain use generate_input('tsi', 'plane_strain_2d', ...): a "
                 "one-element-thick 3D SOLIDSCATRA HEX8 slab with u_z fixed "
@@ -2992,15 +3132,19 @@ RESULT DESCRIPTION:
             "in YAML produces 'PROC 0 ERROR' from "
             "input_spec_builders.cpp with 'Could not match this "
             "input' and the offending YAML block echoed. "
-            "Verified empirically against 4C 2026.3 schema "
-            "2026-06-01.",
-            "[API] SOLIDSCATRA elements accept exactly 10 TYPE "
-            "values: Undefined, AdvReac, CardMono, GR, "
+            "Verified empirically against 4C's schema "
+            "2026-06-01; the same seven values in 4C 2026.2.0 "
+            "and 2026.3.0 (2026-09-30).",
+            "[API] SOLIDSCATRA TYPE values depend on the release. "
+            "The development build before 2026.2.0 and 4C 2026.2.0 "
+            "accept 10: Undefined, AdvReac, CardMono, GR, "
             "Chemo, ChemoReac, ElchDiffCond, ElchElectrode, "
             "Loma, Std (src/solid_scatra_3D_ele/"
-            "4C_solid_scatra_3D_ele_lib.cpp). 'NLS' is NOT one "
-            "of them, and an earlier catalog listing it as an "
-            "eleventh value was wrong. For TSI specifically, "
+            "4C_solid_scatra_3D_ele_lib.cpp; in 4C 2026.2.0 "
+            "src/solid_scatra_ele/4C_solid_scatra_ele_lib.cpp). "
+            "4C 2026.3.0 adds 'NLS' as an eleventh value; the "
+            "two older builds reject NLS, and the 4C 2026.1.0 "
+            "source has neither GR nor NLS. For TSI specifically, "
             "use 'TYPE Undefined' — the SCATRA half is cloned "
             "into a thermal discretization, so the SCATRA impl "
             "in the structure is unused. The TYPE value is not "
@@ -3009,14 +3153,16 @@ RESULT DESCRIPTION:
             "read: 'The input type <value> is not valid for "
             "SOLIDSCATRA elements!'. That is still before any "
             "mesh or time step exists — not 'at the first time "
-            "step'. Cell types: SOLIDSCATRA declares HEX8, "
-            "HEX27, TET4, TET10 and NURBS27 and NOTHING ELSE — "
-            "QUAD4, QUAD9, TRI3, TRI6, PYRAMID5 and WEDGE6 are "
-            "all refused with \"Element 'SOLIDSCATRA' does not "
-            "seem to know cell type '<ct>'.\" (an earlier "
-            "catalog claimed 2D support; there is none, which "
-            "is the same fact as 'no 2D TSI elements'). "
-            "Signal: those two messages.",
+            "step'. Cell types: on 4C before 2026.2.0 SOLIDSCATRA "
+            "declares HEX8, HEX27, TET4, TET10 and NURBS27 and "
+            "NOTHING ELSE — QUAD4, QUAD9, TRI3, TRI6, PYRAMID5 "
+            "and WEDGE6 are all refused with \"Element "
+            "'SOLIDSCATRA' does not seem to know cell type "
+            "'<ct>'.\" 4C 2026.2.0 and later add QUAD4, QUAD9, TRI3 and "
+            "TRI6 (with THICKNESS and PLANE_ASSUMPTION), but a "
+            "TSI deck with them still stops, at 'Unsupported "
+            "solid element type!' (the 2D entry above). "
+            "Signal: those messages.",
         ],
     },
 
@@ -3027,8 +3173,11 @@ RESULT DESCRIPTION:
         "partitioned_algorithms": {
             "Dirichlet-Neumann": "Standard: displacement/velocity/force coupling at interface",
             "DirichletNeumannSlideALE": "Sliding interface variant",
-            "relaxation": ["Fixed", "Aitken", "Steepest descent", "Chebyshev", "NLCG"],
-            "MFNK": "Matrix-free Newton-Krylov (advanced, robust)",
+            # FSI DYNAMIC/COUPALGO values
+            "relaxation": ["Fixed (iter_stagg_fixed_rel_param)", "Aitken (iter_stagg_AITKEN_rel_param, the default)",
+                           "Steepest descent (iter_stagg_steep_desc)", "NLCG (iter_stagg_NLCG)",
+                           "MPE, minimal polynomial extrapolation (iter_stagg_MPE)"],
+            "MFNK": "Matrix-free Newton-Krylov (advanced, robust; iter_stagg_MFNK_FD / iter_stagg_MFNK_FSI)",
         },
 
         "monolithic_algorithms": {
@@ -3067,8 +3216,10 @@ RESULT DESCRIPTION:
             "SOLID (structure)": ["QUAD4", "QUAD9", "TRI3", "TRI6"],
             "notes": (
                 "QUAD4 most validated. TRI3 less accurate for "
-                "pressure. NOTE: legacy 'WALL' eletype was "
-                "renamed to 'SOLID' in 4C 2026.3 — see the [API] "
+                "pressure. NOTE: the legacy 'WALL' eletype was "
+                "replaced by 'SOLID' in the 4C 2026.2.0 release, with "
+                "THICKNESS / PLANE_ASSUMPTION in place of WALL's THICK / "
+                "STRESS_STRAIN / GP — see the [API] "
                 "pitfall in SOL_MECH for the parobjectfactory.cpp "
                 "error you get if you write 'WALL QUAD4'."
             ),
@@ -3358,8 +3509,8 @@ RESULT DESCRIPTION:
             ),
             "[API] Which eletype owns 2D structural cells in an FSI deck is "
             "VERSION-DEPENDENT, and the two spellings share no keywords. "
-            "4C <= 2026.2: 'WALL QUAD4 <n..> MAT m KINEM k EAS none THICK t "
-            "STRESS_STRAIN s GP 2 2'. 4C >= 2026.3: 'SOLID QUAD4 <n..> MAT m "
+            "4C before 2026.2.0: 'WALL QUAD4 <n..> MAT m KINEM k EAS none THICK t "
+            "STRESS_STRAIN s GP 2 2'. 4C 2026.2.0 and later: 'SOLID QUAD4 <n..> MAT m "
             "KINEM k THICKNESS t PLANE_ASSUMPTION p'. Do not assume either; "
             "COPY THE STRUCTURE ELEMENTS LINE from a 2D deck in "
             "tests/input_files of the tree you are running against "
@@ -3397,14 +3548,21 @@ RESULT DESCRIPTION:
                 "execution 2026-08-06.)"
             ),
             (
-                "[Output] 2D fluid VTK output may show NaN "
-                "pressure and garbage vz component — this "
-                "is a VTK output artifact, NOT divergence. "
+                "[Output] 2D fluid VTK output of 4C before 2026.3.0 "
+                "(the 2026.2.0 release included) shows "
+                "NaN pressure and a nonzero vz component — this "
+                "is a VTK output artifact, NOT divergence. The "
+                "vz component is the pressure (measured "
+                "2026-09-28 on openPASO's fsi_2d deck: it equals "
+                "the 'pressure' array 4C 2026.3.0 writes for the "
+                "same run to 7e-15), and 4C 2026.3.0 writes a "
+                "correct 'pressure' array and a two-component "
+                "velocity. "
                 "Signal: with PRESSURE: true in IO/RUNTIME VTK "
                 "OUTPUT/FLUID, EVERY point of the written "
                 ".vtu pressure array is NaN, and the third "
                 "component of the velocity array is nonzero "
-                "noise in a problem that has no third "
+                "in a problem that has no third "
                 "dimension — while the same run converges and "
                 "passes a RESULT DESCRIPTION test on fluid "
                 "pressure to 1e-10. Note displacement and "
@@ -3537,8 +3695,12 @@ RESULT DESCRIPTION:
     "ssi": {
         "description": "Structure-Scalar Interaction (e.g., battery electrode mechanics)",
         "problemtype": "Structure_Scalar_Interaction",
-        "coupling_types": ["OneWay_ScatraToSolid", "OneWay_SolidToScatra",
-                          "IterStagg", "IterStaggFixedRel", "IterStaggAitken", "Monolithic"],
+        # SSI CONTROL/COUPALGO, spelled exactly so; the default is ssi_IterStagg.
+        "coupling_types": ["ssi_OneWay_ScatraToSolid", "ssi_OneWay_SolidToScatra",
+                          "ssi_IterStagg",
+                          "ssi_IterStaggFixedRel_ScatraToSolid", "ssi_IterStaggFixedRel_SolidToScatra",
+                          "ssi_IterStaggAitken_ScatraToSolid", "ssi_IterStaggAitken_SolidToScatra",
+                          "ssi_Monolithic"],
     },
 
     "ssti": {
@@ -3691,6 +3853,7 @@ RESULT DESCRIPTION:
         # list, the connectivity and the design-entity map all change too.
         # This deck was run as written.
         "minimal_working_input_2d": """\
+# 4C before 2026.2.0 (WALL). For 4C 2026.2.0 and later use minimal_working_input_2d_solid.
 # Complete 2D plane-strain contact deck: two unit squares, the upper one
 # pressed into the lower one across an initial 0.1 gap. Self-contained.
 PROBLEM SIZE:
@@ -3774,6 +3937,93 @@ RESULT DESCRIPTION:
       TOLERANCE: 1.0e30
 """,
 
+        # The same contact deck for 4C 2026.2.0 and later. Run on 2026.2.0 and
+        # 2026.3.0: both record the same dispy at node 5 as the WALL deck on a
+        # 2026.2.0 development build (0.2043361023, relative difference 5e-15).
+        "minimal_working_input_2d_solid": """\
+# 4C 2026.2.0 and later (no WALL). Complete 2D plane-strain contact deck: two unit squares, the upper one
+# pressed into the lower one across an initial 0.1 gap. Self-contained.
+PROBLEM SIZE:
+  DIM: 2                   # REQUIRED in 2D; without it the mortar search
+PROBLEM TYPE:              # fails with 'auxiliary_plane called for unknown
+  PROBLEMTYPE: "Structure" # element type'
+STRUCTURAL DYNAMIC:
+  DYNAMICTYPE: "Statics"
+  TIMESTEP: 0.1
+  NUMSTEP: 10
+  MAXTIME: 1.0
+  TOLDISP: 1.0e-08
+  TOLRES: 1.0e-06
+  MAXITER: 50
+  LINEAR_SOLVER: 1
+CONTACT DYNAMIC:
+  LINEAR_SOLVER: 2
+  STRATEGY: "Penalty"
+  PENALTYPARAM: 1.0e4
+MORTAR COUPLING:
+  LM_DUAL_CONSISTENT: "none"
+SOLVER 1:
+  SOLVER: "UMFPACK"
+  NAME: "Structure_Solver"
+SOLVER 2:
+  SOLVER: "UMFPACK"
+  NAME: "Contact_Solver"
+MATERIALS:
+  - MAT: 1
+    MAT_Struct_StVenantKirchhoff:
+      YOUNG: 1000.0
+      NUE: 0.3
+      DENS: 1.0
+FUNCT1:
+  - SYMBOLIC_FUNCTION_OF_SPACE_TIME: "t"
+DESIGN LINE DIRICH CONDITIONS:     # LINE, not SURF, in 2D
+  - E: 1
+    NUMDOF: 2                      # 2 in 2D
+    ONOFF: [1, 1]
+    VAL: [0.0, 0.0]
+    FUNCT: [0, 0]
+  - E: 4
+    NUMDOF: 2
+    ONOFF: [1, 1]
+    VAL: [0.0, -0.3]
+    FUNCT: [0, 1]
+DESIGN LINE MORTAR CONTACT CONDITIONS 2D:   # '... 2D', not '... 3D'
+  - E: 2
+    InterfaceID: 1
+    Side: "Master"
+  - E: 3
+    InterfaceID: 1
+    Side: "Slave"
+DLINE-NODE TOPOLOGY:               # DLINE, not DSURFACE
+  - "NODE 1 DLINE 1"
+  - "NODE 2 DLINE 1"
+  - "NODE 3 DLINE 2"
+  - "NODE 4 DLINE 2"
+  - "NODE 5 DLINE 3"
+  - "NODE 6 DLINE 3"
+  - "NODE 7 DLINE 4"
+  - "NODE 8 DLINE 4"
+NODE COORDS:                       # every z MUST be 0.0 in a 2D problem
+  - "NODE 1 COORD 0.0 0.0 0.0"
+  - "NODE 2 COORD 1.0 0.0 0.0"
+  - "NODE 3 COORD 1.0 1.0 0.0"
+  - "NODE 4 COORD 0.0 1.0 0.0"
+  - "NODE 5 COORD 0.0 1.1 0.0"
+  - "NODE 6 COORD 1.0 1.1 0.0"
+  - "NODE 7 COORD 1.0 2.1 0.0"
+  - "NODE 8 COORD 0.0 2.1 0.0"
+STRUCTURE ELEMENTS:                # 4C 2026.2.0 and later: SOLID with THICKNESS and PLANE_ASSUMPTION
+  - "1 SOLID QUAD4 1 2 3 4 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "2 SOLID QUAD4 5 6 7 8 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+RESULT DESCRIPTION:
+  - STRUCTURE:
+      DIS: "structure"
+      NODE: 5
+      QUANTITY: "dispy"
+      VALUE: 0.0
+      TOLERANCE: 1.0e30
+""",
+
         "what_differs_between_the_2d_and_3d_decks": (
             "CONTACT DYNAMIC and MORTAR COUPLING are byte-identical. "
             "Everything else changes:\n"
@@ -3782,7 +4032,9 @@ RESULT DESCRIPTION:
             "DESIGN LINE MORTAR CONTACT CONDITIONS 2D\n"
             "  DESIGN SURF DIRICH CONDITIONS -> DESIGN LINE DIRICH CONDITIONS\n"
             "  DSURF-NODE TOPOLOGY -> DLINE-NODE TOPOLOGY, DSURFACE n -> DLINE n\n"
-            "  SOLID HEX8 (2 required keys) -> WALL QUAD4 (6 required keys)\n"
+            "  SOLID HEX8 (2 required keys) -> WALL QUAD4 (6 required keys) on "
+            "4C before 2026.2.0, SOLID QUAD4 with THICKNESS and PLANE_ASSUMPTION "
+            "(4 required keys) on 4C 2026.2.0 and later\n"
             "  and THE MESH ITSELF: 8 nodes instead of 16, all with z = 0.0, "
             "different connectivity, different design-entity map. A 3D node "
             "list carried over unchanged aborts with 'Node <id> has a "
@@ -3813,8 +4065,10 @@ RESULT DESCRIPTION:
             ),
             "STRATEGY": (
                 "Optional, default 'Lagrange'. Working choices: Lagrange / "
-                "LagrangianMultipliers, Penalty, Nitsche. 'Uzawa' is in the "
-                "enum but is not implemented and aborts. Lowercase aliases "
+                "LagrangianMultipliers, Penalty, Nitsche. 'Uzawa' contact "
+                "runs only with STRUCTURAL DYNAMIC INT_STRATEGY Old; under "
+                "the default Standard it aborts (mortar meshtying takes "
+                "Uzawa under Standard too). Lowercase aliases "
                 "'lagrange' and 'penalty' are accepted."
             ),
             "PENALTYPARAM": (
@@ -4135,10 +4389,15 @@ RESULT DESCRIPTION:
                 "much smaller value."
             ),
             (
-                "[Input] CONTACT DYNAMIC: 'Uzawa' appears in the STRATEGY enum that "
-                "`4C --parameters` prints, but selecting it aborts: the "
-                "schema lists it, the code does not implement it. Signal: "
-                "'This contact strategy is not yet considered!'. Likewise "
+                "[Input] CONTACT DYNAMIC: 'Uzawa' contact runs only with the "
+                "old structural time integration (STRUCTURAL DYNAMIC "
+                "INT_STRATEGY: Old, as upstream's contact3D_lin_uzawa deck "
+                "sets it); under INT_STRATEGY Standard, the default, a "
+                "contact deck with STRATEGY Uzawa aborts before the first "
+                "step, while mortar meshtying takes Uzawa under Standard. "
+                "Signal: 'This contact strategy is not yet considered!'. "
+                "(Measured on a development build before 4C 2026.2.0, on "
+                "4C 2026.2.0 and on 4C 2026.3.0.) Likewise "
                 "'SEMI_SMOOTH_NEWTON: false' is a valid boolean the code "
                 "refuses: 'Currently we support only the semi-smooth Newton "
                 "case!'. Being present in `--parameters` is necessary, not "
@@ -4208,7 +4467,8 @@ RESULT DESCRIPTION:
                 "INTERACTION_HORIZON": "delta = m * dx (typically m=3, so horizon = 3*particle_spacing)",
                 "PERIDYNAMIC_GRID_SPACING": "dx (particle spacing, must match actual particle grid)",
                 "PD_DIMENSION": "Peridynamic_2DPlaneStrain / Peridynamic_2DPlaneStress / Peridynamic_3D",
-                "PRE_CRACKS": "Line segments: 'x1 y1 x2 y2 ; x3 y3 x4 y4' — bonds crossing these are pre-broken",
+                "PRE_CRACKS": "Line segments: 'x1 y1 x2 y2 ; x3 y3 x4 y4' — bonds crossing these are pre-broken (pre-merge branch form; not in upstream 4C)",
+                "PRE_CRACK_LINES": "4C 2026.2.0 and later: a list of '- START: [x1, y1, z1]' / 'END: [x2, y2, z2]' segments; bonds crossing them are broken at initialization. PRE_CRACK_PLANES is the same with parallelogram patches given by corner points P0, P1, P2 (both lists take 3-D points; both are accepted in 2-D peridynamic decks)",
                 "NORMALCONTACTLAW": "NormalLinearSpring (for impactor-body contact)",
                 "NORMAL_STIFF": "Contact stiffness (e.g., 1.0e4)",
             },
@@ -4216,7 +4476,7 @@ RESULT DESCRIPTION:
                 "description": "PD requires a REGULAR GRID of particles with sufficient resolution",
                 "pattern": "Loop over nx*ny (2D) or nx*ny*nz (3D) with uniform spacing dx",
                 "spacing": "dx should be chosen based on the problem scale; horizon = m*dx (m=3 typical)",
-                "notches_cracks": "Skip particles inside notch gaps OR use PRE_CRACKS line segments",
+                "notches_cracks": "Skip particles inside notch gaps OR use pre-crack segments (PRE_CRACK_LINES in 4C 2026.2.0 and later; PRE_CRACKS on the pre-merge branch)",
                 "example": "for iy in range(ny): for ix in range(nx): particles.append((ix*dx, iy*dx, 0.0))",
                 "convergence": "PD converges as dx→0 AND m→∞ (delta-convergence AND m-convergence)",
             },
@@ -4372,7 +4632,8 @@ PARTICLE DYNAMIC/SPH:
                 "corrected by execution 2026-08-06.)"
             ),
             (
-                "[Input] PRE_CRACKS uses semicolon-separated "
+                "[Input] PRE_CRACKS (the pre-merge PD branch's key, "
+                "see the end of this entry) uses semicolon-separated "
                 "line segments: 'x1 y1 x2 y2 ; x3 y3 x4 y4'. "
                 "Signal: mis-formatted PRE_CRACKS in PARTICLE "
                 "DYNAMIC / PD (comma separator, or no "
@@ -4387,8 +4648,10 @@ PARTICLE DYNAMIC/SPH:
                 "'Number of pre-crack segments: N' — check N "
                 "against the number of cracks you wrote. "
                 "(Audit 2026-06-02; corrected by execution "
-                "2026-08-06. PRE_CRACKS is not in upstream 4C "
-                "main.)"
+                "2026-08-06. PRE_CRACKS is the pre-merge branch "
+                "form; upstream 4C 2026.2.0 and later read PRE_CRACK_LINES "
+                "/ PRE_CRACK_PLANES lists of START and END "
+                "points instead.)"
             ),
             (
                 "[Input] PDBODYID must be specified for PD "
@@ -4649,9 +4912,9 @@ PARTICLE DYNAMIC/SPH:
     "solvers": {
         "direct": {
             "UMFPACK": "Serial direct solver (recommended for small problems)",
-            "SuperLU": "Parallel direct solver (SuperLU_Dist)",
-            "MUMPS": "Parallel direct solver (MPI, recommended for large problems)",
-            "KLU2": "Serial direct solver (alternative to UMFPACK)",
+            "Superlu": "Parallel direct solver (SuperLU_Dist); the SOLVER value is spelled exactly 'Superlu' ('SuperLU' stops with 'Could not match this input')",
+            "MUMPS": "Parallel direct solver (MPI, recommended for large problems); not in 4C 2026.1.0",
+            "KLU2": "Serial direct solver (alternative to UMFPACK); not in 4C 2026.1.0",
         },
         "iterative": {
             "CG": "Conjugate gradient (symmetric positive definite systems only)",
@@ -4666,7 +4929,22 @@ PARTICLE DYNAMIC/SPH:
         "nonlinear": {
             "NOX": "Trilinos NOX framework (Newton + line search + PTC + convergence tests)",
         },
-        "yaml_example": """
+        # The preconditioner file key differs between the releases: 4C 2026.2.0
+        # and later accept only PRECONDITIONER_XML_FILE, earlier builds only the
+        # key named after the preconditioner (MUELU_XML_FILE, TEKO_XML_FILE,
+        # IFPACK_XML_FILE, AMGNXN_XML_FILE).
+        "yaml_example_4c_2026_2_and_later": """
+SOLVER 1:
+  SOLVER: "UMFPACK"
+  NAME: "direct_solver"
+SOLVER 2:
+  SOLVER: "Belos"
+  SOLVER_XML_FILE: "iterative_gmres_template.xml"
+  AZPREC: "MueLu"
+  PRECONDITIONER_XML_FILE: "elasticity_template.xml"
+  NAME: "iterative_solver"
+""",
+        "yaml_example_before_4c_2026_2": """
 SOLVER 1:
   SOLVER: "UMFPACK"
   NAME: "direct_solver"
@@ -4755,9 +5033,10 @@ FUNCT1:
   # Supports: x, y, z, t as variables
 
 # --- Function with VARIABLE (e.g. ramp-up) ---
-# IMPORTANT: COMPONENT: 0 is REQUIRED when using VARIABLE/multifunction.
-# Without COMPONENT, the VARIABLE definition is NOT parsed correctly
-# and the function silently returns wrong values.
+# COMPONENT is optional (it defaults to 0): a VARIABLE/multifunction
+# function gives the same field with or without the COMPONENT: 0 line.
+# Only a COMPONENT index other than the one being defined is an error
+# ('expected COMPONENT 0 but got COMPONENT 1').
 FUNCT2:
   - COMPONENT: 0
     SYMBOLIC_FUNCTION_OF_SPACE_TIME: "6*U_bar*y*(H-y)/(H*H)*a"
@@ -4969,7 +5248,7 @@ TRANSPORT ELEMENTS:
             "nothing in the log mentions thickness; the only "
             "way to catch it is that the answer scales as "
             "1/thickness. CHECK THE KEYWORD AGAINST YOUR "
-            "BUILD: on 4C 2026.2.0-dev the key is THICK and it "
+            "BUILD: on 4C before 2026.2.0 (measured on a 2026.2.0-dev build) the key is THICK and it "
             "belongs to WALL; THICKNESS does not exist as an "
             "element key at all and neither does "
             "PLANE_ASSUMPTION, so a deck written with the "
@@ -5059,7 +5338,9 @@ TRANSPORT ELEMENTS:
             "nothing. A registered element type asked for a cell type it "
             "does NOT own gives \"Element 'SOLID' does not seem to know "
             "cell type 'quad4'.\" instead, with the cell type echoed in "
-            "lowercase. (Verified by execution 2026-08-03; the earlier "
+            "lowercase. Measured: a 2026.2.0 development build registers WALL, "
+            "the 2026.2.0 and 2026.3.0 releases the 2D SOLID and no WALL. "
+            "(Verified by execution 2026-08-03; the earlier "
             "one-sided 'WALL was renamed to SOLID' claim is inverted on "
             "builds where SOLID registers 3D cell types only.)",
 
@@ -5533,16 +5814,13 @@ TRANSPORT ELEMENTS:
         "element_type_per_physics": {
             "FLUID (2D)": ["QUAD4", "QUAD9", "TRI3", "TRI6"],
             "FLUID (3D)": ["HEX8", "HEX20", "HEX27", "TET4", "TET10", "NURBS27"],
-            "SOLID (2D structure, 4C >= 2026.3)": ["QUAD4", "QUAD8",
-                                                   "QUAD9", "TRI3",
-                                                   "TRI6"],
-            # NOTE: 4C 2026.3 unified the legacy WALL 2D eletype
+            # NOTE: 4C 2026.2.0 unified the legacy WALL 2D eletype
             # into the SOLID eletype factory. Writing 'WALL QUAD4'
-            # raises 'Unknown type WALL of finite element' from
+            # raises "Unknown type 'WALL' of finite element" from
             # parobjectfactory.cpp:153 — see SOL_MECH [API] pitfall.
             #
             # 2026-08-03: the boundary runs the OTHER way on older
-            # builds. On 4C 2026.2.0-dev the SOLID factory registers
+            # builds. On the March 2026 development build (2026.2.0-dev) the SOLID factory registers
             # 3D cell types only and 2D is the WALL eletype below —
             # verified by execution, and by 109 of the 1974 decks in
             # that tree's tests/input_files using WALL against 3 using
@@ -5552,22 +5830,35 @@ TRANSPORT ELEMENTS:
             # scripts/tier2_fixtures/fourc/
             # structural_2d_solid_quad4_not_wall, which prints a
             # VERDICT: 2D_ELEMENT=<WALL|SOLID> line.
-            "WALL (2D structure, 4C <= 2026.2)": [
+            "WALL (2D structure, 4C before 2026.2.0)": [
                 "QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6",
                 "NURBS4", "NURBS9",
                 "-- required keys: MAT, KINEM, EAS, THICK, "
                 "STRESS_STRAIN, GP (2 ints)"],
+            "SOLID (2D structure, 4C 2026.2.0 and later)": [
+                "QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6",
+                "-- required keys: MAT, KINEM, THICKNESS, PLANE_ASSUMPTION"],
             "SOLID (3D structure)": ["HEX8", "HEX20", "HEX27", "TET4", "TET10",
                                      "WEDGE6", "PYRAMID5"],
             "TRANSP (scalar transport)": ["QUAD4", "QUAD9", "HEX8", "HEX27",
                                           "TRI3", "TRI6", "TET4", "TET10"],
             "SOLIDSCATRA (TSI/SSI)": ["HEX8", "TET4", "TET10", "HEX27"],
+            "SOLIDSCATRA 2D (4C 2026.2.0 and later)": [
+                "QUAD4", "QUAD9", "TRI3", "TRI6",
+                "-- listed by 4C 2026.2.0 and 2026.3.0; a TSI deck with QUAD4 stops at "
+                "'Unsupported solid element type!'"],
             "ALE (2D)": ["QUAD4", "TRI3"],
             "ALE (3D)": ["HEX8", "TET4"],
-            "PORO (2D)": ["WALLQ4PORO", "WALLQ9PORO"],
-            "PORO (3D)": ["SOLIDH8PORO", "SOLIDT4PORO", "SOLIDH27PORO"],
+            "PORO (2D, 4C before 2026.2.0)": ["WALLQ4PORO QUAD4", "WALLQ9PORO QUAD9"],
+            "PORO (2D, 4C 2026.2.0 and later)": [
+                "SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD4",
+                "SOLIDPORO_PRESSURE_VELOCITY_BASED QUAD9",
+                "-- with THICKNESS and PLANE_ASSUMPTION"],
+            "PORO (3D)": ["SOLIDPORO_PRESSURE_VELOCITY_BASED HEX8",
+                          "SOLIDPORO_PRESSURE_VELOCITY_BASED TET4",
+                          "SOLIDPORO_PRESSURE_VELOCITY_BASED HEX27"],
             "BEAM": ["BEAM3R LINE2", "BEAM3EB LINE2", "BEAM3R LINE3"],
-            "ARTERY": ["ARTERY LINE2"],
+            "ARTERY": ["ART LINE2"],  # the element is ART, written in section ARTERY ELEMENTS
             "notes": (
                 "QUAD4 is the workhorse element for most 2D problems.  "
                 "HEX8 for 3D.  Higher-order elements (QUAD9, HEX27) give "
@@ -5757,7 +6048,7 @@ RESULT DESCRIPTION:
     },
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ALL 40 PROBLEM TYPES
+    # ALL 41 PROBLEM TYPES (4C 2026.1.0 has 40: no Reduced_Lung_1D_Pipe_Flow)
     # ═══════════════════════════════════════════════════════════════════════
     "all_problem_types": {
         "Structure": "Structural mechanics",
@@ -5789,5 +6080,17 @@ RESULT DESCRIPTION:
         "Biofilm_Fluid_Structure_Interaction": "Biofilm FSI",
         "Gas_Fluid_Structure_Interaction": "Gas + FSI",
         "Polymer_Network": "Polymer network",
+        "Fluid_XFEM": "Fluid with XFEM (enum fluid_xfem, fluid_xfem_drt)",
+        "Fluid_RedModels": "Fluid with reduced models (enum fluid_redmodels, dyn_fluid_drt)",
+        "Fluid_Structure_Interaction_RedModels": "FSI with reduced models (enum fsi_redmodels, fsi_ale_drt)",
+        "Fluid_Poro_Structure_Interaction_XFEM": "FPSI with XFEM (enum fpsi_xfem, xfpsi_drt)",
+        "Fluid_Porous_Structure_Scalar_Scalar_Interaction": "FPS3I (enum fps3i, fs3i_dyn)",
+        "Thermo_Fluid_Structure_Interaction": "Thermo-FSI (enum thermo_fsi, fs3i_dyn)",
+        "Reduced_Lung": "Reduced lung (enum reduced_lung, ReducedLung::reduced_lung_main)",
+        "Reduced_Lung_1D_Pipe_Flow": "1D pipe flow (enum one_d_pipe_flow, ReducedLung1dPipeFlow::main); not in 4C 2026.1.0",
+        "porofluid_pressure_based": "Pressure-based porous-medium flow (porofluid_pressure_based_dyn)",
+        "porofluid_pressure_based_elasticity": "porofluid_pressure_based + elasticity (enum porofluid_pressure_based_elast, porofluid_elast_dyn)",
+        "porofluid_pressure_based_elasticity_scatra": "porofluid_pressure_based + elasticity + scalar transport (enum porofluid_pressure_based_elast_scatra, porofluid_pressure_based_elast_scatra_dyn)",
+        "NP_Supporting_Procs": "Supporting processes for a multiscale run's micro problems (enum np_support, MultiScale::np_support_drt)",
     },
 }

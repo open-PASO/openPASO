@@ -1,3 +1,15 @@
+# Needs a bond-based peridynamics BRANCH build of 4C, not upstream 4C.
+# PRE_CRACKS and IMPACTOR_VELOCITY (PARTICLE DYNAMIC/PD) and the per-particle
+# PDFIXED flag (PARTICLES) are not upstream 4C input: upstream's PARTICLE
+# DYNAMIC/PD rejects the two keys with "Could not match this input", and its
+# particle reader has no PDFIXED state (it takes RAD, RIGIDCOLOR, PDBODYID
+# and, from v2026.2.0, DIRICHLET_FUNCT and BOUNDARYID) and aborts with
+# "Optional particle state with label 'PDFIXED' unknown!". On upstream 4C,
+# DIRICHLET_BOUNDARY_CONDITION prescribes motion for a whole particle phase,
+# and from v2026.2.0 the per-particle DIRICHLET_FUNCT <funct> (phase listed in
+# DIRICHLET_BOUNDARY_CONDITION_FLAGGED) does it for single particles; from
+# v2026.2.0 upstream pre-cracks are PRE_CRACK_LINES (list of START/END
+# 3-vectors) or PRE_CRACK_PLANES (list of P0/P1/P2 3-vectors).
 TITLE:
   - "Bond-based peridynamics: pre-cracked 2-D plate pulled in tension"
 PROBLEM TYPE:

@@ -20,11 +20,15 @@ The REAL solve templates that remain in this module each build a model +
 mesh, run an AnalysisStage / strategy solve, and write output. NOTE: their
 applications (PoromechanicsApplication, ShallowWaterApplication,
 DamApplication, ConstitutiveLawsApplication, DemStructuresCouplingApplication,
-CableNetApplication, OptimizationApplication) are likewise not importable in
-the current pip stack (which ships only StructuralMechanics,
-ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers); they are
-retained because they are genuine parameterized solves (not import-probe
-stubs) and run on a complete Kratos build. The honesty fix mandated by the
+CableNetApplication, OptimizationApplication) are not part of a minimal
+StructuralMechanics / ConvectionDiffusion / ContactStructuralMechanics /
+LinearSolvers install, but each is its own PyPI wheel at 10.3.0
+(KratosPoromechanicsApplication, KratosShallowWaterApplication,
+KratosDamApplication, KratosConstitutiveLawsApplication,
+KratosDemStructuresCouplingApplication, KratosCableNetApplication,
+KratosOptimizationApplication; KratosMultiphysics-all brings the first four).
+They are retained because they are genuine parameterized solves (not
+import-probe stubs). The honesty fix mandated by the
 audit was the removal of every no-solve availability-probe stub, which is
 done.
 """
@@ -39,8 +43,9 @@ def _poromechanics_2d(params: dict) -> str:
     built programmatically on a `KM.Model` (no .mdpa / ProjectParameters).
     A vertical traction `q_load` is applied on the drained top edge via
     `UPlFaceLoadCondition2D2N` (nodal FACE_LOAD); the base is fixed and
-    impermeable, lateral edges are rollers.  NOTE: Kratos 10.4.x renamed
-    the Poromechanics formulation u-Pw -> u-Pl; the pore-pressure DOF is
+    impermeable, lateral edges are rollers.  NOTE: PoromechanicsApplication
+    uses the u-Pl formulation (already so in 10.2.3 and 10.3.0, unchanged in
+    10.4.2; the UPw* names belong to GeoMechanicsApplication); the pore-pressure DOF is
     `P.LIQUID_PRESSURE` (not WATER_PRESSURE) and material variables like
     DENSITY_SOLID / BULK_MODULUS_LIQUID must be fetched through
     `KM.KratosGlobals.GetVariable` because they are not module attributes.
@@ -70,9 +75,9 @@ edges are rollers (u_x = 0) and impermeable.  Quasi-static Newmark u-Pl
 scheme + Newton-Raphson.  Writes the LIQUID_PRESSURE and DISPLACEMENT
 fields as legacy .vtk and a results_summary.json.
 
-Note: Kratos 10.4.x renamed the Poromechanics formulation from u-Pw to
-u-Pl (liquid pressure): elements are UPlSmallStrainElement2D4N etc. and
-the nodal unknown is P.LIQUID_PRESSURE.
+Note: PoromechanicsApplication uses the u-Pl (liquid pressure)
+formulation: elements are UPlSmallStrainElement2D4N etc. and the nodal
+unknown is P.LIQUID_PRESSURE.
 """
 import json
 import math
@@ -720,7 +725,7 @@ with open("results_summary.json", "w") as f:
 
 def _constitutive_laws_2d(params: dict) -> str:
     """Plane-strain tension strip with Von Mises isotropic plasticity —
-    KratosMultiphysics.ConstitutiveLawsApplication (pip wheel >= 10.4).
+    KratosMultiphysics.ConstitutiveLawsApplication (pip wheel KratosConstitutiveLawsApplication; runs on 10.3.0).
 
     Uses `SmallStrainIsotropicPlasticityPlaneStrainVonMisesVonMises`
     (registered ONLY by ConstitutiveLawsApplication; strain size 3, so it
@@ -991,7 +996,7 @@ try:
     import KratosMultiphysics.DemStructuresCouplingApplication as DemFem
 except ImportError as _kratos_app_missing:
     raise SystemExit(
-        "This template needs KratosMultiphysics.DemStructuresCouplingApplication (DEM-to-structure coupling), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). Install a Kratos build that includes it, or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
+        "This template needs KratosMultiphysics.DemStructuresCouplingApplication (DEM-to-structure coupling), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). It is published as its own wheel: pip install KratosDemStructuresCouplingApplication, or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
         + ' [' + str(_kratos_app_missing) + ']')
 from KratosMultiphysics.DemStructuresCouplingApplication.dem_main_script_ready_for_coupling_with_fem import (
     StructuresCoupledDEMAnalysisStage,
@@ -1620,7 +1625,7 @@ try:
     import KratosMultiphysics.CableNetApplication as CNA
 except ImportError as _kratos_app_missing:
     raise SystemExit(
-        "This template needs KratosMultiphysics.CableNetApplication (cable-net elements), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). Install a Kratos build that includes it, or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
+        "This template needs KratosMultiphysics.CableNetApplication (cable-net elements), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). It is published as its own wheel: pip install KratosCableNetApplication, or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
         + ' [' + str(_kratos_app_missing) + ']')
 
 t_start = time.time()
@@ -1827,7 +1832,9 @@ def _optimization_2d(params: dict) -> str:
       * `Kratos.TensorAdaptors` (VariableTensorAdaptor wrapped in a
         DoubleCombinedTensorAdaptor over the element container — same
         construction as MasterControl.GetPhysicalKratosVariableMap) to
-        receive the gradients.
+        receive the gradients. This needs Kratos >= 10.4.2: TensorAdaptors
+        does not exist in 10.3.x, and in 10.3.0 and 10.4.0 CalculateGradient
+        takes list_of_container_expressions instead.
 
     The script verifies the gradient against a forward finite difference
     (asserts rel. error < 1e-4) and runs `n_iter` mass-constrained projected
@@ -1873,7 +1880,7 @@ try:
     import KratosMultiphysics.OptimizationApplication as KOA
 except ImportError as _kratos_app_missing:
     raise SystemExit(
-        "This template needs KratosMultiphysics.OptimizationApplication (the optimization driver), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). Install a Kratos build that includes it, or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
+        "This template needs KratosMultiphysics.OptimizationApplication (the optimization driver), which is NOT present in this Kratos install. It is a real Kratos capability, not a stub, but it is outside the minimal pip stack (StructuralMechanics, ConvectionDiffusion, ContactStructuralMechanics, LinearSolvers). It is published as its own wheel: pip install KratosOptimizationApplication (this template uses the Kratos >= 10.4.2 gradient API), or ask openPASO for a physics your installed applications can solve: discover(query='physics', solver='kratos')."
         + ' [' + str(_kratos_app_missing) + ']')
 
 t_start = time.perf_counter()
@@ -2086,7 +2093,7 @@ KNOWLEDGE = {
         "capabilities": ["u-pl coupling (formerly u-pw)", "fracture_propagation", "interface_elements"],
         "pitfalls": [
             "[Physics] Different from GeoMechanicsApplication \u2014 this focuses on fracture in porous media Signal: the two applications register different element stems for the same u-p formulation \u2014 PoromechanicsApplication uses UPl* with LIQUID_PRESSURE, GeoMechanicsApplication uses UPw* with WATER_PRESSURE \u2014 so an element name valid under one raises 'is not registered' under the other.",
-            "[API] Kratos 10.4.x renamed the u-Pw formulation to u-Pl: registered elements are UPlSmallStrainElement2D3N/2D4N/3D4N/3D8N, SmallStrainUPlDiffOrderElement*, FIC and interface variants; conditions are UPlFaceLoadCondition2D2N / UPlNormalFaceLoadCondition2D2N / UPlNormalLiquidFluxCondition2D2N. The pressure DOF is LIQUID_PRESSURE (reaction REACTION_LIQUID_PRESSURE), not WATER_PRESSURE. Signal: CreateNewElement('UPwSmallStrainElement2D4N', ...) raises 'The Element UPwSmallStrainElement2D4N is not registered!'; the exception message of a bogus element name dumps the full registered list, which shows only UPl* names. (Verified empirically 2026-06-12.)",
+            "[API] PoromechanicsApplication uses the u-Pl formulation (already so in 10.2.3 and 10.3.0, unchanged in 10.4.2; the UPw* names belong to GeoMechanicsApplication): registered elements are UPlSmallStrainElement2D3N/2D4N/3D4N/3D8N, SmallStrainUPlDiffOrderElement*, FIC and interface variants; conditions are UPlFaceLoadCondition2D2N / UPlNormalFaceLoadCondition2D2N / UPlNormalLiquidFluxCondition2D2N. The pressure DOF is LIQUID_PRESSURE (reaction REACTION_LIQUID_PRESSURE), not WATER_PRESSURE. Signal: CreateNewElement('UPwSmallStrainElement2D4N', ...) raises 'The Element UPwSmallStrainElement2D4N is not registered!'; the exception message of a bogus element name dumps the full registered list, which shows only UPl* names. (Verified empirically 2026-06-12.)",
             "[API] Poromechanics material variables (DENSITY_SOLID, DENSITY_LIQUID, POROSITY, BULK_MODULUS_SOLID, BULK_MODULUS_LIQUID, PERMEABILITY_XX/YY/XY, DYNAMIC_VISCOSITY_LIQUID) are registered in the C++ kernel only \u2014 they are attributes of neither KratosMultiphysics nor the Poromechanics module. Fetch them via KM.KratosGlobals.GetVariable(\"DENSITY_SOLID\"). Note the names are *_LIQUID, not *_FLUID / *_WATER. Signal: AttributeError: Module KratosMultiphysics has no attribute DENSITY_SOLID. (Verified empirically 2026-06-12.)",
             "[Input] BIOT_COEFFICIENT is a required Properties entry of the UPl elements and is NOT derived from the bulk moduli \u2014 set prop.SetValue(P.BIOT_COEFFICIENT, 1.0) explicitly. Signal: element Check() fails with 'Error: BIOT_COEFFICIENT has Key zero, is not defined or has an invalid value at element N'. (Verified empirically 2026-06-12.)",
             "[Input] UPl element Initialize reads exotic nodal historical variables; a minimal nodal-variable list crashes inside C++. Mirror the full poromechanics_U_Pl_solver.AddVariables() set: INITIAL_STRESS_TENSOR, NODAL_EFFECTIVE_STRESS_TENSOR, NODAL_AREA, NODAL_JOINT_AREA/WIDTH/DAMAGE, NODAL_MID_PLANE_LIQUID_PRESSURE, NODAL_SLIP_TENDENCY, VELOCITY, ACCELERATION, FACE_LOAD, FORCE, DT_LIQUID_PRESSURE, NORMAL_LIQUID_FLUX, LIQUID_DISCHARGE. Signal: 'Error: This container only can store the variables specified in its variables list. The variables list doesn't have this variable: INITIAL_STRESS_TENSOR'; multi-threaded the same defect surfaces as an uninformative 'terminate called recursively' core dump \u2014 rerun with OMP_NUM_THREADS=1 to see the real exception. (Verified empirically 2026-06-12.)",
@@ -2116,7 +2123,7 @@ KNOWLEDGE = {
         ],
         "solver_types": ["explicit", "semi-implicit"],
         "pitfalls": [
-            "[API] The KratosShallowWaterApplication element name is BoussinesqElement2D3N / BoussinesqElement2D4N, NOT ShallowWaterElement2D3N. The Application class is named \"ShallowWater\" but the underlying element registration uses the \"Boussinesq\" stem (after the Boussinesq equations underlying the depth-averaged formulation). Signal: calling model_part.CreateNewElement with the unregistered name ShallowWaterElement2D3N raises 'is not registered' from kratos/python/add_model_part_to_python.cpp:173; the same call with 'BoussinesqElement2D3N' succeeds. (Verified empirically 2026-06-01 \u2014 same Tier-2 fixture as the RANS naming entry, rans_shallowwater_element_naming in scripts/tier2_fixtures/kratos/.)",
+            "[API] The KratosShallowWaterApplication element name is BoussinesqElement2D3N / BoussinesqElement2D4N, NOT ShallowWaterElement2D3N. The Application class is named \"ShallowWater\" but the underlying element registration uses the \"Boussinesq\" stem (after the Boussinesq equations underlying the depth-averaged formulation). Signal: calling model_part.CreateNewElement with the unregistered name ShallowWaterElement2D3N raises 'is not registered' from kratos/python/add_model_part_to_python.cpp:159 on 10.3.0 (:154 in 10.4.0 to 10.4.3); the same call with 'BoussinesqElement2D3N' succeeds. (Verified empirically 2026-06-01 \u2014 same Tier-2 fixture as the RANS naming entry, rans_shallowwater_element_naming in scripts/tier2_fixtures/kratos/.)",
             "[Numerical] 2D only (depth-averaged) Signal: enforced by the element registry rather than by a convergence failure: the 2D Boussinesq elements construct while every 3D spelling raises 'is not registered', so a 3D shallow-water model cannot be assembled at all.",
             "[Input] Gravity is the SCALAR ProcessInfo[KM.GRAVITY_Z] (not a GRAVITY vector, not a nodal variable) \u2014 the base shallow-water solver sets ProcessInfo[GRAVITY_Z] = 9.81 and the elements read only that. Signal: silent g=0 \u2014 the initial free-surface perturbation never moves, all velocities stay exactly 0, rc=0. (Verified empirically 2026-06-12.)",
             "[Numerical] The BDF2 wave scheme (ShallowWaterResidualBasedBDFScheme) needs SetBufferSize(3) and the time loop must NOT solve until the buffer is full \u2014 replicate _TimeBufferIsInitialized (STEP + 1 >= 3); the first CloneTimeStep only shifts the initial condition into history. Signal: solving at step 1 uses a zero-filled history slot and corrupts the BDF time derivative \u2014 first-step velocities are wildly wrong, then the run \"recovers\" with a polluted transient. (Verified empirically 2026-06-12.)",
@@ -2975,7 +2982,7 @@ KNOWLEDGE = {
                          "multi_objective", "response_function_library"],
         "pitfalls": [
             "[Numerical] MoveMeshFlag=True (the last ResidualBasedNewtonRaphsonStrategy ctor argument, as in the solid reference template) silently corrupts every GEOMETRIC response: the strategy moves the node coordinates by the converged displacements, so mass/volume responses integrate on the deformed mesh. Pass False for response evaluation. Signal: MassResponseUtils.CalculateValue returns e.g. 5.94 instead of the exact rho*L*h*t = 4.0 and the mass gradient becomes non-uniform; the compliance FD-check still passes (consistent configuration), which masks the defect. (Verified empirically 2026-06-12.)",
-            "[API] KOA.ResponseUtils.*.CalculateGradient wants a DoubleCombinedTensorAdaptor, not a numpy array or raw VariableTensorAdaptor: build it exactly like MasterControl.GetPhysicalKratosVariableMap does \u2014 inner DoubleTensorAdaptor(VariableTensorAdaptor(mp.Elements, KM.THICKNESS), copy=False), combined adaptor with perform_collect_data_recursively=False, perform_store_data_recursively=False; read cta.data (a numpy view \u2014 copy it before reuse). Per-element design variables also need per-element Properties first: KOA.OptimizationUtils.CreateEntitySpecificPropertiesForContainer(mp, mp.Elements, False). Signal: TypeError: incompatible function arguments on CalculateGradient with anything but the combined adaptor; with shared Properties, perturbing THICKNESS changes EVERY element at once \u2014 the FD check returns the SUM of all sensitivities instead of one. (Verified empirically 2026-06-12.)",
+            "[API] On Kratos 10.4.2 and 10.4.3, KOA.ResponseUtils.*.CalculateGradient wants a DoubleCombinedTensorAdaptor, not a numpy array or raw VariableTensorAdaptor: build it exactly like MasterControl.GetPhysicalKratosVariableMap does \u2014 inner DoubleTensorAdaptor(VariableTensorAdaptor(mp.Elements, KM.THICKNESS), copy=False), combined adaptor with perform_collect_data_recursively=False, perform_store_data_recursively=False; read cta.data (a numpy view \u2014 copy it before reuse). Per-element design variables also need per-element Properties first: KOA.OptimizationUtils.CreateEntitySpecificPropertiesForContainer(mp, mp.Elements, False). Signal: TypeError: incompatible function arguments on CalculateGradient with anything but the combined adaptor; with shared Properties, perturbing THICKNESS changes EVERY element at once \u2014 the FD check returns the SUM of all sensitivities instead of one. In 10.3.0 and 10.4.0 CalculateGradient takes list_of_container_expressions (ContainerExpressions such as Kratos.Expression.ElementExpression) instead, and KM.TensorAdaptors does not exist in 10.3.x. (Verified empirically 2026-06-12; the version split read from the 10.3.0, 10.4.0 and 10.4.2 sources.)",
             "[Physics] Plane-STRAIN constitutive laws ignore THICKNESS \u2014 for thickness-design optimization use LinearElasticPlaneStress2DLaw (the 2D solid element scales integration weights by the THICKNESS property); set both THICKNESS and DENSITY on the Properties. Signal: thickness gradient is meaningless/zero-effect under a plane-strain law; MassResponseUtils.Check(mp) raises if DENSITY (or THICKNESS in 2D) is missing. (Verified empirically 2026-06-12.)",
             "[API] POINT_LOAD lives in StructuralMechanicsApplication, not core (SMA.POINT_LOAD; KM.POINT_LOAD does not exist), must be added via AddNodalSolutionStepVariable BEFORE creating nodes, and needs a PointLoadCondition2D1N on the loaded node \u2014 the nodal value alone is never assembled. Same module split for SMA.THICKNESS_SENSITIVITY. Signal: AttributeError: Module KratosMultiphysics has no attribute POINT_LOAD; or rc=0 with exactly zero deflection when the condition is missing. (Verified empirically 2026-06-12.)",
             "[API] The python-layer LinearStrainEnergyResponseFunction class requires the full OptimizationProblem + ExecutionPolicyDecorator stack wrapping an AnalysisStage; for a programmatic ModelPart the compiled statics KOA.ResponseUtils.LinearStrainEnergyResponseUtils / MassResponseUtils.CalculateValue/CalculateGradient give the same values directly. Signal: RuntimeError/KeyError about a missing execution policy or optimization problem component when instantiating the python response class standalone. (Verified empirically 2026-06-12.)",

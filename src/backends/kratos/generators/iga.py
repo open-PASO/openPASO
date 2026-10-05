@@ -27,8 +27,8 @@ KNOWLEDGE = {
             "IgaMembraneElement",
             "TrussElement",
             "TrussEmbeddedEdgeElement",
-            "BeamThinElement2D",
-            "BeamThickElement2D",
+            "BeamThinElement2D (Kratos >= 10.4.0; not registered in 10.3.0)",
+            "BeamThickElement2D (Kratos >= 10.4.0; not registered in 10.3.0)",
             "SurfaceElement3D3N",
             "SurfaceElement3D4N",
             "SurfaceElement3D6N",
@@ -40,8 +40,8 @@ KNOWLEDGE = {
         # element. The bare name without shape suffix is
         # unregistered.
         "conditions": [
-            "BrepCurveOnSurfaceCondition",
-            "NurbsCurveCondition",
+            "BrepCurveOnSurfaceCondition (core KratosMultiphysics condition from 10.4.0; not registered in 10.3.0)",
+            "NurbsCurveCondition (core KratosMultiphysics condition from 10.4.0; not registered in 10.3.0)",
             "SurfaceCondition3D3N",
             "SurfaceCondition3D4N",
             "SurfaceCondition3D6N",
@@ -56,7 +56,7 @@ KNOWLEDGE = {
                          "penalty_coupling", "Nitsche_coupling"],
         "geometry_formats": ["NURBS from CAD (IGES/STEP)", "B-spline patches"],
         "pitfalls": [
-            "[API] \"SurfaceLoadCondition\" (bare name) is NOT registered as either an Element or a Condition in either IgaApplication or StructuralMechanicsApplication. The catalog previously listed it in the \"elements\" field, which is doubly wrong: (a) it is a Condition, not an Element; (b) it needs a shape suffix (\"SurfaceLoadCondition3D3N\" / \"SurfaceLoadCondition3D4N\"), and (c) the suffixed form comes from StructuralMechanicsApplication, not IGA. For IGA-internal surface integration use SurfaceCondition3D{3,4,6,8,9}N (no \"Load\" in the name) instead. Signal: mp.CreateNewCondition(\"SurfaceLoadCondition\", ...) raises 'is not registered!' \u2014 Error:, the word Condition and the name are all inserted around that literal at runtime, so the line reads Error: The Condition SurfaceLoadCondition is not registered! \u2014 from kratos/python/add_model_part_to_python.cpp:173. Appending the 3D{3,4}N shape suffix and loading StructuralMechanicsApplication lets it register. (Verified empirically 2026-06-01 \u2014 Tier-2 fixture iga_surface_condition_naming in scripts/tier2_fixtures/kratos/.)",
+            "[API] \"SurfaceLoadCondition\" (bare name) is NOT registered as either an Element or a Condition in either IgaApplication or StructuralMechanicsApplication. The catalog previously listed it in the \"elements\" field, which is doubly wrong: (a) it is a Condition, not an Element; (b) it needs a shape suffix (\"SurfaceLoadCondition3D3N\" / \"SurfaceLoadCondition3D4N\"), and (c) the suffixed form comes from StructuralMechanicsApplication, not IGA. For IGA-internal surface integration use SurfaceCondition3D{3,4,6,8,9}N (no \"Load\" in the name) instead. Signal: mp.CreateNewCondition(\"SurfaceLoadCondition\", ...) raises 'is not registered!' \u2014 Error:, the word Condition and the name are all inserted around that literal at runtime, so the line reads Error: The Condition \"SurfaceLoadCondition\" is not registered! \u2014 from kratos/python/add_model_part_to_python.cpp (ModelPartCreateNewCondition: line 178 in 10.3.0, 173 in 10.4.0 to 10.4.3). Appending the 3D{3,4}N shape suffix and loading StructuralMechanicsApplication lets it register. (Verified empirically 2026-06-01 \u2014 Tier-2 fixture iga_surface_condition_naming in scripts/tier2_fixtures/kratos/.)",
             "[Numerical] Requires NURBS geometry definition (control points, knot vectors, weights) Signal: the NURBS geometry types are core KratosMultiphysics classes (NurbsSurfaceGeometry3D, NurbsCurveGeometry3D) and are NOT attributes of IgaApplication; dotting them off the IGA module raises AttributeError before any analysis is set up.",
         ],
         "guidance": [

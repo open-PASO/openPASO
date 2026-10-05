@@ -37,8 +37,9 @@ WHAT THE RUN FOUND
     whole boundary and cannot represent a constant: 6.239e-01, and its total
     mass is 0.289 where a partition of unity would give the domain measure
     1.0 exactly. It is an enrichment, not a space.
-  * basix.ElementFamily.DPC must be created with discontinuous=True and an
-    explicit DPCVariant; with the defaults create_element raises.
+  * basix.ElementFamily.DPC must be created with discontinuous=True and,
+    for degree > 0, an explicit DPCVariant; with the defaults create_element
+    raises.
   * basix's embedded_subdegree does NOT answer "does this space contain the
     constants" -- measured directly against basix, it is -1 for Hermite,
     Regge and HHJ, all three of which reproduce a constant at roundoff, and
@@ -288,10 +289,12 @@ PITFALLS = [
     "the boundary data. Add it to another element rather than using it alone.",
 
     "[api] basix.ElementFamily.DPC must be created with discontinuous=True "
-    "and an explicit DPCVariant. create_element(DPC, quadrilateral, 1) with "
-    "the default unset variant raises rather than returning a discontinuous "
-    "element. Signal: a RuntimeError from create_element naming the variant, "
-    "at element construction and not at solve time.",
+    "and, for degree > 0, an explicit DPCVariant. create_element(DPC, "
+    "quadrilateral, 1) with the defaults raises rather than returning a "
+    "discontinuous element. Signal: RuntimeError 'Cannot create a continuous "
+    "DPC element.' from create_element; with discontinuous=True but no "
+    "variant it is 'DPC elements of degree > 0 need to be given a variant.'. "
+    "Both come at element construction, not at solve time.",
 
     "[api] basix's embedded_subdegree does NOT tell you whether a space "
     "contains the constants. Measured on this install it is -1 for Hermite, "

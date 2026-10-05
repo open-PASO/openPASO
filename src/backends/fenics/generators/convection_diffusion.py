@@ -25,7 +25,7 @@ KNOWLEDGE = {
         "stabilisation needs "
         "tau = h/(2|b|) * (coth(Pe) - 1/Pe), where the local Peclet "
         "number is Pe = |b|*h/(2*eps). Signal: using a constant tau "
-        "(e.g. tau = 0.1) in the dolfinx BilinearForm produces "
+        "(e.g. tau = 0.1) in the UFL bilinear form produces "
         "under-stabilisation in cells where Pe > 1 — the Function "
         "shows visible wiggles in the XDMFFile output downstream of "
         "the source. Use the per-cell formula with ufl.CellDiameter "

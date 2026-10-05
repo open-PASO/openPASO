@@ -14,6 +14,12 @@ The browser interface's fast tests ship with it and need no key:
 pytest webui/tests/test_app.py -q
 ```
 
+So do the knowledge gates that the weekly drift check runs:
+
+```bash
+pip install -e ".[skfem,ngsolve,test]" && pytest tests -q
+```
+
 The full guide, in plain language, is on the website: <https://open-paso.github.io/openPASO/contribute/>.
 
 The rules a change has to meet:

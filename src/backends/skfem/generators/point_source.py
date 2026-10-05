@@ -1,10 +1,10 @@
 """scikit-fem point-source / Dirac-delta load generator + knowledge.
 
-Mirrors scikit-fem upstream ex17 (insertion of a point load) and
-ex38 (point source via a scalar Dirac delta). A point source f =
-δ(x - x₀) cannot be integrated via a quadrature rule; instead the
-load is assembled by adding the test-function values at x₀
-directly to the RHS vector at the nearest mesh node OR by
+Mirrors scikit-fem upstream ex38 (point source via a scalar Dirac
+delta). A point source f = δ(x - x₀) cannot be integrated via a
+quadrature rule; instead the load is assembled by adding the
+test-function values at x₀ directly to the RHS vector at the
+nearest mesh node OR by
 projecting δ(x-x₀) onto the FE space via `Basis.interpolate`.
 
 For P1 on the unit square with f = δ(x - x₀):
@@ -111,8 +111,8 @@ KNOWLEDGE: dict = {
             "f = δ(x - x0) cannot be integrated via quadrature; "
             "the discrete RHS is b_i = N_i(x0) — collapses to a "
             "Kronecker e_node entry for mesh-coincident sources. "
-            "Matches scikit-fem upstream ex17 (point load) and "
-            "ex38 (point source)."
+            "Matches scikit-fem upstream ex38 (point source via "
+            "CellBasis.point_source)."
         ),
         "weak_form": (
             "(grad(u), grad(v))_dx = N_i(x0) v_i  "
@@ -216,8 +216,9 @@ KNOWLEDGE: dict = {
             "scipy.sparse.linalg.spsolve(*that) raises "
             "ValueError('The truth value of an array with more "
             "than one element is ambiguous. Use a.any() or "
-            "a.all()') from linsolve.py — the third element gets "
-            "bound to spsolve's use_umfpack flag. It is NOT the "
+            "a.all()') from linsolve.py — the fourth element (I) "
+            "gets bound to spsolve's use_umfpack flag (the third, "
+            "x, to permc_spec). It is NOT the "
             "'spsolve() got too many positional arguments' "
             "TypeError the prior text quoted, and not "
             "'unhashable type: tuple' either. condense's "
@@ -265,7 +266,9 @@ KNOWLEDGE: dict = {
             "writes the file anyway. Pad explicitly if you want "
             "the coordinates to be what you intended rather than "
             "what meshio guessed. Signal: that warning line on "
-            "stdout (not stderr, not an exception) at the "
+            "stderr (printed by meshio via rich "
+            "Console(stderr=True); not a Python warning, not an "
+            "exception) at the "
             "meshio write call, and a .vtu whose point array has "
             "3 columns you never supplied; there is no "
             "'expected ndarray of shape (N, 3)' ValueError from "
@@ -274,7 +277,6 @@ KNOWLEDGE: dict = {
             "absent.)",
         ],
         "references": [
-            "scikit-fem ex17 (insertion of point load)",
             "scikit-fem ex38 (point source via Dirac delta)",
             "Brenner & Scott, 'The Mathematical Theory of "
             "Finite Element Methods', §0.5 (Sobolev embedding "

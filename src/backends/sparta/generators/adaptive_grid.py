@@ -143,15 +143,15 @@ KNOWLEDGE = {
             "Signal: 'ERROR: Fix for adapt not computed at compatible time "
             "(../adapt_grid.cpp:502)' when the adapt Nevery is not a multiple "
             "of the fix Nfreq, before any stats row; 'ERROR: Stats and fix not "
-            "computed at compatible times (../stats.cpp:203)' when stats_style "
+            "computed at compatible times (../stats.cpp:203)' (line 209 in 27Aug2026) when stats_style "
             "prints f_<ID> for a fix producing a GLOBAL SCALAR such as "
             "fix ave/time, also before any stats row — printing a PER-GRID fix "
             "that way gives 'ERROR: Stats fix does not compute scalar "
-            "(../stats.cpp:705)' instead, a shape complaint raised while the "
+            "(../stats.cpp:705)' (line 814 in 27Aug2026) instead, a shape complaint raised while the "
             "stats_style line is parsed and before any frequency is compared, "
             "so grepping for :203 after the per-grid mistake finds nothing; "
             "'ERROR: Fix used in compute reduce not computed at compatible time "
-            "(../compute_reduce.cpp:805)' when a compute reduce reads it, and "
+            "(../compute_reduce.cpp:805)' (line 809 in 27Aug2026) when a compute reduce reads it, and "
             "that one does abort mid-run, right after the step-0 stats line.",
 
             "[Physics] Adapting on particle count refines where particles "
@@ -258,7 +258,7 @@ KNOWLEDGE = {
             "Signal: a 'Cut2d failed on proc 0 in cell ID: <n>' block naming "
             "the cell's corners and its surface list, followed by 'ERROR on "
             "proc 0: WB: Point appears last in more than one CLINE "
-            "(../cut2d.cpp:289)' — or its cut3d equivalent. Read that as a "
+            "(../cut2d.cpp:289)' (line 291 in 27Aug2026) — or its cut3d equivalent. Read that as a "
             "geometry-motion problem, not as a bad surface file: the same file "
             "reads and cuts cleanly when it is stationary. "
             "(Verified 2026-08-07)",

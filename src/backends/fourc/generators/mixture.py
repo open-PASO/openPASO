@@ -124,8 +124,10 @@ class MixtureGenerator(BaseGenerator):
     def get_template(self, variant: str = "mixture_3d") -> str:
         if variant not in ("mixture_3d", "default"):
             raise ValueError(f"Unknown variant {variant!r}")
+        from ..backend import _find_fourc_binary
+        from ..grammar_dialect import dialect_of
         from ..inline_mesh import matched_mixture_3d_input
-        return matched_mixture_3d_input()
+        return matched_mixture_3d_input(dialect=dialect_of(_find_fourc_binary()))
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         return []

@@ -27,8 +27,10 @@ python3 --version    # 3.10, 3.11 or 3.12: go straight on. 3.13: read the box be
 ```
 
 ??? warning "On Python 3.13 you need a C compiler"
-    The install takes about two minutes longer. openPASO keeps numpy below version 2, because the
-    preCICE coupling library requires that, and for Python 3.13 no ready-made numpy below version 2
+    The install takes about two minutes longer. openPASO keeps numpy below version 2, because
+    pyprecice 3.1.2, the Python binding that pairs with the preCICE 3.1.2 coupling library, requires
+    that (only 3.1.2 and its release candidate pin numpy below 2; the pyprecice 3 releases before
+    and after them do not), and for Python 3.13 no ready-made numpy below version 2
     exists, so `pip` has to compile it.
 
     - Debian or Ubuntu: `sudo apt install build-essential`
@@ -56,14 +58,16 @@ openpaso                          # starts the MCP server on stdio; Ctrl-C stops
 ```
 
 Missing a solver? `openpaso install ngsolve` (or `kratos`, `dune`, `fenics`, ...) checks first and
-installs only what is missing, the same way the server's `setup_backend` tool would; for the codes
-without a package (4C, deal.II, FEBio, SPARTA) it says what to do by hand.
+installs only what is missing, the same way the server's `setup_backend` tool would. 4C and
+SPARTA have no pip or conda package, and deal.II none on pip: `openpaso install fourc --via spack`
+(or `dealii`, `sparta`) builds them with Spack, see [With Spack](#with-spack). For FEBio it says
+what to do by hand.
 
 `openpaso` is the command your AI app's MCP configuration points at
 ([Option A](../use/ai-app.md)). scikit-fem comes with it; the other solvers that pip can
 install are extras -- `pip install "openpaso[ngsolve]"`, `[kratos]`, `[dune]`, or `[all-solvers]`
--- and the rest (4C, deal.II, FEniCSx, FEBio, SPARTA) are found on your machine, see
-[More solvers](#more-solvers).
+-- FEniCSx comes from conda, 4C, deal.II and SPARTA from Spack or your own build, and FEBio
+from its installer; openPASO finds all of them on your machine, see [More solvers](#more-solvers).
 
 From a checkout instead -- to change the code, or to run `check_install.py`, which lists the solvers
 openPASO can use on your machine without a key or network:
@@ -103,6 +107,37 @@ conda create -n fenics -c conda-forge fenics-dolfinx   # FEniCSx: its own conda 
 
 Any `export NAME=value` line only lasts until you close the terminal. To keep it, add the same line
 to the end of `~/.bashrc` (or `~/.zshrc`).
+
+### With Spack
+
+For the codes pip cannot install, [Spack](https://spack.io) builds them from source, with their
+whole dependency tree, into a directory of its own:
+
+```bash
+openpaso install dealii --via spack     # deal.II 9.7.1, serial, the features the templates use
+openpaso install sparta --via spack     # SPARTA, the DSMC code; a few minutes
+openpaso install fourc --via spack      # 4C with its whole dependency tree; over an hour
+```
+
+- **No Spack yet?** The command offers to clone it to `~/spack` (about 30 MB). A Spack older
+  than 1.0 is passed over; if it is the only one, the command prints the clone command for a
+  current one.
+- **Build times** were measured with the system's cmake, perl, openssl and Open MPI registered
+  in Spack (`spack external find`). Spack builds whatever is not registered, which takes longer.
+- **The recipes come with openPASO:** 4C (upstream Spack has none), SPARTA (upstream's `sparta`
+  is a different program), and deal.II (upstream's, fixed so programs can build against it outside
+  Spack). They reach Spack for openPASO's own commands only and are not added to your Spack
+  configuration. Spack itself still writes there as for any command: where no compiler is
+  configured yet, the first build records the compilers it finds in `~/.spack`.
+- **No variable to set**, as long as no other build of the same solver comes first in openPASO's
+  search (a variable such as `DEAL_II_DIR`, a conda environment, a build in your home folder). If
+  one does, the command prints the variable that selects the Spack build, and so does the server's
+  `setup_backend` when it verifies the install. openPASO remembers which
+  Spack built a solver, so an AI app that starts the server without Spack on its PATH still finds
+  it.
+- **No terminal to answer in** (a script, a CI job): pass `--yes`, or the Spack build is not
+  started.
+- **Which solvers have a Spack route?** For a missing solver, `openpaso doctor` names it.
 
 **If a solver will not install**, ask openPASO once it is connected:
 

@@ -30,9 +30,12 @@ dependencies = [
     # suite ("No module named 'sympy'"), and importing those modules failed.
     "sympy>=1.12",
     "pyyaml>=6.0",
-    # numpy capped <2 because pyprecice pins numpy<2; scipy capped <1.16 because
-    # scipy>=1.16 uses numpy-2-only dtypes (np.long) and requires numpy>=2.0,
-    # which silently breaks scikit-fem on a numpy-1.x install (dep conflict).
+    # numpy capped <2 because pyprecice 3.1.2, the binding that pairs with
+    # libprecice 3.1.2, pins numpy<2 (pyprecice 3.0.0-3.1.1 and 3.2.0-3.4.0
+    # declare no numpy upper bound, and 3.2+ needs libprecice >= 3.2); scipy
+    # capped <1.16 because scipy>=1.16 uses numpy-2-only dtypes (np.long) and
+    # requires numpy>=2.0, which silently breaks scikit-fem on a numpy-1.x
+    # install (dep conflict).
     "numpy>=1.24,<2",
     "pyvista>=0.43",
     "meshio>=5.3",

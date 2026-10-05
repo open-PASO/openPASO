@@ -46,7 +46,12 @@ KNOWLEDGE = {
         "iteration. (Audit 2026-06-02.)",
         "[Numerical] Newton may not converge for Re > 500 without "
         "load-step continuation (ramp Re from 1 to target). Signal: "
-        "the dolfinx NewtonSolver raises NoConvergence or the residual "
+        "fem.petsc.NonlinearProblem.solve() returns without raising, "
+        "with problem.solver.getConvergedReason() < 0 (e.g. -5, "
+        "DIVERGED_MAX_IT) — the deprecated "
+        "dolfinx.nls.petsc.NewtonSolver instead raises RuntimeError "
+        "'Newton solver did not converge because maximum number of "
+        "iterations reached' — or the residual "
         "ratio oscillates between two values; ramping nu via "
         "fem.Constant(domain, nu_initial) then updating in a loop "
         "produces monotonic convergence. (Audit 2026-06-02.)",

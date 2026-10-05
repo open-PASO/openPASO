@@ -26,6 +26,7 @@ the reader what to do instead of sending them somewhere that does not exist.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ _TOKENS: dict[str, tuple[str | None, str | None, str]] = {
     "{FENICS_PYTHON}":  ("FENICS_PYTHON",  "fenics",  "your dolfinx Python"),
     "{DUNE_PYTHON}":    ("DUNE_PYTHON",    "dune",    "your DUNE-fem Python"),
     "{FOURC_BINARY}":   ("FOURC_BINARY",   "fourc",   "your 4C binary"),
+    "{FOURC_ENV}":      (None,             None,      "the library path your 4C binary needs"),
     "{FOURC_ROOT}":     ("FOURC_ROOT",     None,      "your 4C source tree"),
     "{FEBIO_BINARY}":   ("FEBIO_BINARY",   "febio",   "your FEBio binary"),
     "{DEALII_BUILD}":   ("DEALII_DIR",     "dealii",  "your deal.II build tree"),
@@ -98,6 +100,42 @@ def _backend_works(name: str) -> bool:
         except Exception:                              # noqa: BLE001
             _AVAILABLE[name] = False
     return _AVAILABLE[name]
+
+
+def forget() -> None:
+    """Drop the availability answers, after an install or a rediscovery."""
+    _AVAILABLE.clear()
+
+
+def _fourc_env() -> str:
+    """What goes before the 4C binary in a served command: 4C's dependency
+    library path for a source build. A Spack build carries its own library
+    search path and must not see that directory
+    (backends.fourc.backend.fourc_library_env): nothing goes before it, unless
+    the caller's LD_LIBRARY_PATH holds the directory, and then the command
+    clears it the way the backend's own runs do. A Spack set to
+    `shared_linking: runpath` would otherwise load the source build's
+    libraries; the RPATH build measured here loads none of them either way. A
+    source build's command carries the same library path its runs get: the
+    dependency directory first, then what the caller's LD_LIBRARY_PATH holds."""
+    try:
+        from backends.fourc.backend import FOURC_DEPENDENCY_LIB, fourc_library_env
+    except Exception:                                  # noqa: BLE001
+        return ""
+    binary = _resolve_one("{FOURC_BINARY}")
+    if os.path.isfile(binary):
+        needed = fourc_library_env(binary).get("LD_LIBRARY_PATH", "")
+        if FOURC_DEPENDENCY_LIB in needed.split(":"):
+            # A source build: its runs' library path, the dependency directory first and the
+            # inherited directories after it, so a build that also needs those starts here too.
+            return f"LD_LIBRARY_PATH={shlex.quote(needed)} "
+        inherited = [p.rstrip("/") for p in os.environ.get("LD_LIBRARY_PATH", "").split(":")]
+        if FOURC_DEPENDENCY_LIB not in inherited:
+            return ""
+        return f"LD_LIBRARY_PATH={shlex.quote(needed)} " if needed else "env -u LD_LIBRARY_PATH "
+    return f"LD_LIBRARY_PATH={FOURC_DEPENDENCY_LIB} "
+
+
 _PYTHON_TOKENS = {"{FENICS_PYTHON}", "{DUNE_PYTHON}"}
 
 
@@ -133,6 +171,8 @@ def _resolve_one(token: str) -> str:
     env_var, discovery_key, human = _TOKENS[token]
     if token == "{PYTHON}":
         return sys.executable or "python3"
+    if token == "{FOURC_ENV}":
+        return _fourc_env()
     if env_var:
         value = os.environ.get(env_var, "").strip()
         if value:

@@ -165,9 +165,9 @@ with YOUR outward normal. On a Neumann-loaded line it is the consistent-residual
 echo of the load you applied, so use it as the exported flux only on a side
 whose interface is DIRICHLET.
 
-WHICH PROBLEM TYPE YOU PICK DECIDES WHETHER YOU CAN READ YOUR OWN ANSWER.
-Measured on this build:
-FOUR MEASURED WAYS THIS DIES, all of them silently:
+WHICH PROBLEM TYPE YOU PICK DECIDES WHICH VTU FILES YOU GET: see the two
+problem-type notes at the end of this part. First, EIGHT MEASURED WAYS A DECK
+DIES, each with the message 4C prints:
 (a) THE LEGACY BLOCKS ARE YAML SEQUENCES. `NODE COORDS`, `TRANSPORT
     ELEMENTS` and `D*-NODE TOPOLOGY` entries each need `- ` and quotes.
     Written bare, YAML reads them as mapping keys and 4C dies with
@@ -185,10 +185,9 @@ FOUR MEASURED WAYS THIS DIES, all of them silently:
 (e) NO SECTION OR KEY THE GRAMMAR DOES NOT LIST. 4C matches every block
     against its specification and aborts on the first unknown key with
       Could not match this input
-    followed by the offending block. Measured in three of three trial decks
-    written from this grammar: an added `IO:` block with `VERBOSITY:
-    "Standard"` aborts the run. 4C's defaults need no IO section at all;
-    keep exactly the sections above and nothing you did not see documented.
+    followed by the offending block (for example a misspelled key). 4C's
+    defaults need no IO section at all; keep exactly the sections above and
+    nothing you did not see documented.
 (f) EVERY `E:` ID A CONDITION NAMES MUST EXIST IN THE MATCHING TOPOLOGY.
     Ids are 1-based and contiguous. A `DESIGN LINE ... CONDITIONS` entry
     with `E: 4` while `DLINE-NODE TOPOLOGY` defines only DLINE 1..3 aborts
@@ -221,12 +220,16 @@ failing deck: 8 lines without line buffering, 43 with it. Run
 `Invalid MIT-MAGIC-COOKIE-1 key` is an X11 warning that appears on
 SUCCESSFUL runs too — `4C -p` prints it and then dumps the whole grammar.
 It never explains a failure.
-  * `SOLID` IS THE 3-D CONTINUUM ELEMENT; THE 2-D ONE IS CALLED `WALL`. Writing
-    `SOLID QUAD4` fails with
+  * WHICH ELEMENT OWNS 2-D STRUCTURAL CELLS DEPENDS ON THE BUILD, and the two
+    spellings share no keywords. `4C -p` settles it: WALL is listed under
+    legacy_element_specs in the development builds before the 2026.2.0 release
+    and absent from 4C 2026.2.0 and 2026.3.0.
+    Before 4C 2026.2.0: `SOLID` is the 3-D continuum element and the 2-D one is
+    `WALL`; `SOLID QUAD4` fails with
 
         Element 'SOLID' does not seem to know cell type 'quad4'.
 
-    Measured on this build, from 4C's own grammar (`4C -p`):
+    Measured from that build's own grammar (`4C -p`):
         SOLID        HEX8 HEX18 HEX20 HEX27 TET4 TET10 WEDGE6 PYRAMID5 NURBS27
         WALL         QUAD4 QUAD8 QUAD9 TRI3 TRI6 NURBS4 NURBS9
         THERMO       QUAD4 QUAD8 QUAD9 TRI3 TRI6 + the 3-D types
@@ -237,17 +240,34 @@ It never explains a failure.
           - "1 WALL QUAD4 1 2 3 4 MAT 1 KINEM linear EAS none THICK 1.0
              STRESS_STRAIN plane_strain GP 2 2"
 
-  * 2-D `Thermo_Structure_Interaction` IS NOT AVAILABLE IN THIS BUILD, and the
-    error does not say so. A 2-D TSI deck fails with
+    4C 2026.2.0 and later: there is no WALL; SOLID also takes QUAD4, QUAD8,
+    QUAD9, TRI3 and TRI6, with THICKNESS and PLANE_ASSUMPTION (EAS none and GP
+    2 2 are its defaults). Measured on 4C 2026.2.0 and 2026.3.0 with openPASO's
+    2-D templates:
+
+        STRUCTURE ELEMENTS:
+          - "1 SOLID QUAD4 1 2 3 4 MAT 1 KINEM linear THICKNESS 1.0
+             PLANE_ASSUMPTION plane_strain"
+
+  * 2-D `Thermo_Structure_Interaction` IS NOT AVAILABLE IN ANY 4C MEASURED
+    (a development build with WALL, 2026.2.0, 2026.3.0), and the error does not
+    say so. A 2-D TSI deck fails with
 
         4C_tsi_utils.cpp: Unsupported solid element type!
 
-    even after the element name is corrected to WALL. The reason is in the
-    source: `TSI::Utils::ThermoStructureCloneStrategy::set_element_data`
-    accepts ONLY a `SolidScatra` element and throws for anything else, and
+    On a build with WALL that comes even after the element name is corrected
+    to WALL. The reason is in its source:
+    `TSI::Utils::ThermoStructureCloneStrategy::set_element_data` accepts ONLY
+    a `SolidScatra` element and throws for anything else, and before 2026.2.0
     SOLIDSCATRA's cell types are HEX8, HEX27, TET4, TET10 and NURBS27 — every
-    one of them three-dimensional. So the clone step can never succeed in 2-D,
-    whatever else the deck says.
+    one of them three-dimensional. 4C 2026.2.0 gives SOLIDSCATRA and SOLID
+    the 2-D cells QUAD4, QUAD9, TRI3 and TRI6 (SOLID also QUAD8), with
+    THICKNESS and PLANE_ASSUMPTION. A 2-D TSI deck with either element passes
+    the input check there, builds the structure, and stops with the same
+    message when TSI clones the thermal field from it (measured on a
+    two-QUAD4 plane-strain deck; the upstream 3-D tsi_lindilatation_geolin
+    deck finishes normally on the same binary). So the clone step does not
+    succeed in 2-D on any of them, whatever else the deck says.
 
     For a two-dimensional thermoelastic subdomain, do NOT keep repairing the
     TSI deck, and do NOT conclude the problem cannot be solved (one run gave
@@ -261,8 +281,9 @@ It never explains a failure.
     thermal expansion from THEXPANS/INITTEMP (alpha = beta/(3*lambda+2*mu)
     for a task that states beta), and exchange [T, ux, uy] / [q_n, t_x, t_y]
     per interface point as the coupling contract says. The alternative of two
-    separate problem types (`Structure` with WALL elements and `Thermo` with
-    THERMO elements, exchanging the thermal strain yourself) has no served
+    separate problem types (`Structure` with WALL elements, 2-D SOLID from
+    2026.2.0 on, and `Thermo` with THERMO elements, exchanging the thermal strain
+    yourself) has no served
     recipe. Runs have
     lost their whole budget rewriting section names against this, because
     the message names an element type and not the dimension.
@@ -287,20 +308,29 @@ It never explains a failure.
     element TYPE will crash identically every time. Check the digit first.
 
   * `PROBLEMTYPE: "Thermo"` with a `THERMAL DYNAMIC` section and
+        THERMAL DYNAMIC/RUNTIME VTK OUTPUT:
+          OUTPUT_THERMO: true
+          TEMPERATURE: true
         IO:
           VERBOSITY: "Standard"
         IO/RUNTIME VTK OUTPUT:
           OUTPUT_DATA_FORMAT: ascii
     writes <prefix>-vtk-files/thermo-<step>-<rank>.vtu -- ASCII VTU, readable
     with meshio, which is what you need to evaluate the field at probe points.
-  * `PROBLEMTYPE: "Scalar_Transport"` with the SAME IO block writes NO VTU on
-    this build: only <prefix>.control and <prefix>.result.scatra.s1, the latter
-    binary. `4C -p` offers IO/RUNTIME VTK OUTPUT/{BEAMS,FLUID,STRUCTURE} and no
-    scatra subsection, and SCALAR TRANSPORT DYNAMIC's `OUTPUTSCALARS` emits
-    totals and means, not fields.
-Choose the route by what you must DELIVER, not only by what the physics is
-called: a conduction problem whose field you have to probe is easier to read
-back through Thermo.
+    Without the THERMAL DYNAMIC/RUNTIME VTK OUTPUT block (both keys default to
+    false) Thermo writes no VTU, only the binary <prefix>.result.thermo.s1.
+  * `PROBLEMTYPE: "Scalar_Transport"` writes VTU with no output section at
+    all: <prefix>-vtk-files/scatra-<step>-<rank>.vtu at step 0, at every step
+    that is a multiple of RESULTSEVERY or of RESTARTEVERY (default 1, so every
+    step unless you raise it) and at the last step, with point arrays phi_<k>
+    (plus flux_domain_phi_<k> / flux_boundary_phi_<k> when CALCFLUX_DOMAIN /
+    CALCFLUX_BOUNDARY is set). There is no IO/RUNTIME VTK OUTPUT/SCATRA
+    subsection (`4C -p` offers only {BEAMS,FLUID,STRUCTURE}); the scatra
+    writer uses the IO/RUNTIME VTK OUTPUT settings directly (OUTPUT_DATA_FORMAT:
+    ascii gives ASCII, the default is binary). SCALAR TRANSPORT DYNAMIC's
+    `OUTPUTSCALARS` emits totals and means, not fields.
+Either route leaves a VTU field you can probe at points: scatra-*.vtu for
+Scalar_Transport, thermo-*.vtu for Thermo.
 
 
 THE TSI SLAB DECK GRAMMAR — steady thermo-elasticity in ONE 4C run, plane
@@ -374,8 +404,7 @@ in one call.
         NUE: 0.25
         DENS: 1
         THEXPANS: 0.001          # alpha = beta / (3*lambda + 2*mu) for a stress -beta*T*I
-        INITTEMP: 0
-        THERMOMAT: 2
+        INITTEMP: 0              # (no THERMOMAT: 4C 2026.3.0 removed it; before, it changes nothing)
     - MAT: 2
       MAT_Fourier:
         CAPA: 1
@@ -480,7 +509,7 @@ in one call.
 _i = FOURC_DECK_GRAMMAR.index("WHICH PROBLEM TYPE YOU PICK DECIDES")
 _j = FOURC_DECK_GRAMMAR.index("THE TSI SLAB DECK GRAMMAR")
 FOURC_SCATRA_SKELETON = FOURC_DECK_GRAMMAR[:_i]          # header + the Scalar_Transport skeleton and its two section notes
-FOURC_DECK_NOTES = FOURC_DECK_GRAMMAR[_i:_j]             # the measured ways a deck dies silently (prose)
+FOURC_DECK_NOTES = FOURC_DECK_GRAMMAR[_i:_j]             # the measured ways a deck dies, and the problem-type notes (prose)
 FOURC_TSI_SKELETON = FOURC_DECK_GRAMMAR[_j:]             # the TSI slab skeleton with its traps and run note
 FOURC_DECK_SKELETONS = FOURC_SCATRA_SKELETON + FOURC_TSI_SKELETON
 

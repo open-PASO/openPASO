@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-05-07T23:08:26.346307",
+  "solvers": [
+    "fenics",
+    "ngsolve",
+    "skfem",
+    "kratos",
+    "dune",
+    "fourc",
+    "dealii"
+  ]
+}

@@ -378,6 +378,15 @@ if not np.array_equal(np.asarray(iface_bc_n), np.asarray(iface_n)[~_ends]):
     raise SystemExit("INTERFACE NODES: iface_bc_n must be iface_n without the interface's two end "
                      "nodes, in the same order: the Dirichlet branch below writes the partner's values "
                      "into it row by row")
+# THE INTERFACE'S TWO END NODES LIE ON THE FACES IT ENDS ON. A face outer_n holds is held end to end:
+# iface_bc_n leaves the ends out, so an end node missing from outer_n is held by nothing, on both sides.
+_on = np.asarray(mesh.p)[AL, np.asarray(outer_n, int)]
+for _e, _n in ((ALO, iface_n[0]), (AHI, iface_n[-1])):
+    if np.sum(np.abs(_on - _e) <= TOL) > 1 and _n not in set(np.asarray(outer_n).tolist()):
+        raise SystemExit(f"OUTER NODES: outer_n holds the face {'xy'[AL]} = {_e:g} but not its node on the "
+                         f"interface ({'xy'[AX]} = {IFACE_X:g}): the served lines hold outer_n at the outer "
+                         f"displacement and leave iface_bc_n without the ends, so that node is free. Keep "
+                         f"both interface end nodes in outer_n.")
 _fb_pts = (fbi.mesh.p[:, np.unique(fbi.mesh.facets[:, fbi.find])].T if len(fbi.find)
            else np.zeros((0, 2)))
 if (not len(_fb_pts) or np.abs(_fb_pts[:, AX] - IFACE_X).max() > TOL

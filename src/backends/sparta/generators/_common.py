@@ -17,7 +17,7 @@ DECK_SKELETON = [
     "dimension 2|3                    # before create_box",
     "boundary <x> <y> <z>             # before create_box; 1 letter = both faces",
     "create_box xlo xhi ylo yhi zlo zhi",
-    "create_grid Nx Ny Nz [level ...] # 2d requires Nz = 1",
+    "create_grid Nx Ny Nz [levels N + a subset|region clause per level 2..N] # 2d requires Nz = 1",
     "species <file> <ID> ...          # may precede create_box",
     "mixture <mixID> <species...> [vstream vx vy vz] [temp T] [frac f] [group SELF]",
     "global nrho <n> fnum <F>         # MUST precede create_particles",
@@ -36,21 +36,21 @@ HARD_ORDERING_ERRORS = {
     "create_particles before create_grid":
         "Cannot create particles before grid is defined (../create_particles.cpp:53)",
     "run before a grid exists":
-        "Run command before grid is defined (../run.cpp:43) — the message names "
+        "Run command before grid is defined (../run.cpp:43) (line 92 in 27Aug2026) — the message names "
         "the GRID even when the real omission is create_box",
     "boundary after create_box":
-        "Boundary command after simulation box is defined (../domain.cpp:148)",
+        "Boundary command after simulation box is defined (../domain.cpp:148) (line 147 in 27Aug2026)",
     "dimension after create_box":
-        "Dimension command after simulation box is defined (../input.cpp:1442)",
+        "Dimension command after simulation box is defined (../input.cpp:1442) (line 1452 in 27Aug2026)",
     "units after create_box":
-        "Units command after simulation box is defined (../input.cpp:1692)",
+        "Units command after simulation box is defined (../input.cpp:1692) (line 1702 in 27Aug2026)",
     "mixture naming an unloaded species":
-        "Mixture species is not defined (../mixture.cpp:326)",
+        "Mixture species is not defined (../mixture.cpp:326) (line 330 in 27Aug2026)",
     "collide naming an unknown mixture":
-        "Collision mixture does not exist (../collide.cpp:155) — raised at the "
+        "Collision mixture does not exist (../collide.cpp:155) (line 181 in 27Aug2026) — raised at the "
         "START OF THE FIRST RUN, not when the collide line is parsed",
     "collide mixture missing a loaded species":
-        "Collision mixture does not contain all species (../collide.cpp:159)",
+        "Collision mixture does not contain all species (../collide.cpp:159) (line 185 in 27Aug2026)",
     "no seed command":
         "Seed command has not been used (../random_mars.cpp:91)",
     "2d box whose z bounds do not straddle 0":
@@ -92,7 +92,7 @@ READING_OUTPUT = {
                             "nsplit maxlevel vol lx ly lz xlo xhi ylo yhi zlo "
                             "zhi, plus c_ID / f_ID / v_name. Anything else: "
                             "'Invalid keyword in stats_style command "
-                            "(../stats.cpp:737)'.",
+                            "(../stats.cpp:737)' (line 846 in 27Aug2026).",
     "per-grid tally idiom": "compute <C> grid <grp> <mix> <values> -> fix <F> "
                             "ave/grid <grp> Nevery Nrepeat Nfreq c_C[*] -> "
                             "compute <R> reduce ave f_F[i] -> stats_style c_R. "
@@ -109,9 +109,16 @@ READING_OUTPUT = {
                             "has more. Row order is xlo=1 xhi=2 ylo=3 yhi=4 in "
                             "2d, plus zlo=5 zhi=6 in 3d — there are only FOUR "
                             "rows in a 2d run.",
-    "vector vs array rule": "a fix ave/* fed ONE input value produces a VECTOR "
-                            "read as f_ID (no bracket); fed two or more it "
-                            "produces an ARRAY read as f_ID[1], f_ID[2], ... "
+    "vector vs array rule": "fix ave/grid and fix ave/surf fed ONE input value "
+                            "produce a per-grid/per-surf VECTOR read as f_ID "
+                            "(no bracket); fed two or more, an ARRAY read as "
+                            "f_ID[1], f_ID[2], ... fix ave/time in its default "
+                            "scalar mode gives a SCALAR (f_ID) for one value "
+                            "and a VECTOR (f_ID[1], f_ID[2], ...) for more; "
+                            "with 'mode vector' it gives a VECTOR (f_ID[row]) "
+                            "for one value and an ARRAY (f_ID[row][col]) for "
+                            "more. fix ave/histo always gives a 4-vector "
+                            "(f_ID[1..4]) plus an array. "
                             "compute surf and compute grid always produce "
                             "ARRAYS, so they are consumed as c_ID[i].",
     "dump format": "dump particle / grid / surf write LAMMPS-style text "
@@ -140,11 +147,21 @@ BUILD_FACTS = {
                    "decomposition or 'partition' is verified here.",
     "accelerators": "the KOKKOS /kk styles are NOT compiled in. 'package "
                     "kokkos' aborts with 'Package kokkos command without "
-                    "KOKKOS package enabled (../input.cpp:1507)', a /kk "
+                    "KOKKOS package enabled (../input.cpp:1507)' (line 1517 in 27Aug2026), a /kk "
                     "compute or fix gives 'Unrecognized compute style "
-                    "(../modify.cpp:467)' / 'Unrecognized fix style "
-                    "(../modify.cpp:370)', and 'suffix' is not a command in "
+                    "(../modify.cpp:467)' (line 469 in 27Aug2026) / 'Unrecognized fix style "
+                    "(../modify.cpp:370)' (line 372 in 27Aug2026), and 'suffix' is not a command in "
                     "this parser at all. Do not write /kk into a deck.",
+    "error_line_numbers": "a source line quoted with an error and no release "
+                          "named, such as (../mixture.cpp:326), is from a "
+                          "development build of 26 Jun 2026 that reports its "
+                          "version as 24 Sep 2025; most of those lines are the "
+                          "same in the 24Sep2025 release. Where SPARTA 27Aug2026 "
+                          "prints another line, it is given next to it, e.g. "
+                          "(line 330 in 27Aug2026). The directory before the "
+                          "file name depends on the build: '../' from SPARTA's "
+                          "make build, the full build path from a CMake or "
+                          "Spack build. Match an error by its message.",
     "compiled_collide_styles": ["vss"],
     "compiled_react_styles": ["qk", "tce", "tce/qk"],
     "compiled_surf_collide_styles": ["adiabatic", "cll", "diffuse", "impulsive",
@@ -154,8 +171,14 @@ BUILD_FACTS = {
     "n_compute_styles": 27,
     "n_fix_styles": 25,
     "n_input_commands": 66,
-    "self_check": "'spa_serial -h' prints the exact style list this build "
-                  "contains — use it instead of trusting a doc page.",
+    "self_check": "'spa_serial -h' prints the exact collide, react, compute, "
+                  "dump, fix and add-on command styles this build contains — "
+                  "use it instead of trusting a doc page. It does NOT list "
+                  "region, surf_collide or surf_react styles, or built-in "
+                  "commands such as species, mixture and global; check those "
+                  "in the SPARTA source instead: the RegionStyle, "
+                  "SurfCollideStyle and SurfReactStyle lines in src/*.h, and "
+                  "src/input.cpp for the built-in commands.",
 }
 
 # ── pitfalls that apply to EVERY SPARTA deck ──────────────────────────────
@@ -182,8 +205,9 @@ UNIVERSAL_PITFALLS = [
     "[Numerical] 'create_particles <mix> n <N>' with a NONZERO N creates "
     "exactly N simulation particles and silently overrides 'global nrho' — the "
     "realised density becomes N*fnum/V, not the nrho you asked for. Only 'n 0' "
-    "honours nrho and fnum. Most upstream example decks use an explicit n, so "
-    "copying one silently changes your density. "
+    "honours nrho and fnum. About half of the upstream example decks that "
+    "call create_particles use an explicit n, so copying one can silently "
+    "change your density. "
     "Signal: the 'Created <N> particles' line reproduces your n argument "
     "exactly instead of the value you get from nrho*V/fnum; recompute the "
     "realised density as Np*fnum/V and compare with the nrho you set. Adding "
@@ -230,9 +254,9 @@ UNIVERSAL_PITFALLS = [
     "end-of-run timing table both the 'Coll' and the 'Sort' rows are exactly "
     "0 only when no collide style exists at all. The hard-error forms are "
     "'ERROR: Cannot use collide_modify with no collisions defined "
-    "(../input.cpp:1425)', 'ERROR: Cannot use fix vibmode without collide "
+    "(../input.cpp:1425)' (line 1435 in 27Aug2026), 'ERROR: Cannot use fix vibmode without collide "
     "style defined (../fix_vibmode.cpp:50)' and 'ERROR: React tce can only be "
-    "used with collide vss (../react_tce.cpp:40)'.",
+    "used with collide vss (../react_tce.cpp:40)' (line 43 in 27Aug2026).",
 
     "[Numerical] There is no default timestep worth having: SPARTA starts "
     "from dt = 1.0 SECOND, so a deck that omits the 'timestep' command on a "
@@ -277,7 +301,7 @@ UNIVERSAL_PITFALLS = [
     "adsorb ...' — never 'compute_grid', 'fix_ave_surf', 'dump_image' or "
     "'surf_react_adsorb'. This build accepts 66 input-script commands. "
     "Signal: 'ERROR: Unknown command: ' followed by your line and "
-    "'(../input.cpp:244)'.",
+    "'(../input.cpp:244)' (line 247 in 27Aug2026).",
 
     "[Syntax] The dump command is 'dump <ID> <style> <group-or-mixture> "
     "<Nevery> <file> <attributes...>' — the STYLE is the SECOND token, after "
@@ -290,7 +314,7 @@ UNIVERSAL_PITFALLS = [
     "so 'compute grid' must be written c_ID[i]. Of the six registered dump "
     "styles, 'movie' parses on this build but cannot run — it is compiled "
     "without the encoder — while 'image' works and writes PPM. "
-    "Signal: 'ERROR: Unrecognized dump style (../output.cpp:538)' quoting no "
+    "Signal: 'ERROR: Unrecognized dump style (../output.cpp:538)' (line 547 in 27Aug2026) quoting no "
     "style name, which means the token in that slot was not a style; 'ERROR: "
     "Dump grid compute does not calculate per-grid vector "
     "(../dump_grid.cpp:515)' for a missing bracket; 'ERROR on proc 0: Support "
@@ -310,10 +334,26 @@ UNIVERSAL_PITFALLS = [
     "stop the deck at setup — the run starts, prints its first stats row, and "
     "dies at the first print step. "
     "Signal: 'Fix halt condition for fix-id <ID> met on step <N> with value "
-    "<V> (../fix_halt.cpp:222)' with rc = 0 for the soft case and the same "
+    "<V> (../fix_halt.cpp:222)' (line 245 in 27Aug2026) with rc = 0 for the soft case and the same "
     "text at line 220 as an ERROR for the hard one; 'ERROR: Invalid fix halt "
-    "attribute <name> (../fix_halt.cpp:62)'; 'ERROR on proc 0: Substitution "
-    "for illegal variable (../input.cpp:531)' arriving AFTER the step-0 stats "
+    "attribute <name> (../fix_halt.cpp:62)' (line 63 in 27Aug2026); 'ERROR on proc 0: Substitution "
+    "for illegal variable (../input.cpp:531)' (line 534 in 27Aug2026) arriving AFTER the step-0 stats "
     "row. Compare the last Step value in the table against the argument of "
     "'run' before trusting any completed job. (Verified 2026-08-07)",
+
+    "[Syntax] A compute or fix that produces ONE value per grid cell is a "
+    "per-grid VECTOR and is named bare (c_ID, f_ID); one that produces several "
+    "is an ARRAY and is named with a column (c_ID[2]) or all of them "
+    "(c_ID[*]). 'fix ave/grid' has the shape of what it averages: over c_nr[*] "
+    "of 'compute nr grid all species nrho' it is a vector when the gas has "
+    "one species and an array when it has more, so 'compute lambda/grid' "
+    "takes it as f_fnr for one species and as f_fnr[*] for several. SPARTA "
+    "27Aug2026 refuses a wildcard on a vector (its error says the wildcard "
+    "cannot be used because f_fnr does not produce multiple values); older "
+    "builds accept f_fnr[*] for one species, so a deck written on one of them "
+    "can stop on the other. "
+    "Signal: 'ERROR: Compute lambda/grid nrho fix does not calculate per-grid "
+    "vector (../compute_lambda_grid.cpp:254)' (line 256 in 27Aug2026) for the bare name on two or "
+    "more species. (Verified 2026-09-28, SPARTA 27Aug2026 and a development "
+    "build of 26 Jun 2026)",
 ]

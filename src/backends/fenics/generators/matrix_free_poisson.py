@@ -507,7 +507,7 @@ err = L2Norm(u - uD)
 print(f"Matrix-free CG: iters={{iters}} rtol={rtol} "
       f"L2_error={{err:.4e}}")
 
-# Output: .vtu via dolfinx VTXWriter (Lagrange OK).
+# Output: ADIOS2 .bp directory via dolfinx VTXWriter (Lagrange OK); dolfinx.io.VTKFile writes .pvd/.vtu.
 with dolfinx.io.VTXWriter(mesh.comm, "result.bp", [u], "BP4") as vtx:
     vtx.write(0.0)
 

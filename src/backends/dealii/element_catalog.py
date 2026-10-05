@@ -209,17 +209,24 @@ ELEMENTS: dict[str, ElementRecord] = {
         name="FE_DGQHermite",
         header="deal.II/fe/fe_dgq.h",
         math_space="L2",
-        semantics=("FE_DGQ with Hermite-like basis preserving "
-                   "function value AND derivative continuity on "
-                   "faces. Smaller jumps -> easier to precondition "
-                   "than vanilla FE_DGQ."),
+        semantics=("FE_DGQ (discontinuous, L2; no inter-element "
+                   "continuity) with a Hermite-like basis "
+                   "(Polynomials::HermiteLikeInterpolation): for "
+                   "degree >= 3 only two basis functions per direction "
+                   "have a non-zero value or derivative on a face, "
+                   "which benefits DG face terms; degrees 0-2 use a "
+                   "Lagrange basis. Not interpolatory, no support "
+                   "points."),
         constructor="FE_DGQHermite<dim>(unsigned int degree)",
     ),
     "FE_DGP": ElementRecord(
         name="FE_DGP",
         header="deal.II/fe/fe_dgp.h",
         math_space="L2",
-        semantics=("DG with monomial basis on hyper-cube cells. Often "
+        semantics=("DG on the complete polynomial space P_p on "
+                   "hyper-cube cells, with a Legendre basis "
+                   "(L2-orthonormal on the reference cell); "
+                   "FE_DGPMonomial is the monomial-basis variant. Often "
                    "paired with continuous velocity in mixed Stokes "
                    "(MINI / RT/DGP)."),
         constructor="FE_DGP<dim>(unsigned int degree)",
@@ -320,10 +327,11 @@ ELEMENTS: dict[str, ElementRecord] = {
         name="FE_NedelecSZ",
         header="deal.II/fe/fe_nedelec_sz.h",
         math_space="H(curl)",
-        semantics=("Sign-consistent reformulation of FE_Nedelec by "
-                   "Sirikoglu-Zienkiewicz; avoids the orientation-"
-                   "dependent sign flips of the classical Nedelec "
-                   "basis."),
+        semantics=("Nedelec element from Zaglmayr's PhD thesis (2006), "
+                   "used in the same context as FE_Nedelec; it gives "
+                   "edges and faces a globally defined orientation to "
+                   "avoid the orientation-dependent sign conflicts of "
+                   "the classical Nedelec basis."),
         constructor="FE_NedelecSZ<dim>(unsigned int degree)",
     ),
     "FE_DGNedelec": ElementRecord(
@@ -384,8 +392,9 @@ ELEMENTS: dict[str, ElementRecord] = {
         name="FE_FaceP",
         header="deal.II/fe/fe_face.h",
         math_space="L2",
-        semantics=("Face-only element with monomial basis; the "
-                   "FE_DGP analogue of FE_FaceQ."),
+        semantics=("Face-only element of complete polynomials with a "
+                   "Legendre basis (Polynomials::Legendre); the FE_DGP "
+                   "analogue of FE_FaceQ."),
         constructor="FE_FaceP<dim>(unsigned int degree)",
     ),
     "FE_TraceQ": ElementRecord(
@@ -488,29 +497,34 @@ ELEMENTS: dict[str, ElementRecord] = {
         name="FE_Hermite",
         header="deal.II/fe/fe_hermite.h",
         math_space="H2",
-        semantics=("Hermite-interpolation element on hypercubes: "
-                   "carries derivative degrees of freedom, so it is "
-                   "C1 across faces. deal.II reports "
+        semantics=("Hermite-interpolation element on hypercubes (odd "
+                   "degree p, regularity r=(p-1)/2). For p>=3 it "
+                   "carries derivative degrees of freedom, is C^r (at "
+                   "least C1) across faces, and deal.II reports "
                    "Conformity::H2, NOT H1 — which is why it is the "
                    "element for fourth-order problems (biharmonic, "
                    "Cahn-Hilliard) where an H1 element would need an "
                    "interior-penalty or mixed reformulation. "
+                   "FE_Hermite(1) has only vertex values: it is C0 and "
+                   "reports Conformity::H1. "
                    "has_support_points() is FALSE, so use "
                    "VectorTools::project_boundary_values, never "
                    "interpolate_boundary_values."),
         constructor="FE_Hermite<dim>(unsigned int degree)",
-        version_added="9.5",
+        version_added="9.6",
     ),
+    # Declared in fe_nedelec.h (there is no fe_nedelec_nodal.h). Added to
+    # deal.II on 2025-12-05; first release 9.8.0, so 9.7.1 does not have it.
     "FE_NedelecNodal": ElementRecord(
         name="FE_NedelecNodal",
-        header="deal.II/fe/fe_nedelec_nodal.h",
+        header="deal.II/fe/fe_nedelec.h",
         math_space="H(curl)",
         semantics=("Nedelec edge element with a nodal-interpolation "
                    "degree-of-freedom setup, an alternative to the "
                    "moment-based default. Convenient when coupling "
                    "against nodal H(curl) data from another code."),
         constructor="FE_NedelecNodal<dim>(unsigned int order)",
-        version_added="9.7",
+        version_added="9.8",
     ),
     # ── Internal / template base classes (not user-instantiable) ─
     # These appear in the scan but a community user should NOT pick
@@ -746,7 +760,7 @@ MESH_GENERATORS: dict[str, MeshGeneratorRecord] = {
         semantics="Skewed box from three (2D: two) edge vectors."),
     "subdivided_parallelepiped": MeshGeneratorRecord(
         name="subdivided_parallelepiped", header=_GG,
-        signature="GridGenerator::subdivided_parallelepiped(Triangulation<dim>&, const Point<dim>& origin, const std::vector<unsigned int>& subdivisions, const Point<dim> (&edges)[dim], bool colorize = false)",
+        signature="GridGenerator::subdivided_parallelepiped<dim, spacedim>(Triangulation<dim, spacedim>&, const Point<spacedim>& origin, const std::array<Tensor<1, spacedim>, dim>& edges, const std::vector<unsigned int>& subdivisions = {}, bool colorize = false)  (template arguments must be given explicitly; the other overloads are (Triangulation<dim>&, unsigned int n_subdivisions, const Point<dim> (&corners)[dim], bool colorize = false) and (Triangulation<dim>&, const unsigned int (&n_subdivisions)[dim], const Point<dim> (&corners)[dim], bool colorize = false))",
         semantics="parallelepiped with per-direction subdivisions."),
     "parallelogram": MeshGeneratorRecord(
         name="parallelogram", header=_GG,

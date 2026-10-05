@@ -31,8 +31,9 @@ species          air.species N O
 mixture          air N O vstream {vstream} 0.0 0.0
 # read_surf needs the grid to exist first
 read_surf        data.circle
-# 'diffuse' takes EXACTLY two arguments: wall temperature (K) then
-# accommodation (0..1). 'specular' takes none and exchanges no energy.
+# 'diffuse' takes two required arguments: wall temperature (K) then
+# accommodation (0..1), optionally followed by temp/freq, translate or
+# rotate keywords. 'specular' takes none and exchanges no energy.
 surf_collide     wall diffuse {t_wall} {acc}
 # every surface element must be bound to a collision model, or the run aborts
 surf_modify      all collide wall
@@ -77,9 +78,13 @@ KNOWLEDGE = {
                             "time.",
             "surf_modify": "surf_modify <group-ID|all> collide <sc-ID> [react "
                            "<sr-ID>]",
-            "surf_react": "surf_react <ID> prob <file> | global <p_recomb> "
-                          "<p_react> | adsorb ...",
-            "group": "group <name> surf id <lo> <hi> — build a surface group so "
+            "surf_react": "surf_react <ID> prob <file> | global <pdelete> "
+                          "<pcreate> (probabilities that a surface collision "
+                          "deletes / clones the incident particle; sum <= 1) "
+                          "| adsorb ...",
+            "group": "group <name> surf id <lo>:<hi> (or 'group <name> surf "
+                     "id <> <lo> <hi>'; a bare '<lo> <hi>' selects only those "
+                     "two elements) — build a surface group so "
                      "different patches can carry different wall models",
             "compute surf": "compute <ID> surf <group-ID> <mix-ID> <values...> "
                             "— values include n nflux mflux press shx shy shz "
@@ -94,15 +99,17 @@ KNOWLEDGE = {
         # is the largest served payload on the backend.
         "output_idioms": output_idioms("per-surf tally idiom"),
         "pitfalls": [
-            "[Syntax] 'surf_collide <ID> diffuse' takes exactly two arguments "
-            "in the order Tsurf (K) then accommodation (0..1). A swap is "
+            "[Syntax] 'surf_collide <ID> diffuse' takes two required arguments "
+            "in the order Tsurf (K) then accommodation (0..1), optionally "
+            "followed by temp/freq, translate or rotate keywords. A swap is "
             "caught only when the accommodation value falls outside [0,1]: "
             "'diffuse 0.5 300' aborts, but 'diffuse 0.9 0.3' is a perfectly "
             "legal 0.9 K wall and runs silently. "
             "Signal: 'ERROR: Illegal surf_collide diffuse command "
             "(../surf_collide_diffuse.cpp:50)' for an out-of-range "
             "accommodation, 'ERROR: Surf_collide tsurf <= 0.0 "
-            "(../surf_collide.cpp:125)' for a non-positive temperature — and "
+            "(../surf_collide.cpp:125)' for a non-positive temperature "
+            "(SPARTA 24Sep2025; 27Aug2026 raises it from line 151) — and "
             "NOTHING at all when both numbers happen to be in range.",
 
             "[Physics] 'surf_collide <ID> specular' reverses the normal "
@@ -140,7 +147,7 @@ KNOWLEDGE = {
             "ave/surf or to dump surf is an error, not a silently-wrong "
             "result. "
             "Signal: 'ERROR: Fix ave/surf compute does not calculate a "
-            "per-surf vector (../fix_ave_surf.cpp:150)' or 'ERROR: Dump surf "
+            "per-surf vector (../fix_ave_surf.cpp:150)' (line 152 in 27Aug2026) or 'ERROR: Dump surf "
             "compute does not compute per-surf vector "
             "(../dump_surf.cpp:569)'. Use c_ID[1].",
 
@@ -154,9 +161,9 @@ KNOWLEDGE = {
             "nitrogen flux' is silently wrong. Nothing in the log reports a "
             "mixture's group count. "
             "Signal: 'ERROR: Fix ave/surf compute array is accessed "
-            "out-of-range (../fix_ave_surf.cpp:157)' or 'ERROR: Compute reduce "
+            "out-of-range (../fix_ave_surf.cpp:157)' (line 159 in 27Aug2026) or 'ERROR: Compute reduce "
             "compute array is accessed out-of-range "
-            "(../compute_reduce.cpp:236)' when you ask for a second column.",
+            "(../compute_reduce.cpp:236)' (line 240 in 27Aug2026) when you ask for a second column.",
 
             "[Output] A raw 'compute surf' value written straight to 'dump "
             "surf' as c_ID[i] is the tally for THAT ONE TIMESTEP and is not "
@@ -170,7 +177,7 @@ KNOWLEDGE = {
             "scaling with the interval. Measured, a fourfold change of dump "
             "interval — with the dump as the compute's only consumer, so "
             "nothing else can be resetting it — leaves the file identical "
-            "element for element at the same timestep. update.cpp:1592 calls "
+            "element for element at the same timestep. update.cpp:1592 (line 1974 in 27Aug2026) calls "
             "slist_compute[i]->clear() on every step the compute is active, so "
             "the tally never spans the interval; these are the same per-step "
             "semantics as the Ncoll family. Following the old test, you would "
@@ -218,9 +225,9 @@ KNOWLEDGE = {
             "face that is periodic or outflow is an error, so you cannot "
             "attach a wall temperature to a plain 'p' or 'o' face. "
             "Signal: 'ERROR: Box boundary not assigned a surf_collide ID "
-            "(../domain.cpp:100)' when 's' is declared but not bound; 'ERROR: "
+            "(../domain.cpp:100)' (line 99 in 27Aug2026) when 's' is declared but not bound; 'ERROR: "
             "Bound_modify surf requires boundary be a surface "
-            "(../domain.cpp:253)' when the face is not 's'.",
+            "(../domain.cpp:253)' (line 252 in 27Aug2026) when the face is not 's'.",
 
             "[Syntax] 'surf_collide <ID> adiabatic' takes NO arguments at all, "
             "and giving it the wall temperature every other style wants is an "
@@ -255,7 +262,7 @@ KNOWLEDGE = {
             "and place it where it is meant to be counted, not around a body. "
             "Note also that a transparent model refuses surface chemistry. "
             "Signal: 'ERROR on proc 0: Collision cell volume is zero "
-            "(../collide.cpp:441)' for the unflagged-elements case, and "
+            "(../collide.cpp:441)' (line 497 in 27Aug2026) for the unflagged-elements case, and "
             "'ERROR: <N> transparent surface elements with invalid collision "
             "model or reaction model (../surf.cpp:397)' for the opposite one. "
             "(Verified 2026-08-07)",

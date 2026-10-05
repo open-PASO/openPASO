@@ -1,0 +1,31 @@
+{
+  "solver": "fenics",
+  "timestamp": "2026-05-07T23:08:25.028374",
+  "dolfinx": {
+    "importable": false,
+    "version": null
+  },
+  "basix": {
+    "importable": false,
+    "version": null
+  },
+  "ufl": {
+    "importable": false,
+    "version": null
+  },
+  "gmsh": {
+    "importable": false,
+    "version": null
+  },
+  "api": {
+    "dolfinx.mesh.create_rectangle": false,
+    "dolfinx.mesh.create_box": false,
+    "dolfinx.fem.functionspace": false,
+    "dolfinx.fem.Function": false,
+    "dolfinx.fem.dirichletbc": false,
+    "dolfinx.fem.petsc.LinearProblem": false,
+    "dolfinx.io.XDMFFile": false,
+    "dolfinx.io.VTKFile": false,
+    "dolfinx.default_scalar_type": false
+  }
+}

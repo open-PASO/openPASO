@@ -105,7 +105,9 @@ KNOWLEDGE = {
             "other solid physics."
         ),
         "input_format": "FEBio XML (.feb), version 4.0",
-        "solver": "Newton-Raphson with direct linear solver (default 'skyline')",
+        "solver": ("Quasi-Newton (BFGS by default) with a direct linear "
+                   "solver (default 'skyline' on a USE_MKL=OFF build; "
+                   "'pardiso' when FEBio is built with MKL)"),
         "required_section_order": (
             "Module, Control, [Globals], Material, Mesh, MeshDomains, "
             "Boundary, [Loads], [Rigid], [Contact], LoadData, Output. "

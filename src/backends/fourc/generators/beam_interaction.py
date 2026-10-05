@@ -44,7 +44,10 @@ class BeamInteractionGenerator(BaseGenerator):
                 "ELEMENTS (legacy) or in one STRUCTURE GEOMETRY / "
                 "ELEMENT_BLOCKS list -- there is no separate beam mesh "
                 "section.  The top-level BEAM INTERACTION section only "
-                "accepts REPARTITIONSTRATEGY and SEARCH_STRATEGY; the "
+                "accepts REPARTITIONSTRATEGY and, before 4C 2026.2.0, "
+                "SEARCH_STRATEGY (4C 2026.2.0 removed it and always searches "
+                "with ArborX, so a 4C built without ArborX cannot run beam "
+                "interaction); the "
                 "contact algorithm and its penalty parameters live in the "
                 "sub-sections (BEAM INTERACTION/BEAM TO BEAM CONTACT, "
                 "BEAM INTERACTION/BEAM TO SOLID VOLUME MESHTYING, ...).  "
@@ -151,12 +154,13 @@ class BeamInteractionGenerator(BaseGenerator):
             "beam_interaction_parameters": {
                 "BEAM INTERACTION/REPARTITIONSTRATEGY": (
                     "'Adaptive' (default) or 'Everydt'.  How often the "
-                    "beam discretisation is repartitioned.  These two "
-                    "plus SEARCH_STRATEGY are the ONLY keys the "
+                    "beam discretisation is repartitioned.  This, plus "
+                    "SEARCH_STRATEGY before 4C 2026.2.0, are the ONLY keys the "
                     "top-level BEAM INTERACTION section accepts."
                 ),
                 "BEAM INTERACTION/SEARCH_STRATEGY": (
-                    "'bruteforce_with_binning' (default) or "
+                    "4C before 2026.2.0 only (4C 2026.2.0 removed it and always uses "
+                    "ArborX): 'bruteforce_with_binning' (default) or "
                     "'bounding_volume_hierarchy'.  There is no search "
                     "RADIUS here -- the search extent comes from "
                     "BINNING STRATEGY/BIN_SIZE_LOWER_BOUND."
@@ -261,10 +265,11 @@ class BeamInteractionGenerator(BaseGenerator):
                     "core/io/src/4C_io_input_spec_builders.cpp. "
                     "The search extent is set by BINNING "
                     "STRATEGY/BIN_SIZE_LOWER_BOUND (plus "
-                    "DOMAINBOUNDINGBOX), and the algorithm by "
-                    "BEAM INTERACTION/SEARCH_STRATEGY "
+                    "DOMAINBOUNDINGBOX), and before 4C 2026.2.0 the "
+                    "algorithm by BEAM INTERACTION/SEARCH_STRATEGY "
                     "(bruteforce_with_binning or "
-                    "bounding_volume_hierarchy). Signal: too-small "
+                    "bounding_volume_hierarchy); 4C 2026.2.0 and later have no such "
+                    "key and always searches with ArborX. Signal: too-small "
                     "bins miss contact pairs — beams pass through "
                     "each other; too-large bins waste compute on "
                     "O(N^2) pair checks. (Audit 2026-06-02; "
@@ -354,9 +359,13 @@ class BeamInteractionGenerator(BaseGenerator):
                     "activate beam contact/meshtying on "
                     "top of the standard structural "
                     "problem. Signal: writing "
-                    "PROBLEMTYPE: 'BeamInteraction' raises "
-                    "'unknown problem type' — there is no "
-                    "such enum. There is also no BEAM "
+                    "PROBLEMTYPE: 'BeamInteraction' aborts "
+                    "input reading with 'Could not match this "
+                    "input' and \"[!] Candidate "
+                    "deprecated_selection 'PROBLEMTYPE' has "
+                    "wrong value, possible values: ...\" "
+                    "listing the legal problem types; there is "
+                    "no such enum. There is also no BEAM "
                     "INTERACTION/SUBMODEL section (it does not "
                     "exist anywhere in 4C's grammar). Per "
                     "adapter/4C_adapter_str_structure_new.cpp the "
@@ -488,7 +497,6 @@ class BeamInteractionGenerator(BaseGenerator):
             # from BINNING STRATEGY below.
             BEAM INTERACTION:
               REPARTITIONSTRATEGY: "Everydt"
-              SEARCH_STRATEGY: "bruteforce_with_binning"
             BEAM INTERACTION/BEAM TO BEAM CONTACT:
               # BEAMS_SEGCON must be true (4C rejects false), and it makes
               # the four shift angles and BEAMS_SEGANGLE mandatory.
@@ -839,8 +847,9 @@ class BeamInteractionGenerator(BaseGenerator):
                 "SEARCH_RADIUS is not a BEAM INTERACTION parameter; it is "
                 "legal only in FLUID BEAM INTERACTION/BEAM TO FLUID "
                 "MESHTYING.  Size the beam-interaction search via BINNING "
-                "STRATEGY/BIN_SIZE_LOWER_BOUND and choose the algorithm "
-                "with BEAM INTERACTION/SEARCH_STRATEGY."
+                "STRATEGY/BIN_SIZE_LOWER_BOUND; before 4C 2026.2.0 choose the "
+                "algorithm with BEAM INTERACTION/SEARCH_STRATEGY (4C 2026.2.0 "
+                "removed it and always uses ArborX)."
             )
 
         # Check the beam-to-beam contact enum choices

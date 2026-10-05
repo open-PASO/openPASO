@@ -56,22 +56,22 @@ _4C_KNOWLEDGE = {
             "MAT_Fourier": {"CAPA": "Volumetric heat capacity (rho*c_p) > 0", "CONDUCT": "Thermal conductivity (YAML: constant: [value]) > 0"},
         },
         "time_integration": {
-            "TIMEINTEGR": "Stationary | BDF2 | OneStepTheta",
+            "TIMEINTEGR": "Stationary | One_Step_Theta (default) | BDF2 | Gen_Alpha",
             "SOLVERTYPE": "linear_full (linear) | nonlinear (nonlinear terms)",
             "VELOCITYFIELD": "zero (pure diffusion) | function (prescribed) | Navier_Stokes",
         },
         "solver": {"small": "UMFPACK (direct, ~50k DOFs)", "large": "Belos + MueLu (iterative, scalable)"},
         "pitfalls": [
             "Section name is 'SCALAR TRANSPORT DYNAMIC', NOT 'SCATRA DYNAMIC'",
-            "VELOCITYFIELD must be 'zero' (not omitted) for pure diffusion",
-            "VTK path: SCALAR TRANSPORT DYNAMIC/RUNTIME VTK OUTPUT (NOT IO/RUNTIME VTK OUTPUT/SCATRA)",
+            "VELOCITYFIELD defaults to 'zero'; omitting it is fine for pure diffusion",
+            "VTK: scalar transport has no runtime-VTK section of its own (both 'SCALAR TRANSPORT DYNAMIC/RUNTIME VTK OUTPUT' and 'IO/RUNTIME VTK OUTPUT/SCATRA' abort with \"Section '...' is not a valid section name.\"); it writes <prefix>-vtk-files/scatra-*.vtu and <prefix>-scatra.pvd with no IO section, at every RESULTSEVERY and every RESTARTEVERY step (both default 1), in the data format of IO/RUNTIME VTK OUTPUT (e.g. OUTPUT_DATA_FORMAT; INTERVAL_STEPS is ignored)",
             "Geometry section: TRANSPORT GEOMETRY with TRANSP element category",
             "NUMDOF=1, all arrays (ONOFF/VAL/FUNCT) have exactly 1 entry",
         ],
         "variants": ["poisson_2d", "heat_transient_2d"],
     },
     "solid_mechanics": {
-        "description": "Quasi-static structural problems. DYNAMICTYPE: Statics, small/large deformation, 2D (WALL) / 3D (SOLID).",
+        "description": "Quasi-static structural problems. DYNAMICTYPE: Statics, small/large deformation, 2D (WALL before 4C 2026.2.0, SOLID with THICKNESS and PLANE_ASSUMPTION from 4C 2026.2.0 on) / 3D (SOLID).",
         "problem_type": "Structure",
         "required_sections": ["PROBLEM TYPE", "STRUCTURAL DYNAMIC", "SOLVER 1", "MATERIALS", "STRUCTURE GEOMETRY"],
         "materials": {
@@ -90,8 +90,8 @@ _4C_KNOWLEDGE = {
             "KINEM must match material: Neo-Hookean/plasticity REQUIRE nonlinear",
             "MAXITER=1 only for truly linear problems",
             "HEX8 suffers locking — use TECH: eas_full, fbar, or higher-order elements",
-            "2D uses WALL category (not SOLID), requires THICK and STRESS_STRAIN",
-            "Neumann BCs have NUMDOF: 6 (forces + moments)",
+            "2D before 4C 2026.2.0 uses WALL (not SOLID), with THICK and STRESS_STRAIN; 4C 2026.2.0 and later have no WALL, their 2D SOLID takes THICKNESS and PLANE_ASSUMPTION",
+            "Neumann BCs on SOLID/WALL need NUMDOF >= the dimension (3 is enough in 3D, 2 in 2D); NUMDOF: 6 is accepted, but the entries beyond the dimension are not moments and must stay 0: a switched-on one aborts on a 3-D SOLID surface load ('Number of Dimensions in Neumann_Evaluation is 3. Further DoFs are not considered.') and on the 2-D SOLID of 4C 2026.2.0 and later ('You have activated more than 2 dofs in your Neumann boundary condition. This is higher than the dimension of the element.'), while WALL (4C before 2026.2.0) ignores it",
         ],
         "variants": ["linear_2d", "nonlinear_3d"],
     },
@@ -123,7 +123,7 @@ _4C_KNOWLEDGE = {
             "PROBLEM TYPE", "STRUCTURAL DYNAMIC", "STRUCTURAL DYNAMIC/GENALPHA",
             "FLUID DYNAMIC", "ALE DYNAMIC", "FSI DYNAMIC", "FSI DYNAMIC/MONOLITHIC SOLVER",
             "SOLVER 1, 2, 3", "MATERIALS", "STRUCTURE GEOMETRY", "FLUID GEOMETRY",
-            "CLONING MATERIAL MAP", "DESIGN FSI COUPLING CONDITIONS",
+            "CLONING MATERIAL MAP", "DESIGN FSI COUPLING LINE CONDITIONS (2D) / DESIGN FSI COUPLING SURF CONDITIONS (3D)",
         ],
         "materials": {
             "MAT_fluid": "Newtonian (DYNVISCOSITY, DENSITY)",
@@ -132,7 +132,7 @@ _4C_KNOWLEDGE = {
         },
         "coupling": {
             "recommended": "iter_mortar_monolithicfluidsplit",
-            "alternatives": ["iter_monolithicfluidsplit", "iter_stagg_AITKEN_rel_force"],
+            "alternatives": ["iter_monolithicfluidsplit", "iter_stagg_AITKEN_rel_param"],
         },
         "pitfalls": [
             "Fluid MUST use NA: ALE (NOT Euler!) for FSI",
@@ -177,7 +177,7 @@ _4C_KNOWLEDGE = {
         },
         "strategies": {
             "Penalty": "Stiff spring on penetration. PENALTYPARAM (1e2-1e5): too low=penetration, too high=ill-conditioning",
-            "Uzawa": "Augmented Lagrangian. Accurate, expensive.",
+            "Uzawa": "Augmented Lagrangian. Accurate, expensive. Only with STRUCTURAL DYNAMIC INT_STRATEGY: Old: under Standard (the default after the 4C 2026.1.0 release, which defaults to Old) it aborts with 'This contact strategy is not yet considered!', and the Old integration has no runtime VTK output (IO/RUNTIME VTK OUTPUT/STRUCTURE OUTPUT_STRUCTURE: true aborts with 'Runtime output is not available in the old structure time integration! You need to take the new one, i.e. set `INT_STRATEGY: Standard`!').",
             "Nitsche": "Variationally consistent penalty. Accuracy + simplicity.",
         },
         "pitfalls": [
@@ -192,7 +192,7 @@ _4C_KNOWLEDGE = {
         "variants": ["penalty_3d"],
     },
     "structural_dynamics": {
-        "description": "Time-dependent structural: impact, vibration, wave propagation. GenAlpha (implicit, recommended) or ExplEuler.",
+        "description": "Time-dependent structural: impact, vibration, wave propagation. GenAlpha (implicit, recommended) or ExplicitEuler.",
         "problem_type": "Structure",
         "required_sections": ["PROBLEM TYPE", "STRUCTURAL DYNAMIC", "SOLVER 1", "MATERIALS", "STRUCTURE GEOMETRY"],
         "materials": {
@@ -202,7 +202,7 @@ _4C_KNOWLEDGE = {
         "time_integration": {
             "GenAlpha": "Implicit, 2nd order, RHO_INF [0,1]: 1=energy-conserving, 0=max damping (typical 0.8-0.9)",
             "GenAlphaLieGroup": "Lie-group variant for beams (rotational DOFs on SO(3))",
-            "ExplEuler": "Explicit, CFL-constrained (dt < h/c where c=sqrt(E/rho))",
+            "ExplicitEuler": "Explicit, CFL-constrained (dt < h/c where c=sqrt(E/rho))",
         },
         "damping": {"Rayleigh": "M_DAMP (low freq) + K_DAMP (high freq)", "None": "Numerical dissipation only"},
         "pitfalls": [
@@ -287,7 +287,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                            'order); '
                                                                            'pyramid is '
                                                                            'capped at '
-                                                                           'degree 2 — '
+                                                                           'degree 2 with '
+                                                                           'the default '
+                                                                           'variant — '
                                                                            'degree 3 '
                                                                            'raises '
                                                                            'RuntimeError '
@@ -296,11 +298,15 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                            'pyramids '
                                                                            'not '
                                                                            'supported '
-                                                                           "yet.' "
+                                                                           "yet.' unless "
+                                                                           'lagrange_variant='
+                                                                           'equispaced is '
+                                                                           'passed (then '
+                                                                           'degrees 3 and 4 '
+                                                                           'build) '
                                                                            '(verified '
                                                                            'basix '
-                                                                           '0.10.0, '
-                                                                           '2026-08-03)',
+                                                                           '0.10.0)',
                                                                  'cell_types': 'interval, '
                                                                                'triangle, '
                                                                                'quadrilateral, '
@@ -313,11 +319,14 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                  'variants': {'equispaced': 'basix.LagrangeVariant.equispaced '
                                                                                             '(equally '
                                                                                             'spaced '
-                                                                                            'points, '
-                                                                                            'default '
-                                                                                            'for '
-                                                                                            'low '
-                                                                                            'order)',
+                                                                                            'points; '
+                                                                                            'not the default: '
+                                                                                            'basix.ufl.element '
+                                                                                            'uses gll_warped for '
+                                                                                            'P/DG at every degree, '
+                                                                                            'and its points coincide '
+                                                                                            'with equispaced for '
+                                                                                            'degree <= 2)',
                                                                               'gll_warped': 'basix.LagrangeVariant.gll_warped '
                                                                                             '(GLL '
                                                                                             'points, '
@@ -844,11 +853,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                                             '(piecewise '
                                                                                             'on '
                                                                                             'sub-cells)',
-                                                                              'orders': '2 '
-                                                                                        '(degree '
-                                                                                        '> '
-                                                                                        '2 '
-                                                                                        'raises '
+                                                                              'orders': '1 and 2 without a '
+                                                                                        'variant (tetrahedron: 1 '
+                                                                                        'only); degree > 2 raises '
                                                                                         'RuntimeError '
                                                                                         "'Lagrange "
                                                                                         'elements '
@@ -861,22 +868,31 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                                         'be '
                                                                                         'given '
                                                                                         'a '
-                                                                                        "variant' "
+                                                                                        "variant.' "
                                                                                         'unless '
                                                                                         'a '
                                                                                         'LagrangeVariant '
                                                                                         'is '
-                                                                                        'passed). '
+                                                                                        'passed, and even then '
+                                                                                        'builds only on interval, '
+                                                                                        'quadrilateral and '
+                                                                                        'hexahedron (triangle '
+                                                                                        "raises 'Only degree 0 to "
+                                                                                        '2 macro polysets are '
+                                                                                        'currently implemented on '
+                                                                                        "a triangle.'). "
                                                                                         'Verified '
-                                                                                        '2026-08-03.',
+                                                                                        'on basix 0.10.0.',
                                                                               'cell_types': 'interval, '
                                                                                             'triangle, '
                                                                                             'quadrilateral, '
-                                                                                            'hexahedron '
-                                                                                            '— '
-                                                                                            'NOT '
+                                                                                            'hexahedron, '
                                                                                             'tetrahedron '
-                                                                                            '(RuntimeError '
+                                                                                            '(tetrahedron '
+                                                                                            'at degree 1 '
+                                                                                            'only: degree 2 '
+                                                                                            'raises '
+                                                                                            'RuntimeError '
                                                                                             "'Only "
                                                                                             'degree '
                                                                                             '0 '
@@ -889,9 +905,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                                             'implemented '
                                                                                             'on '
                                                                                             'a '
-                                                                                            "tetrahedron'). "
+                                                                                            "tetrahedron.'). "
                                                                                             'Verified '
-                                                                                            '2026-08-03.',
+                                                                                            'on basix 0.10.0.',
                                                                               'api': "basix.ufl.element('iso', "
                                                                                      'cell, '
                                                                                      'degree)',
@@ -990,8 +1006,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                   'Not all element families support all cell types — '
                                   'check Basix docs for compatibility. Measured on '
                                   'basix 0.10: CR and Regge are simplex-only; iso is '
-                                  'not implemented on tetrahedra; Lagrange on pyramid '
-                                  'stops at degree 2',
+                                  'only implemented at degree 1 on tetrahedra; Lagrange '
+                                  'on pyramid stops at degree 2 with the default variant '
+                                  '(degree >= 3 needs lagrange_variant=equispaced)',
                                   'Bubble element minimum degree depends on cell type: '
                                   '3 for triangle, 4 for tet, 2 for quad, 2 for hex',
                                   'Serendipity and DPC elements are the tensor-product '
@@ -1097,8 +1114,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                   'read_tags': "f.read_meshtags(mesh, name='facets')",
                                   'notes': 'Good for pre-generated meshes. Geometry '
                                            'order <= 2 supported.'},
-                  'vtkhdf_import': {'api': "dolfinx.io.vtkhdf.read_mesh('mesh.vtkhdf', "
-                                           'MPI.COMM_WORLD) — new in 0.10',
+                  'vtkhdf_import': {'api': "dolfinx.io.vtkhdf.read_mesh(MPI.COMM_WORLD, "
+                                           "'mesh.vtkhdf') — new in 0.10 (communicator "
+                                           'first, then filename)',
                                     'notes': "Kitware's future-proof format. "
                                              'Transition from XDMF has started. '
                                              'Writing is present too in 0.10: '
@@ -1160,12 +1178,17 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                'gmsh.isInitialized())',
                                'Topology connectivity must be created before use: '
                                'mesh.topology.create_connectivity(dim1, dim2). '
-                               'Measured scope on 0.10 (2026-08-03): '
-                               'locate_entities_boundary, locate_dofs_topological and '
-                               'ds/dS assembly all build it LAZILY and work without '
-                               'the call; '
+                               'Measured scope on 0.10: locate_entities_boundary and '
+                               'ds/dS assembly build facet->cell connectivity '
+                               'themselves and work without the call. '
+                               'locate_dofs_topological does NOT build it: it works '
+                               'only if the connectivity already exists (e.g. an '
+                               'earlier locate_entities_boundary call or gmsh '
+                               'model_to_mesh created it), otherwise it raises '
+                               "RuntimeError 'Entity-to-cell connectivity has not "
+                               "been computed. Missing dims 1->2' (2-D mesh). "
                                'dolfinx.mesh.exterior_facet_indices(mesh.topology) '
-                               "does NOT and raises RuntimeError 'Facet to cell "
+                               "also needs it and raises RuntimeError 'Facet to cell "
                                "connectivity has not been computed.'",
                                'Both refine entry points need '
                                'mesh.topology.create_entities(1) first — see '
@@ -1840,21 +1863,33 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                       'naturally satisfied'},
                          'pitfalls': ['Connectivity: '
                                       'mesh.topology.create_connectivity(fdim, tdim) '
-                                      'is NO LONGER required before '
-                                      'locate_entities_boundary / '
-                                      'locate_dofs_topological / ds / dS on dolfinx '
-                                      '0.10 — connectivity is built lazily and all '
-                                      'four work without it. It IS still required '
-                                      'before '
+                                      'is not required before '
+                                      'locate_entities_boundary or ds/dS assembly on '
+                                      'dolfinx 0.10, because these build it themselves. '
+                                      'locate_dofs_topological does NOT build it: it '
+                                      'works only if facet->cell connectivity already '
+                                      'exists (e.g. created by an earlier '
+                                      'locate_entities_boundary call), otherwise '
+                                      "RuntimeError 'Entity-to-cell connectivity has not "
+                                      "been computed. Missing dims 1->2' (2-D mesh). It "
+                                      'IS still required before '
                                       'dolfinx.mesh.exterior_facet_indices(mesh.topology), '
                                       "which raises RuntimeError 'Facet to cell "
                                       "connectivity has not been computed.' Calling it "
                                       'explicitly remains harmless and is the safer '
-                                      'tutorial pattern. (Verified empirically '
-                                      '2026-08-03.)',
-                                      'For sub-space BCs: locate_dofs_topological '
-                                      'needs BOTH the sub-space AND collapsed '
-                                      'sub-space as tuple',
+                                      'tutorial pattern. (Verified by execution on '
+                                      'dolfinx 0.10.0.)',
+                                      'For sub-space BCs: with a scalar or Constant '
+                                      'value whose size equals the sub-space block '
+                                      'size (e.g. V.sub(i) of a vector space, or a '
+                                      'scalar field of a mixed space), '
+                                      'locate_dofs_topological(V.sub(i), fdim, facets) '
+                                      '+ dirichletbc(value, dofs, V.sub(i)) suffices. '
+                                      'When the value is a Function on the collapsed '
+                                      'sub-space, which is required for a vector '
+                                      'sub-space of a mixed space such as Taylor-Hood '
+                                      'W.sub(0), pass the (W.sub(i), W_i_collapsed) '
+                                      'tuple to locate_dofs_topological',
                                       'Periodic BCs require dolfinx_mpc extension — '
                                       'not natively in DOLFINx (confirmed: no '
                                       'periodic-constraint API anywhere in dolfinx '
@@ -1899,8 +1934,8 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                           'functions',
                               'notes': 'Geometry order <= 2 supported. Good for '
                                        'meshes. For functions, VTX preferred.'},
-                'vtkhdf': {'api': "dolfinx.io.vtkhdf.read_mesh('file.vtkhdf', comm) — "
-                                  'new in 0.10',
+                'vtkhdf': {'api': "dolfinx.io.vtkhdf.read_mesh(comm, 'file.vtkhdf') — "
+                                  'new in 0.10 (communicator first)',
                            'notes': "Kitware's future format. Reading AND writing are "
                                     'both available on 0.10: read_mesh, write_mesh, '
                                     'write_point_data, write_cell_data (verified '
@@ -1908,10 +1943,12 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                     'is stale).'},
                 'checkpointing': {'library': 'adios4dolfinx (extension by Jørgen S. '
                                              'Dokken)',
-                                  'api': 'adios4dolfinx.write_mesh(mesh, filename); '
-                                         'adios4dolfinx.write_function(u, filename)',
+                                  'api': 'adios4dolfinx.write_mesh(filename, mesh); '
+                                         'adios4dolfinx.write_function(filename, u)',
                                   'read': 'adios4dolfinx.read_mesh(filename, comm); '
-                                          'adios4dolfinx.read_function(V, filename)',
+                                          'adios4dolfinx.read_function(filename, u) '
+                                          '(u = dolfinx.fem.Function(V), filled in '
+                                          'place)',
                                   'features': 'N-to-M checkpointing (write on N ranks, '
                                               'read on M ranks), function + mesh + '
                                               'meshtags',
@@ -1922,7 +1959,7 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                      '(must find containing cells '
                                                      'first)',
                                         'find_cells': 'dolfinx.geometry.bb_tree + '
-                                                      'compute_collisions + '
+                                                      'compute_collisions_points + '
                                                       'compute_colliding_cells',
                                         'interpolation': 'u.interpolate(expr) — '
                                                          'interpolate expression or '
@@ -2039,9 +2076,15 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                              "dx(metadata={'quadrature_degree': "
                                                              'q})',
                                         'example': 'dolfinx.fem.form(a, '
-                                                   "form_compiler_options={'optimize': "
-                                                   "True}, jit_options={'timeout': "
-                                                   '120})'},
+                                                   "form_compiler_options={'table_rtol': "
+                                                   "1e-8}, jit_options={'timeout': "
+                                                   '120}) — FFCx 0.10 options: epsilon, '
+                                                   'scalar_type, sum_factorization, '
+                                                   'table_rtol, table_atol, verbosity, '
+                                                   'part; unknown keys (e.g. '
+                                                   "'optimize') are silently ignored, "
+                                                   'and fem.form sets scalar_type from '
+                                                   'its dtype argument'},
                    'automatic_differentiation': {'description': 'UFL supports symbolic '
                                                                 'differentiation for '
                                                                 'deriving Jacobians, '
@@ -2118,24 +2161,23 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                              'notes': 'Computes matrix-vector product on-the-fly. '
                                       'Diagonal assembly available for Jacobi '
                                       'preconditioning.'},
-             'pitfalls': ['[API] In recent dolfinx, '
-                          'mesh.topology.create_connectivity(fdim, tdim) is no longer '
-                          'a hard prerequisite for locate_entities_boundary / '
-                          'locate_dofs_topological — connectivity is built lazily on '
-                          'first need. Calling it explicitly is harmless and is the '
-                          'safer tutorial pattern, but its ABSENCE no longer triggers '
-                          'an exception in current dolfinx. Signal: in older dolfinx '
-                          '(pre-0.7), locate_dofs_topological raised RuntimeError '
-                          "mentioning 'connectivity has not been computed'; current "
-                          'dolfinx returns dof indices without that step. EXCEPTION '
-                          'worth knowing (re-verified 2026-08-03 on 0.10.0): '
-                          'dolfinx.mesh.exterior_facet_indices(mesh.topology) is still '
-                          "eager and raises RuntimeError 'Facet to cell connectivity "
-                          "has not been computed.' on a fresh mesh — so the common "
-                          "'grab all boundary facets' idiom DOES need "
-                          'create_connectivity(fdim, tdim) even though locate_* does '
-                          'not. ds and dS assembly do not. (Verified empirically '
-                          '2026-06-01; scope re-measured 2026-08-03.)',
+             'pitfalls': ['[API] locate_entities_boundary builds facet->cell '
+                          'connectivity itself, so it needs no prior '
+                          'create_connectivity, and neither do ds and dS assembly. '
+                          'locate_dofs_topological does NOT build it: it works after '
+                          'locate_entities_boundary or with gmsh-imported facet tags '
+                          '(model_to_mesh builds the connectivity), but not on facets '
+                          'from locate_entities on a fresh mesh, so call '
+                          'mesh.topology.create_connectivity(fdim, tdim) explicitly '
+                          'before it. Signal: on dolfinx 0.10.0, '
+                          'locate_dofs_topological without that connectivity raises '
+                          "RuntimeError 'Entity-to-cell connectivity has not been "
+                          "computed. Missing dims 1->2' (2-D mesh), and "
+                          'dolfinx.mesh.exterior_facet_indices(mesh.topology) on a '
+                          "fresh mesh raises RuntimeError 'Facet to cell connectivity "
+                          "has not been computed.' — so the common 'grab all boundary "
+                          "facets' idiom needs create_connectivity(fdim, tdim) too. "
+                          '(Verified by execution on dolfinx 0.10.0.)',
                           '[API] dolfinx.default_scalar_type for Constants and '
                           'Function arrays so dtype matches the PETSc build (float64 '
                           'if PETSc is real, complex128 if PETSc is complex). Signal: '
@@ -2162,14 +2204,20 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                           'space — the solution is determined only up to a constant. '
                           'Either pin one DOF (DirichletBC on a single point) or add a '
                           'Lagrange multiplier enforcing mean(u) = 0. Signal: '
-                          'LinearProblem.solve returns successfully (CG with '
-                          "pc_type='none' even converges without raising), but the "
+                          'LinearProblem.solve returns without raising, but CG with '
+                          "pc_type='none' does NOT converge: "
+                          'problem.solver.getConvergedReason() is -4 (DIVERGED_DTOL, '
+                          '17 iterations), and the '
                           'resulting Function array has a HUGE additive offset '
                           'accommodating the null space — np.array shows max ≈ min ≈ '
                           'O(1e6) with tiny std (e.g. max=2.18e+06, std=112 on an 8x8 '
-                          "unit square with f=1). The 'KSP fails' alternative does NOT "
-                          'typically fire; you observe the bug as the un-pinned '
-                          'constant. (Verified empirically 2026-06-01.)',
+                          'unit square with f=1). No exception is raised unless '
+                          "petsc_options sets 'ksp_error_if_not_converged': True, "
+                          "which gives 'petsc4py.PETSc.Error: error code 91' with the "
+                          "line 'KSPSolve() has not converged, reason DIVERGED_DTOL'; "
+                          'without it you observe the bug only as the un-pinned '
+                          'constant or the negative converged reason. (Verified by '
+                          'execution on dolfinx 0.10.0.)',
                           '[Syntax] For non-unit kappa coefficients: define as '
                           'fem.Constant for spatially uniform, or fem.Function '
                           '(interpolated) for spatially varying. Plain Python floats '
@@ -2312,7 +2360,7 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                     'E*nu/((1+nu)(1-2nu)) written in a 2D form gives '
                                     'PLANE STRAIN. Forgetting this is a silent source '
                                     'of wrong answers for thin structures. Signal: a '
-                                    '2D VectorH1 dolfinx Function plate deflection '
+                                    '2D vector-Lagrange dolfinx Function plate deflection '
                                     'differs from the plane-stress reference by factor '
                                     '(1-nu^2) — measured 0.90941 at nu=0.3 against a '
                                     'predicted 0.9100 (verified empirically '
@@ -2415,9 +2463,13 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                          'problem.solver.getConvergedReason() returns 4 '
                          "(CONVERGED_ITS) and no 'INFOG(1)=-9' is emitted; instead the "
                          'pressure comes back with an arbitrary offset of '
-                         'unpredictable magnitude: mean(p) varied over roughly fifteen '
-                         'orders of magnitude across five mesh resolutions of the SAME '
-                         'problem, with no pattern, while max|u| stayed exactly 1.0. '
+                         'unpredictable magnitude: mean(p) varied over fifteen or '
+                         'more orders of magnitude across five mesh resolutions of '
+                         'the SAME problem, with no pattern, and it changes with the '
+                         'OpenMP thread count. max|u| is no reliable check either: it '
+                         'mostly stayed at the lid speed 1.0, but the resolution that '
+                         'got the ~1e16-1e17 offset can come back with a polluted '
+                         'velocity too (max|u| = 1.014 in a single-threaded run). '
                          'Diagnose from the pressure magnitude, not from the converged '
                          'reason.',
                          '[API] basix.ufl.element supports quadrilateral cells '
@@ -2617,18 +2669,25 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                      'equal-order Lagrange pairs do '
                                                      'not.',
                                       'pitfalls': ['Never use an equal-order pair '
-                                                   '(P1/P1, P2/P2). Signal: on '
-                                                   "triangles PETSc prints 'Linear "
+                                                   '(P1/P1, P2/P2). Signal: P1/P1 on '
+                                                   'triangles fails in the first linear '
+                                                   'solve: KSP getConvergedReason() == '
+                                                   '-11 (with ksp_converged_reason set '
+                                                   "PETSc prints 'Linear "
                                                    '<prefix> solve did not converge '
                                                    'due to DIVERGED_PC_FAILED '
                                                    "iterations 0' and 'PC failed due "
-                                                   "to FACTOR_NUMERIC_ZEROPIVOT' and "
-                                                   'the solution array is inf; on '
-                                                   'quadrilaterals there is NO error '
-                                                   'at all (KSP CONVERGED_ITS) but '
-                                                   'max|u| comes out ~50-200x the '
-                                                   'imposed lid speed and max|p| '
-                                                   '~1e19.']},
+                                                   "to FACTOR_NUMERIC_ZEROPIVOT'), "
+                                                   'SNES getConvergedReason() == -3, '
+                                                   'and the returned solution is all '
+                                                   'zero. P1/P1 on quadrilaterals and '
+                                                   'P2/P2 on both cell types report KSP '
+                                                   'CONVERGED_ITS on every step, but '
+                                                   'Newton ends with SNES -6 '
+                                                   '(DIVERGED_LINE_SEARCH), max|u| a '
+                                                   'few times (2-9x) the imposed lid '
+                                                   'speed and max|p| of order '
+                                                   '1e16-1e18.']},
                    'weak_form': {'REQUIRED': 'Steady monolithic residual (kinematic '
                                              'form, nu = mu/rho), Newton on F == 0:\n'
                                              '  F = (nu*ufl.inner(ufl.grad(u), '
@@ -2754,11 +2813,26 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                           'locate_dofs_* returns '
                                                           'exactly that pair of index '
                                                           'arrays.',
-                                           'pitfalls': ['Never pass a raw numpy array, '
-                                                        'a fem.Constant, or a single '
-                                                        '(non-paired) dof array to '
-                                                        'dirichletbc on a mixed '
-                                                        'sub-space. Signal: '
+                                           'pitfalls': ['Never pass a raw numpy array '
+                                                        'or a fem.Constant (with more '
+                                                        'than one component), or a '
+                                                        'collapsed-space Function with a '
+                                                        'single (non-paired) dof array, '
+                                                        'to dirichletbc on the velocity '
+                                                        'sub-space W.sub(0). Signal: it '
+                                                        'depends on the mistake. An '
+                                                        'array or Constant with a single '
+                                                        'dof array raises '
+                                                        "'RuntimeError: Creating a "
+                                                        'DirichletBC using a Constant is '
+                                                        'not supported when the Constant '
+                                                        'size is not equal to the block '
+                                                        'size of the constrained '
+                                                        '(sub-)space. Use a fem::Function '
+                                                        "to create the fem::DirichletBC.'; "
+                                                        'an array or Constant with the '
+                                                        'paired dofs, or a Function with '
+                                                        'a single dof array, raises '
                                                         "'TypeError: __init__(): "
                                                         'incompatible function '
                                                         'arguments. The following '
@@ -2767,9 +2841,10 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                         'overloads and a line '
                                                         "beginning 'Invoked with "
                                                         'types: '
-                                                        'dolfinx.cpp.fem.DirichletBC_float64, '
-                                                        'ndarray, list, '
-                                                        "dolfinx.cpp.fem.FunctionSpace_float64'.",
+                                                        "dolfinx.cpp.fem.DirichletBC_float64, ...' "
+                                                        'that names the passed types '
+                                                        "(e.g. 'ndarray, list' for an "
+                                                        'array with paired dofs).',
                                                         'Pin the pressure whenever no '
                                                         'part of the boundary is left '
                                                         'traction-free. Signal: with '
@@ -3194,23 +3269,28 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                 'velocity/pressure pair -- Taylor-Hood '
                                 'basix.ufl.mixed_element([P_k_vector, P_(k-1)_scalar]) '
                                 'with k >= 2. Equal-order pairs fail, and HOW they '
-                                'fail depends on the cell type, so a clean solver '
-                                'report is not evidence that the pair is stable. '
-                                'Signal: P1/P1 on TRIANGLES with pc_type lu + mumps '
-                                'prints "Linear <prefix> solve did not converge due to '
+                                'fail depends on the cell type, so a clean KSP report '
+                                'is not evidence that the pair is stable. Signal: '
+                                'P1/P1 on TRIANGLES with pc_type lu + mumps fails in '
+                                'the first linear solve: KSP getConvergedReason() == '
+                                '-11 (with ksp_converged_reason set PETSc prints '
+                                '"Linear <prefix> solve did not converge due to '
                                 'DIVERGED_PC_FAILED iterations 0" and "PC failed due '
-                                'to FACTOR_NUMERIC_ZEROPIVOT", KSP '
-                                'getConvergedReason() == -11, and the returned arrays '
-                                'are inf. But P1/P1 on QUADRILATERALS, and P2/P2 on '
-                                'both cell types, report KSP CONVERGED_ITS with no '
-                                'warning at all while max|u| comes out about 50-200x '
-                                'the imposed lid speed (which is an upper bound for '
-                                'the true solution) and max|p| is of order 1e19-1e20. '
-                                'The stable P2/P1 pair on the identical setup gives '
-                                'max|u| exactly equal to the lid speed. (Verified by '
-                                'execution on dolfinx 0.10.0 with the pairs (2,1), '
-                                '(1,1) and (2,2) on triangles and on quadrilaterals, '
-                                'at two mesh resolutions each.)',
+                                'to FACTOR_NUMERIC_ZEROPIVOT"), SNES '
+                                'getConvergedReason() == -3, and the returned arrays '
+                                'are all zero. P1/P1 on QUADRILATERALS, and P2/P2 on '
+                                'both cell types, report KSP CONVERGED_ITS on every '
+                                'step and print nothing by default, but Newton ends '
+                                'with SNES getConvergedReason() == -6 '
+                                '(DIVERGED_LINE_SEARCH), with max|u| 2-9x the imposed '
+                                'lid speed (which is an upper bound for the true '
+                                'solution) and max|p| of order 1e16-1e18. The stable '
+                                'P2/P1 pair on the identical setup gives max|u| '
+                                'exactly equal to the lid speed. Check the SNES '
+                                'reason. (Verified by execution on dolfinx 0.10.0 with '
+                                'PETSc 3.24.5, with the pairs (2,1), (1,1) and (2,2) '
+                                'on triangles and on quadrilaterals, at two mesh '
+                                'resolutions each.)',
                                 '[Physics] An ENCLOSED domain -- every boundary facet '
                                 'carrying a velocity Dirichlet BC, e.g. a lid-driven '
                                 'cavity -- leaves the pressure determined only up to '
@@ -3243,34 +3323,41 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                 'and pressure are all zero. (Verified by execution on '
                                 'dolfinx 0.10.0; reproduced on triangles and '
                                 'quadrilaterals at P2/P1 and P3/P2.)',
-                                '[Numerical] Newton from a zero initial guess stops '
-                                'working above roughly Re = 500 on a lid-driven '
-                                'cavity, and refining the mesh does NOT rescue it -- '
+                                '[Numerical] Newton from a zero initial guess is not '
+                                'robust at higher Re on a lid-driven cavity, and the '
+                                'outcome depends on the line search and on the mesh -- '
                                 'the cure is continuation: solve at a low Re, keep the '
                                 'solution Function as the initial guess (do not zero '
                                 'it), raise Re, solve again. Only nu.value has to '
                                 'change between solves; the same NonlinearProblem '
-                                'object can be reused. Signal: cold-starting Re = 1000 '
-                                'prints "Nonlinear <prefix> solve did not converge due '
-                                'to DIVERGED_DTOL iterations 13", getConvergedReason() '
-                                '== -9, and the velocity Function holds max|u| of '
-                                'order 1e3 against an imposed lid speed of 1; at '
-                                'higher Re the same cold start ends in DIVERGED_MAX_IT '
-                                'instead. Refining the mesh does not rescue it - the '
-                                'cold start diverges the same way on a finer mesh. '
-                                'CORRECTION: an earlier version of this entry said '
-                                'doubling the resolution makes the blow-up LARGER; the '
-                                'magnitude is not monotone in mesh size, so do not use '
-                                'it as the test. The reproducible statement is that '
-                                'refining does not help, and the observable is the '
-                                'negative converged reason, not how big max|u| got. '
-                                'Stepping Re '
-                                'through 100, 200, 400, 600, 800, 1000, 1500, 2000, '
-                                '3000, 5000 with the previous solution retained '
-                                'converges at every stage in a handful of Newton '
-                                'iterations with max|u| staying exactly at the lid '
-                                'speed. (Verified by execution on dolfinx 0.10.0 at '
-                                'two mesh resolutions.)',
+                                "object can be reused. Signal: with the default 'bt' "
+                                'line search a cold start at Re = 1000 is '
+                                'mesh-dependent -- it converged on 16x16, 32x32 and '
+                                '64x64 meshes but stopped with DIVERGED_LINE_SEARCH '
+                                '(getConvergedReason() == -6) on 8x8 and 24x24, while '
+                                'cold starts at Re = 500, 600 and 800 converged on '
+                                "16x16 and 32x32. With snes_linesearch_type 'basic' "
+                                'the cold start already fails at Re = 600 on 16x16, '
+                                'and at Re = 1000 it stops with DIVERGED_DTOL '
+                                '(getConvergedReason() == -9; with '
+                                'snes_converged_reason set PETSc prints "Nonlinear '
+                                '<prefix> solve did not converge due to DIVERGED_DTOL '
+                                'iterations N") on every mesh tried, with max|u| of '
+                                'order 1e3-1e4 against an imposed lid speed of 1; '
+                                'refining does not rescue it. CORRECTION: an earlier '
+                                'version of this entry said doubling the resolution '
+                                'makes the blow-up LARGER; the magnitude is not '
+                                'monotone in mesh size, so do not use it as the test. '
+                                'The observable is the negative converged reason, not '
+                                'how big max|u| got. Stepping Re through 100, 200, '
+                                '400, 600, 800, 1000, 1500, 2000, 3000, 5000 with the '
+                                'previous solution retained converged at every stage '
+                                'in a handful of Newton iterations with max|u| staying '
+                                'exactly at the lid speed on a 32x32 mesh; on 16x16 it '
+                                'converged up to Re = 2000 and then stopped with '
+                                'DIVERGED_LINE_SEARCH (-6) at Re = 3000 and 5000. '
+                                '(Verified by execution on dolfinx 0.10.0 with PETSc '
+                                '3.24.5.)',
                                 '[API] A Dirichlet BC on a sub-space of a mixed space '
                                 'needs a Function on the COLLAPSED sub-space plus the '
                                 'tuple form of locate_dofs_*: V, _ = '
@@ -3302,13 +3389,16 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                 'stability by a FIXED NUMBER OF STEPS, not by a fixed '
                                 'final time. Signal: on a channel meshed at h = 0.125 '
                                 'with peak inflow speed 1, running 120 steps at dt = '
-                                '0.5 / 0.2 / 0.125 / 0.1 / 0.05 drives max|u| from 1.0 '
-                                'to between 1.8e2 and 6.8e2, first crossing 1e2 at '
-                                'step 8 / 11 / 15 / 18 / 51 respectively -- while all '
-                                'three LinearProblem.solver objects keep reporting '
-                                'CONVERGED_ITS on every single step. On that same mesh '
-                                'dt = 0.02 survives all 120 steps with max|u| staying '
-                                'at 1.000000, so the threshold there lies between 0.02 '
+                                '0.5 / 0.2 / 0.125 / 0.1 / 0.05 first drives max|u| '
+                                'past 1e2 at (0-based) step 8 / 11 / 15 / 18 / 51 '
+                                'respectively, with max|u| between 1.8e2 and 6.8e2 at '
+                                'that step, and the field then overflows to inf/NaN '
+                                'about eight steps later, long before step 120 -- '
+                                'while all three LinearProblem.solver objects keep '
+                                'reporting CONVERGED_ITS on every single step, also '
+                                'after the field is NaN. On that same mesh dt = 0.02 '
+                                'survives all 120 steps with max|u| staying at '
+                                '1.000000, so the threshold there lies between 0.02 '
                                 'and 0.05, i.e. well below h itself. The exact same dt '
                                 'values look perfectly healthy (max|u| between 1.03 '
                                 'and 1.57) when the loop is stopped at a fixed end '
@@ -4222,7 +4312,9 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                   'ufl.variable to mark it as the differentiation '
                                   'target, define W(F_var), then P = ufl.diff(W, '
                                   'F_var) yields the 1st Piola-Kirchhoff stress as a '
-                                  'ufl.VariableDerivative expression directly usable '
+                                  'VariableDerivative expression (class '
+                                  'ufl.classes.VariableDerivative; there is no '
+                                  'top-level ufl.VariableDerivative) directly usable '
                                   'inside the residual ufl.inner(P, grad(v))*dx form. '
                                   'Signal: type(ufl.variable(F)) is '
                                   'ufl.classes.Variable; type(ufl.diff(W, '
@@ -4718,12 +4810,18 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                   'the only real question is the '
                                                   'preconditioner.',
                                    'pitfalls': ['Never trust a solve without reading '
-                                                'getConvergedReason(). Signal: a '
-                                                'singular elasticity system returns '
-                                                'reason 4 (CONVERGED_ITS) from pc_type '
-                                                'lu while the answer is garbage; with '
-                                                'cg the reason is -4 (DIVERGED_DTOL) '
-                                                'and still no exception.',
+                                                'getConvergedReason(). Signal: a singular '
+                                                'elasticity system (bcs=[]) returns reason 4 '
+                                                '(CONVERGED_ITS) from pc_type lu while the answer '
+                                                'is not unique -- garbage of order 1e6-1e9 m for '
+                                                'a load with a net resultant such as gravity; '
+                                                'with plain cg (default preconditioner) the '
+                                                'reason is -4 (DIVERGED_DTOL) for such a load but '
+                                                '2 (converged) for a self-equilibrated thermal '
+                                                'load, and cg + hypre or cg + gamg give -8 '
+                                                '(DIVERGED_INDEFINITE_PC) or -10 '
+                                                '(DIVERGED_INDEFINITE_MAT); none of these raises '
+                                                'an exception.',
                                                 'Do not assert tight bounds on the '
                                                 'temperature at the default ksp_rtol. '
                                                 'Signal: a check like `T.x.array.max() '
@@ -4952,14 +5050,18 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                      'different max(abs(u)) while the strain energy is '
                                      'identical), while for a load with a net '
                                      'resultant such as gravity you get max(abs(u)) of '
-                                     'order 1e7-1e8 m with a true residual '
-                                     'norm(A*u-b)/norm(b) between 1 and 100. With '
-                                     '{"ksp_type": "cg"} the reason is -4 '
-                                     '(DIVERGED_DTOL), and adding '
-                                     '"ksp_error_if_not_converged": True finally '
-                                     'raises `petsc4py.PETSc.Error: error code 91` '
-                                     'with the line `KSPSolve() has not converged, '
-                                     'reason DIVERGED_DTOL`. Fix by adding a minimal '
+                                     'order 1e6-1e9 m with a true residual '
+                                     'norm(A*u-b)/norm(b) between about 1 and 1000. '
+                                     'With {"ksp_type": "cg"} a load with a net '
+                                     'resultant gives reason -4 (DIVERGED_DTOL), and '
+                                     'adding "ksp_error_if_not_converged": True raises '
+                                     '`petsc4py.PETSc.Error: error code 91` with the '
+                                     'line `KSPSolve() has not converged, reason '
+                                     'DIVERGED_DTOL`; for the self-equilibrated '
+                                     'thermal load cg instead converges (reason 2) to '
+                                     'one member of the non-unique solution family and '
+                                     'nothing is raised, so a missing Dirichlet set is '
+                                     'not detected that way. Fix by adding a minimal '
                                      'constraint set (3 scalar constraints in 2D, 6 in '
                                      '3D); any two minimal sets give the same strain '
                                      'energy and the same stress. (Executed on dolfinx '
@@ -5746,35 +5848,38 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                       'A*c^2*(1-c)^2 sit at 0 and 1, '
                                                       'and the discrete solution '
                                                       'overshoots slightly past both'}},
-                   'pitfalls': ['[Numerical] The system is stiff and the time step '
-                                'must be small, but the failure at a wrong dt is NOT '
-                                'what is usually claimed. Executed on a unit square '
-                                'with lmbda = 1e-2, M = 1, theta = 0.5 and a 0.63 +/- '
-                                '0.01 random initial concentration, the string '
-                                "'DIVERGED_FNORM_NAN' never appeared at any dt. What "
-                                'happens instead has two distinct regimes. TOO LARGE '
-                                '(dt >= 1e-2): Newton converges easily, 2-4 iterations '
-                                'per step, and there is no error of any kind, but the '
-                                'scheme DAMPS the perturbation instead of amplifying '
-                                'it -- at dt = 1 and dt = 0.1 the concentration is '
-                                'uniform at the initial mean to four significant '
-                                'figures after the very first step, and at dt = 1e-2 '
-                                'its spread shrinks from about 2e-2 to about 1.7e-3 '
-                                'over five steps. No phase separation ever occurs: a '
-                                'completely silent physical failure. INTERMEDIATE (dt '
-                                'about 1e-5 to 1e-3): Newton fails in the first or '
-                                "second step, printing 'Nonlinear <prefix> solve did "
-                                "not converge due to DIVERGED_LINE_SEARCH' "
-                                "(getConvergedReason() == -6) or '... due to "
-                                "DIVERGED_MAX_IT' (getConvergedReason() == -5), with "
-                                'the residual norm stuck around 1e-3 to 1e-5. Only dt '
-                                'of order 5e-6 both converges and produces phase '
-                                'separation. Signal: watch BOTH getConvergedReason() '
-                                'and the spread of c -- a converged step whose min(c) '
-                                'and max(c) stay equal to the initial mean means the '
-                                'step is too big, not that the model is fine. '
-                                '(Verified by execution on dolfinx 0.10.0 at dt = 1, '
-                                '1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 5e-6.)',
+                   'pitfalls': ['[Numerical] The system is stiff and the time step must be '
+                                'small, but the failure at a wrong dt is NOT what is usually '
+                                'claimed, and it depends on the mesh. Executed with the example '
+                                'above (lmbda = 1e-2, M = 1, theta = 0.5, a 0.63 +/- 0.01 '
+                                "random initial concentration from the example's seed), the "
+                                "string 'DIVERGED_FNORM_NAN' never appeared at any dt. TOO "
+                                'LARGE (dt >= 1e-2): on 64x64 and 96x96 meshes Newton converges '
+                                'easily, 1-3 iterations per step, and there is no error of any '
+                                'kind, but the scheme DAMPS the perturbation instead of '
+                                'amplifying it -- the spread max(c) - min(c) falls from 2e-2 to '
+                                'about 2e-6 in the first step at dt = 1, to about 2e-5 at dt = '
+                                '0.1 and to about 2e-4 at dt = 1e-2, and stays below 1e-3 over '
+                                'five steps. No phase separation occurs: a completely silent '
+                                "physical failure. On the example's own 48x48 mesh the same dt "
+                                'values behave differently: dt = 1 stops with DIVERGED_MAX_IT '
+                                '(getConvergedReason() == -5) in the first step, dt = 0.1 with '
+                                'DIVERGED_LINE_SEARCH (-6) at step 4, and at dt = 1e-2 the '
+                                'spread first drops to 5e-4 and then regrows to 4e-2 by step 5. '
+                                'INTERMEDIATE (dt = 1e-4 and 1e-3): Newton fails within the '
+                                'first four steps on all three meshes, with '
+                                'getConvergedReason() == -6 (DIVERGED_LINE_SEARCH) or -5 '
+                                '(DIVERGED_MAX_IT) and the residual norm stalled between about '
+                                "1e-5 and 1e-1; PETSc prints 'Nonlinear <prefix> solve did not "
+                                "converge due to DIVERGED_LINE_SEARCH' (or '... due to "
+                                "DIVERGED_MAX_IT') only when snes_converged_reason is set. dt = "
+                                '1e-5 and dt = 5e-6 both converge and produce phase separation. '
+                                'Signal: watch BOTH getConvergedReason() and the spread of c -- '
+                                'a converged step whose min(c) and max(c) stay equal to the '
+                                'initial mean means the step is too big, not that the model is '
+                                'fine. (Verified by execution on dolfinx 0.10.0 with PETSc '
+                                '3.24.5 at dt = 1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5 on 48x48, 64x64 '
+                                'and 96x96 meshes, and at dt = 5e-6 on 48x48.)',
                                 '[Numerical] The initial condition must contain a '
                                 "random perturbation. The commonly quoted rule that 'c "
                                 '= 0.5 exactly gives no phase separation because it is '
@@ -6170,11 +6275,16 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                              'dolfinx.default_scalar_type returns numpy.float64 in a '
                              'real build; '
                              'numpy.issubdtype(dolfinx.default_scalar_type, '
-                             'np.complexfloating) is False — assembling a ufl form '
-                             'with an imaginary coefficient then yields a wrong '
-                             'real-valued Function with the imaginary part silently '
-                             'dropped. (Verified empirically in the ofa-fenicsx '
-                             'env.)']},
+                             'np.complexfloating) is False. A form with a complex '
+                             'literal (e.g. 1j*v*ufl.dx) is then rejected by fem.form '
+                             'with ValueError: Unexpected complex value in real '
+                             'expression., and a complex fem.Constant or complex-dtype '
+                             'Function in a float64 form raises TypeError: __init__(): '
+                             'incompatible function arguments. Only '
+                             'Function.interpolate of a complex Python callable drops '
+                             'the imaginary part, with ComplexWarning: Casting complex '
+                             'values to real discards the imaginary part. (Verified by '
+                             'execution on the real dolfinx 0.10.0 build.)']},
  'reaction_diffusion': {'description': 'Systems of coupled reaction-diffusion '
                                        'equations in dolfinx 0.10: several chemical '
                                        'species that diffuse and react with each '
@@ -6518,26 +6628,42 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                                'available correctness '
                                                                'check. A Dirichlet bc '
                                                                'on one species of a '
-                                                               'mixed space needs the '
+                                                               'mixed space with a '
+                                                               'spatially varying value '
+                                                               'needs the '
                                                                'collapsed sub-space in '
                                                                'BOTH the dof lookup '
                                                                'and the value '
-                                                               'Function.',
-                                                'pitfalls': ['The dof lookup for one '
-                                                             'species needs the '
-                                                             '(sub-space, '
-                                                             'collapsed-space) PAIR, '
-                                                             'and the value must be a '
-                                                             'Function on the '
-                                                             'collapsed space. Signal: '
-                                                             'every other combination '
-                                                             'raises TypeError: '
-                                                             '__init__(): incompatible '
-                                                             'function arguments. The '
-                                                             'following argument types '
-                                                             'are supported: ... with '
-                                                             'a line Invoked with '
-                                                             'types: '
+                                                               'Function; a constant '
+                                                               'value can instead be a '
+                                                               'fem.Constant with the '
+                                                               'plain W.sub(i) dof '
+                                                               'array.',
+                                                'pitfalls': ['A Dirichlet bc on one species has two '
+                                                             'valid spellings. (a) For a value that '
+                                                             'varies in space, use a Function on the '
+                                                             'collapsed space together with the '
+                                                             '(sub-space, collapsed-space) PAIR: V0, '
+                                                             '_ = W.sub(0).collapse(); dofs = '
+                                                             'fem.locate_dofs_topological((W.sub(0), '
+                                                             'V0), fdim, facets); fem.dirichletbc(g, '
+                                                             'dofs, W.sub(0)) with g = '
+                                                             'fem.Function(V0). (b) For a constant '
+                                                             'value, use a fem.Constant (or a '
+                                                             'scalar) with the plain dof array: '
+                                                             'fem.dirichletbc(fem.Constant(msh, '
+                                                             '1.5), '
+                                                             'fem.locate_dofs_topological(W.sub(0), '
+                                                             'fdim, facets), W.sub(0)); the '
+                                                             "Constant's size must equal the "
+                                                             'sub-space block size. Signal: mixing '
+                                                             'the two (a Constant with the pair, a '
+                                                             'Function with the plain array) or '
+                                                             'omitting W.sub(0) raises TypeError: '
+                                                             '__init__(): incompatible function '
+                                                             'arguments. The following argument '
+                                                             'types are supported: ... with a line '
+                                                             'such as Invoked with types: '
                                                              'dolfinx.cpp.fem.DirichletBC_float64, '
                                                              'dolfinx.cpp.fem.Constant_float64, '
                                                              'list, '
@@ -6795,18 +6921,22 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                      'plus the index array that maps its dofs into the '
                                      'parent vector, so w.x.array[sub_map] is that '
                                      "species' block).",
-                                     '[API] A Dirichlet condition on ONE species needs '
-                                     'the collapsed sub-space in both the dof lookup '
-                                     'and the value. The only combination that works '
-                                     'is: V0, _ = W.sub(0).collapse(); dofs = '
+                                     '[API] A Dirichlet condition on ONE species of a '
+                                     'mixed space has two valid spellings. For a '
+                                     'spatially varying value: V0, _ = '
+                                     'W.sub(0).collapse(); dofs = '
                                      'fem.locate_dofs_topological((W.sub(0), V0), '
                                      'fdim, facets); g = fem.Function(V0); bc = '
-                                     'fem.dirichletbc(g, dofs, W.sub(0)). Signal: '
-                                     '[MEASURED] passing a fem.Constant instead of a '
-                                     'Function on V0, or calling '
-                                     'locate_dofs_topological(W.sub(0), ...) without '
-                                     'the space pair, or omitting the trailing '
-                                     'W.sub(0), all raise the same TypeError: '
+                                     'fem.dirichletbc(g, dofs, W.sub(0)). For a '
+                                     'constant value: bc = '
+                                     'fem.dirichletbc(fem.Constant(msh, val), '
+                                     'fem.locate_dofs_topological(W.sub(0), fdim, '
+                                     "facets), W.sub(0)), where the Constant's size "
+                                     'must equal the sub-space block size. Signal: '
+                                     '[MEASURED] mixing them (a fem.Constant with the '
+                                     '(W.sub(0), V0) pair, a Function on V0 with the '
+                                     'plain W.sub(0) dof array) or omitting the '
+                                     'trailing W.sub(0) all raise the same TypeError: '
                                      '__init__(): incompatible function arguments. The '
                                      'following argument types are supported: ... '
                                      'ending in a line such as Invoked with types: '
@@ -6919,17 +7049,23 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                      'below 1.0; even at forward rate 1 the theta=0 '
                                      'run blows up at dt=0.05. theta=0 becomes stable '
                                      'again at dt = 2e-3 and below. Crank-Nicolson '
-                                     '(theta=0.5) survives but its line search starts '
-                                     'failing: SNES returns reason -6 '
-                                     '(DIVERGED_LINE_SEARCH) at forward rate 100 with '
-                                     'dt=0.01. Verified on triangles and '
-                                     'quadrilaterals at P1 and P2. CRITICAL detail: on '
-                                     'the diverging steps the SNES still reports '
-                                     'converged reason 3 -- the nonlinear solver is '
-                                     'solving each step correctly, the SCHEME is '
-                                     'unstable -- so you must test the field '
-                                     '(np.isfinite and a magnitude bound), not just '
-                                     'the solver reason.',
+                                     '(theta=0.5) stays bounded, but at forward rate '
+                                     '100 with dt=0.01 its Newton line search stalls '
+                                     'in the first step (lambda shrinks to about 1e-6 '
+                                     'while ||F|| stays near 0.575) and SNES returns a '
+                                     'negative reason whose code depends on the '
+                                     "element and on snes_max_it: with the example's "
+                                     'snes_max_it=30 it is -5 (DIVERGED_MAX_IT) on P1 '
+                                     'and P2 triangles and P1 quadrilaterals and -6 '
+                                     '(DIVERGED_LINE_SEARCH) on P2 quadrilaterals; '
+                                     'with snes_max_it=100, P1 triangles give -6 as '
+                                     'well. Verified on triangles and quadrilaterals '
+                                     'at P1 and P2. CRITICAL detail: on the diverging '
+                                     'steps the SNES still reports converged reason 3 '
+                                     '-- the nonlinear solver is solving each step '
+                                     'correctly, the SCHEME is unstable -- so you must '
+                                     'test the field (np.isfinite and a magnitude '
+                                     'bound), not just the solver reason.',
                                      '[Integration] An external stiff-ODE package is '
                                      'NOT required for high Damkohler numbers in '
                                      "dolfinx; the previously written claim that 'for "
@@ -7107,44 +7243,22 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                    'checkerboard modes. The LBB '
                                                    'constant collapsing with h is the '
                                                    'diagnostic for inf-sup failure.',
-                                                   '[Numerical] Taylor-Hood (P2/P1) or '
-                                                   '(P2/DG0) satisfy inf-sup; P1/P0 '
-                                                   'does NOT. Signal: P1/P0 does not '
-                                                   'give you a DEGRADED convergence '
-                                                   'rate - it gives you no rate at all, '
-                                                   'because it does not solve. The '
-                                                   'bc-applied P1/DG0 saddle-point '
-                                                   'matrix is genuinely singular and '
-                                                   'its numerical null dimension GROWS '
-                                                   'with refinement, the MUMPS direct '
-                                                   'solve comes back with a NEGATIVE '
-                                                   'converged reason (-11, '
-                                                   'DIVERGED_PCSETUP_FAILED), and the '
-                                                   'returned field is not finite, so '
-                                                   'the error is inf at every level and '
-                                                   'there is nothing to fit a slope to. '
-                                                   'Check `getConvergedReason() > 0` '
-                                                   'and `np.isfinite(...).all()` on the '
-                                                   'result, and the null dimension of '
-                                                   'the bc-applied matrix across two '
-                                                   'refinements. Taylor-Hood on the '
-                                                   'same manufactured problem solves at '
-                                                   'every level with a finite error '
-                                                   'that falls under refinement. '
-                                                   'IMPORTANT CORRECTION: an earlier '
-                                                   'version of this entry said the '
-                                                   'P1/P0 convergence-rate test '
-                                                   'stagnates at first order while '
-                                                   'P2/P1 achieves second order, and '
-                                                   'offered a Mandel cross-check. '
-                                                   'Neither is observable - the '
-                                                   'stagnation never appears because '
-                                                   'the study cannot run, and the '
-                                                   'Mandel comparison presumes a P1/P0 '
-                                                   'answer that does not exist. Watch '
-                                                   'for a singular system and a '
-                                                   'non-finite result, not for a poor '
-                                                   'convergence order. (Verified by execution on dolfinx 0.10.0, 2026-08-06.)',
+                                                   '[Numerical] Taylor-Hood (P2/P1) or (P2/DG0) satisfy inf-sup; P1/P0 '
+                                                   'does NOT. Signal: in the incompressible limit (no -(1/lambda)*p*q '
+                                                   'term, clamped boundary) the bc-applied P1/DG0 saddle-point matrix is '
+                                                   'genuinely singular: its numerical null dimension grows with '
+                                                   'refinement (14 at 4x4, 30 at 8x8), and the MUMPS direct solve comes '
+                                                   'back with a NEGATIVE converged reason (-11, DIVERGED_PCSETUP_FAILED) '
+                                                   'and a non-finite field at every level. With the -(1/lambda)*p*q term '
+                                                   'of this entry the matrix is nonsingular and the outcome depends on nu '
+                                                   'and the mesh: at nu = 0.49 and 0.499, P1/DG0 solves (reason 4, finite '
+                                                   'field) from 4x4 to 64x64 but is far too stiff on coarse meshes '
+                                                   '(max|u| 0.0012 against 0.0192 for Taylor-Hood at 4x4, nu = 0.499), '
+                                                   'and at nu = 0.4999 it solves at 4x4 and 8x8 while MUMPS fails (-11, '
+                                                   'non-finite field) from 16x16 on. Taylor-Hood solves at every level. '
+                                                   'Check `getConvergedReason() > 0` and `np.isfinite(...).all()` on the '
+                                                   'result, and compare the displacement with a Taylor-Hood run on the '
+                                                   'same mesh. (Verified by execution on dolfinx 0.10.0.)',
                                                    '[Numerical] Penalty method (large '
                                                    'kappa) is alternative but '
                                                    'introduces parameter sensitivity. '
@@ -7389,12 +7503,19 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                  'facet tag. A displacement-driven '
                                                  'setup is safer, because a body held '
                                                  'only by contact still has rigid-body '
-                                                 'modes. mesh.meshtags does NOT '
-                                                 'require the facet array to be sorted '
-                                                 'on this release - passing it '
-                                                 'reversed gives bit-identical results '
-                                                 '- but sorting it is still the '
-                                                 'conventional form.',
+                                                 'modes. mesh.meshtags requires the '
+                                                 'entity array to be sorted and '
+                                                 'duplicate-free (documented '
+                                                 'precondition; only debug builds '
+                                                 "check it and raise 'MeshTag data is "
+                                                 "not sorted'). Release builds accept "
+                                                 'an unsorted array silently, but '
+                                                 'assembly assumes the order when it '
+                                                 'strips ghost entities, so unsorted '
+                                                 'tags that include ghosts give wrong '
+                                                 'integrals in parallel. Always pass '
+                                                 'np.sort(...) (or reorder the values '
+                                                 'with np.argsort).',
                                      'explanation': 'The contact constraint itself is '
                                                     'NOT a Dirichlet condition - it '
                                                     'lives in the residual. Dirichlet '
@@ -7575,7 +7696,12 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                                 'condition-number message. Signal: '
                                                 "'Nonlinear <prefix> solve did not "
                                                 'converge due to DIVERGED_DTOL '
-                                                "iterations 1'"]},
+                                                "iterations N' (printed when "
+                                                'snes_converged_reason is set), where '
+                                                'N depends on the line search: 1 with '
+                                                "snes_linesearch_type 'basic', 6 with "
+                                                "the example's 'l2' (kappa = 1e8 * E / "
+                                                'h).']},
              'contact_search': {'REQUIRED': 'For a rigid obstacle described '
                                             'analytically (a plane, a sphere) no '
                                             'search is needed at all: write the gap '
@@ -7697,21 +7823,24 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                           'every monitor enabled the only lines emitted are the SNES '
                           'function norms and the converged-reason line. Signal: what '
                           "actually appears is 'Nonlinear <prefix> solve did not "
-                          "converge due to DIVERGED_DTOL iterations 1' with "
-                          'getConvergedReason() returning -9; with '
-                          "snes_linesearch_type 'bt' it is instead "
+                          "converge due to DIVERGED_DTOL iterations N' with "
+                          'getConvergedReason() returning -9. N is 1 with '
+                          "snes_linesearch_type 'basic', where the residual after the "
+                          'first Newton step grows in direct proportion to the '
+                          "penalty; with the 'l2' line search of the example the "
+                          'first five iterations do not depend on the penalty and it '
+                          'trips at iteration 6 (measured at 1e8, 1e10 and 1e12 * E / '
+                          "h). With snes_linesearch_type 'bt' it is instead "
                           'DIVERGED_LINE_SEARCH with reason -6. The linear solve '
                           'inside is perfectly healthy - the KSP monitor reports '
                           "'Linear <prefix> solve converged due to CONVERGED_ITS "
-                          "iterations 1' in the same run. The mechanism is that the "
-                          'residual norm after the first Newton step grows in direct '
-                          'proportion to the penalty, so it crosses the default '
-                          'snes_divergence_tolerance of 10000.0 (relative to the '
-                          'initial residual) long before conditioning is a real '
-                          'problem. Verified in 2D and 3D, on triangles, '
-                          'quadrilaterals and tetrahedra, at degree 1 and degree 2; '
-                          'the exact penalty value at which it trips depends on the '
-                          'line search.',
+                          "iterations 1' in the same run. With 'basic' and 'l2' the "
+                          'residual crosses the default snes_divergence_tolerance of '
+                          '10000.0 (relative to the initial residual) long before '
+                          'conditioning is a real problem. Verified in 2D and 3D, on '
+                          'triangles, quadrilaterals and tetrahedra, at degree 1 and '
+                          'degree 2; the exact penalty value at which it trips '
+                          'depends on the line search.',
                           '[Numerical] If a very stiff penalty is genuinely needed, do '
                           'not just raise it and hope - use penalty continuation, i.e. '
                           'solve with a modest penalty first and then re-solve with '
@@ -8410,16 +8539,21 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                            'polynomial degree, so a value copied from a degree-1 '
                            'example can break a degree-2 run. Signal: the identical '
                            'notched specimen runs happily at degree 1 with a residual '
-                           'stiffness far below one, but at degree 2 the very first '
-                           'displacement solve of the very first load step fails with '
+                           'stiffness far below one (k_res = 1e-6), but at degree 2 a '
+                           'displacement solve inside the staggered loop fails with '
                            'SNES reporting DIVERGED_MAX_IT (getConvergedReason() == '
-                           '-5), and it keeps failing when the Newton iteration limit '
-                           "is raised tenfold or the line search is changed to 'bt' or "
-                           "'l2' (which fails as DIVERGED_LINE_SEARCH, reason -6, "
-                           'instead). Raising k_res by a couple of orders of magnitude '
-                           'makes the same degree-2 run converge. The cause is the '
-                           'nearly-zero stiffness left in fully broken elements, which '
-                           'higher-order elements feel much more.',
+                           '-5). The very first solve, with d = 0, still converges. '
+                           'With only the displacement space at degree 2 it fails on '
+                           'the second staggered sweep of the first load step; with '
+                           'displacement and damage both at degree 2 it fails at load '
+                           'step 5 of the example. In the displacement-only variant it '
+                           'keeps failing there with -5 when the Newton iteration '
+                           'limit is raised tenfold, when the line search is changed '
+                           "to 'bt' or 'l2', and when k_res is raised to 1e-4; k_res = "
+                           '1e-2 makes both degree-2 variants run through all load '
+                           'steps. The cause is the nearly-zero stiffness left in '
+                           'fully broken elements, which higher-order elements feel '
+                           'much more.',
                            '[API] There is no phase-field anything in DOLFINx, and the '
                            'third-party frameworks are not installed by default - '
                            'write the staggered scheme yourself. Signal: `import '
@@ -8845,15 +8979,20 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                              'subdomain_data=ct)\n'
                                              'The entity array and the value array '
                                              'must have the same length and correspond '
-                                             'element by element. Sorting a '
-                                             'concatenated facet array with np.argsort '
-                                             'before calling meshtags is the '
-                                             'conventional form and is what the '
-                                             'example does; an unsorted array is also '
-                                             'accepted on this version and integrates '
-                                             'correctly.',
+                                             'element by element. The entity array '
+                                             'must also be sorted and duplicate-free '
+                                             '(documented meshtags precondition), so '
+                                             'sort a concatenated facet array with '
+                                             'np.argsort before calling meshtags, as '
+                                             'the example does. Release builds do not '
+                                             'check this, but unsorted tags that '
+                                             'include ghost entities integrate '
+                                             'incorrectly in parallel.',
                                  'OPTIONAL': 'Cell tags can also come from a gmsh .msh '
-                                             'file through dolfinx.io.gmshio, which is '
+                                             'file through dolfinx.io.gmsh.read_from_msh '
+                                             '(the returned MeshData carries '
+                                             '.cell_tags; dolfinx.io.gmshio no longer '
+                                             'exists in 0.10), which is '
                                              'the practical route for a non-trivial '
                                              'porous geometry. Any integer tags work; '
                                              'the numbers only have to match the '
@@ -10091,8 +10230,13 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                     'demo_types_url': 'https://docs.fenicsproject.org/dolfinx/main/python/demos/demo_types.html',
                     'pitfalls': ['PETSc must be compiled with '
                                  '--with-scalar-type=complex for complex problems',
-                                 'Cannot mix real and complex in same session — it is '
-                                 'a build-time choice',
+                                 'The PETSc scalar type is a build-time choice (a real '
+                                 'petsc4py cannot assemble or solve complex forms '
+                                 'through dolfinx.fem.petsc), but DOLFINx itself can '
+                                 'compile and assemble float32/float64/complex64/'
+                                 'complex128 forms and Functions in the same session '
+                                 'via dtype=..., solving with scipy (see '
+                                 'demo_types.py)',
                                  'Some solvers (CG) do not work with complex '
                                  'arithmetic — use GMRES',
                                  'inner(a,b) in UFL conjugates the second argument for '
@@ -10173,7 +10317,15 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
                                  'ZeroBaseForm': 'ufl.ZeroBaseForm removes need for '
                                                  'dummy 0*v*dx to compile empty forms',
                                  'uniform_refine': 'dolfinx.mesh.uniform_refine() '
-                                                   'added (all CellTypes supported)',
+                                                   'added (2D/3D meshes only - intervals '
+                                                   "raise 'Uniform refinement only for 2D "
+                                                   "and 3D meshes'; triangle, "
+                                                   'quadrilateral, tetrahedron, hexahedron '
+                                                   'and prism work; pyramids need '
+                                                   'tetrahedra in the same mesh; call '
+                                                   'create_entities(1), plus '
+                                                   'create_entities(2) for '
+                                                   'hex/prism/pyramid meshes)',
                                  'vtkhdf_reader': 'dolfinx.io.vtkhdf.read_mesh() added '
                                                   "(Kitware's next-gen format)",
                                  'branching_meshes': 'T-joints (3+ cells per facet) '
@@ -10416,7 +10568,7 @@ _FENICS_KNOWLEDGE = {'element_catalog': {'description': 'Complete catalog of fin
 _DEALII_KNOWLEDGE = {
     "poisson": {
         "description": "Poisson equation solved with deal.II (step-3/4/5). Foundation of all elliptic PDEs.",
-        "tutorial_steps": {"step-3": "Basic Poisson on hyper_cube", "step-4": "Dim-independent with non-constant coefficients", "step-5": "Adaptive refinement with Kelly estimator", "step-6": "Higher-order elements + automatic adaptivity", "step-7": "Helmholtz + convergence tables"},
+        "tutorial_steps": {"step-3": "Basic Poisson on hyper_cube", "step-4": "Dim-independent with non-constant coefficients", "step-5": "Variable coefficient + grid read from disk (GridIn) + global refinement", "step-6": "Higher-order elements + automatic adaptivity", "step-7": "Helmholtz + convergence tables"},
         "function_space": "FE_Q<dim>(degree) — tensor-product Lagrange on quads/hexes",
         "element_catalog": {
             "FE_Q(1)": "Bilinear (2D) / trilinear (3D), standard choice",
@@ -10432,7 +10584,7 @@ _DEALII_KNOWLEDGE = {
         },
         "grid_generators": {
             "hyper_cube": "[0,1]^dim, all boundary_id=0 (use colorize=true for distinct IDs)",
-            "hyper_rectangle": "Box [p1,p2], boundary_ids: 0=left,1=right,2=bottom,3=top,4=back,5=front",
+            "hyper_rectangle": "Box [p1,p2]; colorize=false (default): all boundary_id=0 in 2D/3D (1D: left=0, right=1 always); colorize=true: x-=0,x+=1,y-=2,y+=3,z-=4,z+=5",
             "subdivided_hyper_rectangle": "Box with per-axis subdivision control",
             "hyper_ball": "Circular disk / ball with SphericalManifold",
             "hyper_shell": "Annulus / spherical shell (inner/outer radius)",
@@ -10445,8 +10597,8 @@ _DEALII_KNOWLEDGE = {
         "output": "DataOut → VTU (standard), also VTK, gnuplot, SVG",
         "pitfalls": [
             "Call triangulation.refine_global() BEFORE distributing DOFs",
-            "Boundary IDs on hyper_cube: ALL faces = 0 by default; use colorize=true or hyper_rectangle",
-            "hyper_rectangle colorized: left=0, right=1, bottom=2, top=3, back=4, front=5",
+            "Boundary IDs on hyper_cube: ALL faces = 0 by default; use colorize=true (hyper_rectangle likewise gives all 0 in 2D/3D unless colorize=true)",
+            "hyper_rectangle colorized (colorize=true): x-=0, x+=1, y-=2, y+=3, z-=4, z+=5",
             "Use DynamicSparsityPattern → copy_from → SparsityPattern (two-step)",
             "QGauss degree should be fe.degree + 1 for optimal convergence",
             "For Neumann-only: solution up to constant — need mean-value constraint",
@@ -10535,9 +10687,9 @@ _DEALII_KNOWLEDGE = {
         ],
     },
     "advection_dg": {
-        "description": "Advection with DG elements (step-9/12). Discontinuous Galerkin for transport.",
+        "description": "Advection (step-9: SUPG on continuous FE_Q; step-12: DG). Discontinuous Galerkin for transport.",
         "tutorial_steps": {
-            "step-9": "Advection with DG-like stabilization + adaptive refinement",
+            "step-9": "Advection with streamline-diffusion (SUPG) stabilization on continuous FE_Q + multithreading (WorkStream) + adaptive refinement",
             "step-12": "DG for linear advection with MeshWorker framework",
             "step-30": "Anisotropic mesh refinement for DG advection",
         },
@@ -10549,10 +10701,18 @@ _DEALII_KNOWLEDGE = {
                 "DoFTools::make_flux_sparsity_pattern(). Signal: "
                 "using the regular make_sparsity_pattern() on a DG "
                 "discretization gives a matrix with missing off-"
-                "diagonal entries for face-coupling DOFs; assembly "
-                "then aborts with `SparseMatrix::add() requires "
-                "row/col to be in pattern` for every facet "
-                "contribution. (Audit 2026-06-02.)"
+                "diagonal entries for face-coupling DOFs; in a Debug "
+                "build assembly then aborts at the first face "
+                "contribution with ExcInvalidIndex: `You are trying "
+                "to access the matrix entry with index <i,j>, but "
+                "this entry does not exist in the sparsity pattern "
+                "of this matrix.` The check is an Assert, so a "
+                "Release build does not stop: the out-of-pattern "
+                "face entries are dropped (SparseMatrix::add) or "
+                "added into the next stored entry after the missing "
+                "column (AffineConstraints::distribute_local_to_global), "
+                "and the matrix is silently wrong. (Audit 2026-06-02; "
+                "corrected against deal.II 9.8.0-pre.)"
             ),
             (
                 "[Numerical] Interior penalty parameter (alpha "
@@ -10740,14 +10900,14 @@ _DEALII_KNOWLEDGE = {
         "description": "Complete catalog of deal.II GridGenerator functions for mesh creation.",
         "generators": {
             "hyper_cube": {"geometry": "Unit cube [0,1]^dim", "dims": "1D,2D,3D", "boundary_ids": "All = 0 (colorize=true for distinct)"},
-            "hyper_rectangle": {"geometry": "Axis-aligned box [p1,p2]", "dims": "1D,2D,3D", "boundary_ids": "x-=0,x+=1,y-=2,y+=3,z-=4,z+=5"},
+            "hyper_rectangle": {"geometry": "Axis-aligned box [p1,p2]", "dims": "1D,2D,3D", "boundary_ids": "2D/3D: all = 0 unless colorize=true (then x-=0,x+=1,y-=2,y+=3,z-=4,z+=5); 1D: x-=0,x+=1 always"},
             "subdivided_hyper_rectangle": {"geometry": "Box with per-axis subdivision control", "dims": "1D,2D,3D"},
             "hyper_ball": {"geometry": "Circular disk / ball", "dims": "2D,3D", "notes": "SphericalManifold attached"},
             "hyper_shell": {"geometry": "Annulus / spherical shell", "dims": "2D,3D", "notes": "Inner + outer radius"},
-            "hyper_L": {"geometry": "L-shaped domain", "dims": "2D", "notes": "Classic corner singularity benchmark"},
+            "hyper_L": {"geometry": "L-shaped domain (3D: Fichera corner)", "dims": "2D,3D", "notes": "Classic corner singularity benchmark"},
             "plate_with_a_hole": {"geometry": "Rectangle with cylindrical hole", "dims": "2D", "notes": "Stress concentration factor"},
             "channel_with_cylinder": {"geometry": "Flow channel with obstacle", "dims": "2D,3D", "notes": "DFG benchmark (Schäfer-Turek)"},
-            "cylinder": {"geometry": "Cylinder (circular cross-section)", "dims": "3D"},
+            "cylinder": {"geometry": "Cylinder along x (circular cross-section in 3D; in 2D the rectangle [-half_length,half_length]x[-radius,radius])", "dims": "2D,3D"},
             "cylinder_shell": {"geometry": "Hollow cylinder (pipe wall)", "dims": "3D"},
             "truncated_cone": {"geometry": "Cone frustum", "dims": "3D"},
             "cheese": {"geometry": "Rectangle with square holes", "dims": "2D,3D"},
@@ -10807,11 +10967,11 @@ _DEALII_KNOWLEDGE = {
         "step-2": "DOF setup and sparsity patterns",
         "step-3": "Poisson equation (basic)",
         "step-4": "Non-constant coefficients (dim-independent)",
-        "step-5": "Adaptive refinement (Kelly estimator)",
+        "step-5": "Variable coefficients, reading a grid from disk (GridIn), successively (globally) refined grids",
         "step-6": "Higher order elements + automatic adaptivity",
         "step-7": "Helmholtz + Neumann BCs + convergence tables",
         "step-8": "Elasticity (vector FE, FESystem)",
-        "step-9": "Advection with DG + adaptive refinement",
+        "step-9": "Advection with streamline-diffusion (SUPG) stabilization on continuous FE_Q + multithreading (WorkStream) + adaptive refinement",
         "step-12": "DG advection (MeshWorker framework)",
         "step-15": "Minimal surface (nonlinear, Newton)",
         "step-16": "Geometric multigrid for Laplace",
@@ -10901,9 +11061,16 @@ _CROSS_SOLVER_KNOWLEDGE = {
             "without external Exodus mesh dependencies."
         ),
         "key_pitfalls": [
-            "Elasticity NUMDOF=3 even in 2D (z-dof constrained to 0)",
+            "Elasticity in 2D has 2 DOFs per node and no z-dof (WALL before 4C 2026.2.0, 2-D SOLID from 4C 2026.2.0 on): "
+            "DIRICH needs NUMDOF >= 2 (a third entry is ignored; NUMDOF 1 aborts with "
+            "'1 DOFs given but 2 expected in Point Dirichlet boundary condition'); "
+            "structural NEUMANN needs NUMDOF >= 2 with the entries beyond 2 left off",
             "Element ordering: node IDs counter-clockwise for QUAD4",
-            "IO/RUNTIME VTK OUTPUT section required for ParaView output",
+            "Structure .vtu for ParaView needs BOTH IO/RUNTIME VTK OUTPUT with INTERVAL_STEPS (default -1 = off) "
+            "AND IO/RUNTIME VTK OUTPUT/STRUCTURE with OUTPUT_STRUCTURE: true plus at least one field such as "
+            "DISPLACEMENT: true (OUTPUT_STRUCTURE alone aborts with 'No data was written or writer was already "
+            "in final phase.'); either section alone writes no .vtu. Scalar transport writes .vtu with no IO "
+            "section at all",
         ],
     },
 }

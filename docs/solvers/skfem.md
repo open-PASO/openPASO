@@ -32,17 +32,17 @@ python check_install.py
 | `heat` | Steady heat conduction | 2-D | `2d`, `2d_steady` |
 | `heat_transient` | Time-dependent heat equation with backward Euler | 2-D | `2d` |
 | `helmholtz` | Helmholtz equation -Δu - k²u = f with complex arithmetic and absorbing BC | 2-D | `2d` |
-| `hydraulic_resistance` | Stokes flow through a 2D rectangular channel; computes resistance R=ΔP/Q against the Poiseuille closed-form 12μL/H³. Matches scikit-fem ex29. | 2-D | `2d` |
+| `hydraulic_resistance` | Stokes flow through a 2D rectangular channel; computes resistance R=ΔP/Q against the Poiseuille closed-form 12μL/H³. | 2-D | `2d` |
 | `hyperelasticity` | Neo-Hookean hyperelasticity with Newton iteration (manual assembly) | 2-D | `2d` |
 | `linear_elasticity` | Linear elasticity (plane strain) | 2-D | `2d` |
 | `mixed_elements` | Survey the H(div), H(curl) and L2/DG element families, each through its own formulation | 1-D, 2-D, 3-D | `survey` |
 | `mixed_poisson` | Mixed Poisson with Raviart-Thomas + DG (flux-conservative) | 2-D | `2d` |
 | `navier_stokes` | Navier-Stokes flow with Newton iteration (Taylor-Hood P2/P1) | 2-D | `2d` |
 | `nonlinear` | Nonlinear PDE with Newton iteration (manual Newton loop) | 2-D | `2d` |
-| `point_source` | Poisson with Dirac-delta point source — discrete RHS is N_i(x0) (Kronecker e_node for mesh-coincident source). Matches scikit-fem ex17 + ex38. | 2-D | `2d` |
+| `point_source` | Poisson with Dirac-delta point source — discrete RHS is N_i(x0) (Kronecker e_node for mesh-coincident source). Matches scikit-fem ex38. | 2-D | `2d` |
 | `poisson` | Poisson equation -Δu = f (assembly-level) | 2-D, 3-D | `2d`, `2d_tri`, `3d` |
 | `reaction_diffusion` | Reaction-diffusion system (Schnakenberg/Turing patterns) with Newton time-stepping | 2-D | `2d` |
-| `schrodinger` | 1D stationary Schrödinger eigenvalue problem -½ψ'' + V(x)ψ = Eψ. Default quantum harmonic oscillator V=½x² with analytic E_n = n+½. Matches scikit-fem ex39. | 1-D | `1d` |
+| `schrodinger` | 1D stationary Schrödinger eigenvalue problem -½ψ'' + V(x)ψ = Eψ. Default quantum harmonic oscillator V=½x² with analytic E_n = n+½. | 1-D | `1d` |
 | `stokes` | Stokes flow with Taylor-Hood P2/P1 or Mini element | 2-D | `2d` |
 | `time_dependent` | General time-dependent PDE with theta-method (backward Euler / Crank-Nicolson) | 2-D | `2d` |
 | `wave` | 2D scalar wave equation u_tt - c^2 Δu = 0 with explicit central-difference time integration and lumped mass (no per-step linear solve) | 2-D | `2d` |

@@ -52,20 +52,28 @@ KNOWLEDGE = {
                              "[modulate v_<name>] [subsonic <P> <T|NULL>]",
             "fix emit/surf": "fix <ID> emit/surf <mixID> <group-ID> [n <Np>] "
                              "[normal yes|no] [nevery <N>] [perspecies ...]",
-            "fix emit/face/file": "fix <ID> emit/face/face/file <mixID> <face> "
-                                  "<file> <Nx> <Ny> — spatially varying inflow",
+            "fix emit/face/file": "fix <ID> emit/face/file <mixID> <face> "
+                                  "<filename> <section-ID> [frac <f>] "
+                                  "[nevery <N>] [perspecies yes|no] "
+                                  "[region <regID>] — spatially varying "
+                                  "inflow read from one named section of "
+                                  "the file",
             "mixture": "mixture <mixID> <species...> nrho <n> vstream <vx> "
                        "<vy> <vz> temp <T> — these set the emitted flux",
-            "boundary": "the emit face must be 'o' or 's'; 'p' is rejected",
+            "boundary": "the emit face must not be periodic ('p' is rejected; "
+                        "so is ylo in an axisymmetric model); 'o', 'r' and "
+                        "'s' faces are accepted",
         },
         "solver": "SPARTA DSMC; run: spa_serial -in <deck>",
         "output_idioms": output_idioms("boundary tally idiom"),
         "pitfalls": [
             "[Setup] 'fix emit/face' cannot be attached to a PERIODIC face — "
             "particles already re-enter there, so an emit fix would "
-            "double-count. The check happens when the fix is defined. "
+            "double-count. The check happens when a run starts "
+            "(FixEmitFace::init), not when the fix is defined. "
             "Signal: 'ERROR: Cannot use fix emit/face on periodic boundary "
-            "(../fix_emit_face.cpp:182)'.",
+            "(../fix_emit_face.cpp:182)' (SPARTA 24Sep2025; 27Aug2026 raises "
+            "it from line 183).",
 
             "[Numerical] The emitted flux is set by the MIXTURE, not by "
             "'global nrho': an 'nrho' keyword on the emit mixture silently "
@@ -82,16 +90,20 @@ KNOWLEDGE = {
             "difference between an inflow boundary and an initial condition. "
             "Signal: NOT flatness of the Np column — an earlier wording said "
             "it 'decreases monotonically instead of levelling off' and that is "
-            "measurably false. A seeded box emitting on xlo alone drops ~28 % "
-            "over the first stats interval and then FLATTENS: over the last "
-            "interval it moves by a fraction of a percent, holding at a bit "
-            "under 60 % of the seeded count. The usual advice — run to steady "
-            "state and check that Np has flattened — therefore PASSES on the "
+            "measurably false. A seeded box emitting on xlo alone drops at "
+            "first and then FLATTENS, holding at a fraction of the seeded "
+            "count that depends on the case (about 87 % on this module's "
+            "default template seeded with 'create_particles air n 0', about "
+            "53 % at vstream 300); once flat it moves "
+            "by a fraction of a percent per interval when there are enough "
+            "particles to beat the sampling noise. The usual advice — run to "
+            "steady state and check that Np has flattened — therefore PASSES on the "
             "broken deck. The discriminating test is a second run that emits "
             "on every inflow face ('fix in emit/face <mix> xlo ylo yhi'): "
-            "that one holds within a couple of percent of the seeded count, "
+            "that one holds much closer to the seeded count (within a few "
+            "percent on the default template, about 92 % at vstream 300), "
             "while the "
-            "one-face run plateaus far below it and Nexit stays nonzero on "
+            "one-face run plateaus clearly below it and Nexit stays nonzero on "
             "both. Either seed the domain with create_particles as well, or "
             "emit on every inflow face.",
 
@@ -129,11 +141,18 @@ KNOWLEDGE = {
             "in a deck and never named by another command changes the run not "
             "at all — same particle count, same collision count, same exit "
             "count, step for step. Only the commands that take a region "
-            "argument see it (create_particles, create_grid, adapt_grid, the "
-            "fix emit family, fix ave/histo, dump particle). To obstruct a "
+            "argument see it (create_particles, create_grid, adapt_grid, "
+            "group <ID> grid|surf region, custom, the fix emit family, fix "
+            "ave/histo, dump particle). To obstruct a "
             "flow you need read_surf plus a surf_collide model. Styles are "
             "block, cylinder, sphere, plane, union and intersect; block takes "
-            "six bounds and accepts INF and EDGE; union and intersect take the "
+            "six bounds and accepts INF (there is no EDGE keyword: SPARTA "
+            "24Sep2025 silently reads a non-numeric bound such as EDGE as "
+            "0.0 and aborts with 'Illegal region block command' only if that "
+            "makes lo > hi, while SPARTA 27Aug2026 refuses it with 'ERROR: "
+            "Expected floating point parameter in input script or data "
+            "file'); union "
+            "and intersect take the "
             "COUNT of sub-regions first ('region u union 2 a b'); 'side out' "
             "inverts the selection. In a 2d run a sphere and a z-cylinder of "
             "the same radius select exactly the same cells. "
@@ -141,7 +160,9 @@ KNOWLEDGE = {
             "identical to one without it, which is why this has to be checked "
             "by reading the deck. The typo cases do speak: 'ERROR: "
             "Unrecognized region style (../domain.cpp:471)' for a style that "
-            "does not exist, and 'ERROR: Create_particles region does not "
+            "does not exist (line 471 on a development build of 26 Jun "
+            "2026; 450 in SPARTA 24Sep2025, 470 in 27Aug2026), and "
+            "'ERROR: Create_particles region does not "
             "exist (../create_particles.cpp:122)' for a name that was never "
             "defined. (Verified 2026-08-07)",
 
@@ -162,7 +183,7 @@ KNOWLEDGE = {
             "Signal: the run returns a negative status (SIGSEGV) with an empty "
             "stderr and no 'ERROR' string anywhere; under a debugger the "
             "faulting frame is ComputeSurf::surf_tally (src/compute_surf.cpp:"
-            "263) called from Update::move (src/update.cpp:364) — those are "
+            "263) called from Update::move (src/update.cpp:364) (line 573 in 27Aug2026) — those are "
             "names gdb reconstructs from the symbol table, both inside "
             "namespace SPARTA_NS, and SPARTA itself never prints them. "
             "A driver that only checks for the "

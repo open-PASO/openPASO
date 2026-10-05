@@ -8,7 +8,7 @@ Structures, fluids, coupled problems and particle methods.
 pip install KratosMultiphysics-all
 ```
 
-Use the `-all` package. The plain `KratosMultiphysics` 10.4 wheels are labelled for an older system library than they need, so on an older system they install without error and then fail to import.
+Use the `-all` package; it resolves to the 10.3.0 set. Among the plain `KratosMultiphysics` 10.4 wheels one is mislabelled: the 10.4.2 build-1 wheel is tagged manylinux_2_28 but links glibc 2.34 symbols, and pip selects it for `KratosMultiphysics==10.4.2` on glibc 2.28 to 2.33, where it installs without error and then fails to import. The 10.4.0, 10.4.3 and 10.4.4 wheels need only glibc 2.17, and an unpinned `pip install KratosMultiphysics` picks the newest release (10.4.4 in September 2026).
 
 Then check that openPASO sees it:
 

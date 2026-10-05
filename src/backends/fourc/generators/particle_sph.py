@@ -530,7 +530,13 @@ class ParticleSPHGenerator(BaseGenerator):
                     "execution 2026-08-07.)"
                 ),
                 (
-                    "[Input] The two open-boundary types are NOT "
+                    "[Input] (The PARTICLE DYNAMIC/SPH keys of 4C before "
+                    "2026.2.0. 4C 2026.2.0 and later have none of them: open "
+                    "boundaries are lists in "
+                    "their own section, PARTICLE DYNAMIC/OPEN BOUNDARIES, "
+                    "under DIRICHLET_BOUNDARIES and NEUMANN_BOUNDARIES, each "
+                    "with a BOUNDARY id and an OUTWARD_NORMAL and "
+                    "PLANE_POINT.) The two open-boundary types are NOT "
                     "symmetric, and only one of them tells you when it is "
                     "under-specified. A Dirichlet open boundary demands "
                     "DIRICHLET_FUNCT and a non-zero "

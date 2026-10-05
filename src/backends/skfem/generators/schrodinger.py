@@ -13,7 +13,9 @@ In atomic units (ℏ = m = ω = 1), E_n = (n + 1/2). The lowest 4
 eigenvalues are 0.5, 1.5, 2.5, 3.5 — and a P1 finite-element
 discretization on a fine mesh should reproduce these to 4+ digits.
 
-Mirrors scikit-fem upstream ex39 (1D Schrödinger).
+No upstream scikit-fem Schrödinger example; the closest pattern is
+ex16 (1D MeshLine generalized eigenproblem via
+eigsh(L, M=M, sigma=0.)).
 """
 
 
@@ -124,7 +126,7 @@ KNOWLEDGE: dict = {
             "E_n = (n + ½) (atomic units ℏ=m=ω=1). Generalized "
             "eigenvalue problem solved via "
             "scipy.sparse.linalg.eigsh with shift-invert (sigma=0) "
-            "to target the lowest k. Mirrors scikit-fem ex39."
+            "to target the lowest k."
         ),
         "weak_form": (
             "H ψ = E M ψ where "
@@ -215,19 +217,22 @@ KNOWLEDGE: dict = {
             "x=0 unless nx is large enough that h = 2L/nx is "
             "smaller than the curvature lengthscale (~1). For "
             "the default 4 lowest eigenvalues with L=8, nx=200 "
-            "gives h=0.08 ≪ 1 and error ~1e-4. Halving nx "
+            "gives h=0.08 ≪ 1 and max abs error ~5e-3 (E_0 "
+            "error ~2e-4). Halving nx "
             "quadruples the error (O(h²) for eigenvalues with "
             "P1). "
             "Signal: max_abs_error from "
-            "`scipy.sparse.linalg.eigsh` grows from ~1e-4 to "
-            "~1e-3 as `MeshLine` nx halves; convergence ratio ~4 "
+            "`scipy.sparse.linalg.eigsh` grows from ~5e-3 "
+            "(nx=200) to ~2e-2 (nx=100) to ~8e-2 (nx=50) as "
+            "`MeshLine` nx halves; convergence ratio ~4 "
             "between successive refinements (this is the right "
             "P1 rate; the surprise is if the ratio is NOT ~4, "
             "which indicates a bug in the `BilinearForm` "
             "assembly).",
         ],
         "references": [
-            "scikit-fem ex39 (1D Schrödinger)",
+            "scikit-fem ex16 (1D MeshLine eigsh pattern; no "
+            "upstream Schrödinger example)",
             "Griffiths, 'Introduction to Quantum Mechanics' 2nd "
             "ed., Ch. 2 (harmonic oscillator).",
             "Cross-backend: dealii step-25 (Sine-Gordon) and "

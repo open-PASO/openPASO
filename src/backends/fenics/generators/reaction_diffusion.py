@@ -27,8 +27,12 @@ KNOWLEDGE = {
             "linear-only solve on R(u,v) = u*v gives wrong "
             "steady-state \u2014 quadratic coupling means the linear "
             "problem is not the linearisation of the nonlinear "
-            "one. Use dolfinx.nls.petsc.NewtonSolver with the "
-            "UFL Jacobian. (Audit 2026-06-02.)"
+            "one. Use dolfinx.fem.petsc.NonlinearProblem(F, w, "
+            "bcs=..., petsc_options_prefix=..., petsc_options={...}) "
+            "and problem.solve() (PETSc SNES Newton; the Jacobian is "
+            "derived from F automatically). "
+            "dolfinx.nls.petsc.NewtonSolver is deprecated in 0.10. "
+            "(Audit 2026-06-02.)"
         ),
         (
             "[Numerical] Time stepping: backward Euler is robust; "
@@ -104,7 +108,8 @@ KNOWLEDGE = {
         (
             "[Numerical] Conservation: check mass integrals over "
             "time to verify correctness. Signal: for a closed "
-            "system (no source/sink, no_flux NeumannBC) the "
+            "system (no source/sink, zero-flux natural boundary "
+            "with no boundary term) the "
             "dolfinx fem.assemble_scalar integral of (u + v) "
             "*dx over the domain should be conserved; if it "
             "drifts > 0.1% per unit time, the time integrator "

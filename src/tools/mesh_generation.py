@@ -101,7 +101,8 @@ def _generate_l_domain_2d(mesh_size: float = 0.05, output_path: Path = None) -> 
     gmsh.option.setNumber("General.Terminal", 0)
     gmsh.model.add("L-domain")
 
-    # L-domain: [-1,1]^2 minus [0,1]x[-1,0] — matches deal.II hyper_L(-1,1)
+    # L-domain: [-1,1]^2 minus [0,1]x[-1,0]. NOT identical to deal.II
+    # hyper_L(-1,1), which removes [0,1]^2 (the mirror image in y).
     # Points (counterclockwise)
     p1 = gmsh.model.geo.addPoint(-1, -1, 0, mesh_size)
     p2 = gmsh.model.geo.addPoint(0, -1, 0, mesh_size)
@@ -333,8 +334,11 @@ def register_mesh_tools(mcp: FastMCP):
                 "mesh_size": mesh_size,
                 "xdmf": xdmf_msg,
                 "usage": {
-                    "fenics": f"mesh = meshio.read('{msh_path}') or gmsh.read('{msh_path}')",
-                    "dealii": "Use GridIn to read .msh, or use built-in GridGenerator::hyper_L()",
+                    "fenics": f"from mpi4py import MPI; from dolfinx.io import gmsh as gmshio; mesh = gmshio.read_from_msh('{msh_path}', MPI.COMM_WORLD, 0, gdim=2).mesh",
+                    "dealii": "Use GridIn to read .msh" + (
+                        "; GridGenerator::hyper_L() is NOT this domain: it removes [0,1]^2, the "
+                        "mirror image in y of this L-domain, which removes [0,1]x[-1,0]"
+                        if geometry.lower() == "l_domain" else ""),
                     "fourc": "Convert to Exodus (.e) via meshio for 4C",
                 },
             }, indent=2)

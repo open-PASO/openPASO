@@ -23,7 +23,9 @@ THREE CHECKS, NONE OF WHICH "IT COMPILED" CAN SATISFY
      that built the matrix. Measuring the projection error on the rule that
      defined the projection returns zero by construction and proves nothing.
 
-MEASURED ON deal.II 9.8.0-pre (Release) -- 41 of 41 classes built and passed,
+MEASURED ON deal.II 9.8.0-pre (Release; a snapshot from March 2026, before
+ReferenceCell became the class template ReferenceCell<dim> that 9.8.0
+ships) -- 41 of 41 classes built and passed,
 0 failed, and all 41 produce DISTINCT results. That last clause had to be
 earned: six pairs were reporting byte-identical lines, so 41 checks were only
 35 distinct outcomes. Five were continuous/discontinuous twins
@@ -38,6 +40,10 @@ built in real space, which is visible only on a cell that is NOT the reference
 cell, so both are checked on a distorted one. The mutation control (SURVEY_MUTATE, see the source) turns the
 checks red on demand: mapping mutation 7 failures, constant mutation 38.
 
+MEASURED ON deal.II 9.7.1 (Release, built by Spack) -- 40 built and passed,
+0 failed. FE_NedelecNodal was first released in 9.8.0, so on 9.7.1 the
+survey lists it under NOT ATTEMPTED instead of failing to compile.
+
 WHAT THE RUN FOUND, all of it silent -- nothing raised, nothing returned an
 error code, and every one of these produced a plausible-looking number:
 
@@ -45,10 +51,12 @@ error code, and every one of these produced a plausible-looking number:
     integrates the cell as 1/6 instead of 1/2, on a wedge as 0.0528 instead of
     1/2, on a pyramid as 4.0 instead of 4/3. MappingFE with the matching P1
     element gives the exact measure in all three cases.
-  * QGaussSimplex and QGaussWedge exist only up to n_points_1D = 4, and
-    QGaussPyramid only up to 2. Ask for more and deal.II hands back an EMPTY
-    rule; the only guard is a debug-only Assert, so in a Release build
-    FEValues accepts it, reinit() succeeds, and every integral is exactly 0.
+  * Up to 9.7.1, and in this 9.8.0-pre snapshot, QGaussSimplex and
+    QGaussWedge exist only up to n_points_1D = 4, and QGaussPyramid only up
+    to 2. Ask for more and deal.II hands back an EMPTY rule; the only guard
+    is a debug-only Assert, so in a Release build FEValues accepts it,
+    reinit() succeeds, and every integral is exactly 0. deal.II 9.8.0 builds
+    all three for any n_points_1D.
   * FE_Hermite reads the cell extents off MappingCartesian::InternalData and
     hits DEAL_II_ASSERT_UNREACHABLE() under any other mapping.
   * FE_Q_DG0 has a SINGULAR mass matrix on any closed mesh: the measured null
@@ -67,9 +75,10 @@ _SURVEY_CC = r'''// deal.II element survey, v2 -- every FE class this install de
 // THREE CHECKS, none of which can be satisfied by "it compiled":
 //
 //  0. THE QUADRATURE IS REAL. Sum JxW over the cell and compare with the
-//     reference cell's OWN declared volume. This exists because
-//     QGaussPyramid implements only n_points_1D 1 and 2; for any other value
-//     it leaves the rule EMPTY, and the only guard is a debug-only Assert.
+//     reference cell's OWN declared volume. This exists because up to
+//     deal.II 9.7.1 QGaussPyramid implements only n_points_1D 1 and 2 (9.8.0
+//     implements any); for any other value it leaves the rule EMPTY, and the
+//     only guard is a debug-only Assert.
 //     In a Release build FEValues then accepts a rule with zero points,
 //     reinit() succeeds, nothing throws, and every integral is exactly zero.
 //     v1 of this survey reported the pyramid mass matrix as "not SPD" and
@@ -165,40 +174,80 @@ static const double EXACT_TOL = 1e-10;   // the harness's exact_identity ceiling
 //                    pyramid -- check 0 (the volume) must catch it.
 //   SURVEY_MUTATE=2  judge the projection against 1 + 1e-6 instead of 1 --
 //                    check 2 (constant reproduction) must catch it.
-//   SURVEY_MUTATE=3  request the uncapped Gauss rule -- the empty-rule
-//                    fallback disappears and check 0 must catch the zeros.
+//   SURVEY_MUTATE=3  lift the rule cap. This one fails NOTHING: safe_rule()
+//                    still steps down from an empty Gauss rule to the
+//                    largest non-empty one, so every check and VERDICT line
+//                    is unchanged. All it adds is the note "[rule N is EMPTY
+//                    here, fell back to M]" on the simplex, wedge and pyramid
+//                    lines (measured on 9.7.1 and the March 2026 9.8.0-pre:
+//                    0 failed, 9 notes on 7 lines), which shows that
+//                    safe_rule(), not the cap, keeps empty rules out.
 static int mutate() { const char *e = getenv("SURVEY_MUTATE"); return e ? atoi(e) : 0; }
 // What the element is REQUIRED to do. An element that stops doing it turns
 // this survey red; a check with no failing outcome verifies nothing.
 enum Expect { SPD_AND_CONST, SINGULAR };
+
+// ReferenceCell is a plain class up to deal.II 9.7.1 (and in 9.8.0-pre
+// snapshots from before 2026-03-27), and the class template ReferenceCell<dim>
+// in 9.8.0. The helpers below take the reference cell as a template argument,
+// so the survey compiles against both, and gauss_rule() calls whichever form
+// the installed class has: the member template get_gauss_type_quadrature<dim>(n)
+// up to 9.7.1, the plain member get_gauss_type_quadrature(n) in 9.8.0.
+template <int dim, typename RefCell>
+static auto gauss_rule_impl(const RefCell &rc, const unsigned int n, int)
+  -> decltype(rc.get_gauss_type_quadrature(n))
+{
+  return rc.get_gauss_type_quadrature(n);
+}
+template <int dim, typename RefCell>
+static Quadrature<dim> gauss_rule_impl(const RefCell &rc, const unsigned int n, long)
+{
+  return rc.template get_gauss_type_quadrature<dim>(n);
+}
+template <int dim, typename RefCell>
+static Quadrature<dim> gauss_rule(const RefCell &rc, const unsigned int n)
+{
+  return gauss_rule_impl<dim>(rc, n, 0);
+}
 
 // MappingQ1 is only correct on hypercubes. On a simplex it integrates the
 // reference triangle as 1/6 instead of 1/2, on a wedge as 0.0528 instead of
 // 1/2, on a pyramid as 4.0 instead of 4/3 -- all three silently, with
 // nothing raised. MappingFE with the matching P1 element gives the exact
 // measure on all three. Measured on deal.II 9.8.0-pre, Release.
-template <int dim>
-static std::unique_ptr<Mapping<dim>> mapping_for(const ReferenceCell &rc)
+template <int dim, typename RefCell>
+static std::unique_ptr<Mapping<dim>> mapping_for(const RefCell &rc)
 {
   if (mutate() == 1)                   return std::make_unique<MappingQ1<dim>>();
   if (rc.is_hyper_cube())              return std::make_unique<MappingQ1<dim>>();
   if (rc.is_simplex())                 return std::make_unique<MappingFE<dim>>(FE_SimplexP<dim>(1));
-  if (rc == ReferenceCells::Wedge)     return std::make_unique<MappingFE<dim>>(FE_WedgeP<dim>(1));
-  if (rc == ReferenceCells::Pyramid)   return std::make_unique<MappingFE<dim>>(FE_PyramidP<dim>(1));
+  if constexpr (dim == 3) {
+    if (rc == ReferenceCells::Wedge)   return std::make_unique<MappingFE<dim>>(FE_WedgeP<dim>(1));
+    if (rc == ReferenceCells::Pyramid) return std::make_unique<MappingFE<dim>>(FE_PyramidP<dim>(1));
+  }
   return std::make_unique<MappingQ1<dim>>();
 }
 
+// Up to deal.II 9.7.1 (and in 9.8.0-pre snapshots from before June 2026)
 // QGaussSimplex and QGaussWedge exist only up to n_points_1D = 4, QGaussPyramid
 // only up to 2. Above that deal.II returns an EMPTY rule and the only guard is
 // a debug-only Assert, so in a Release build every integral silently becomes 0.
-static unsigned int rule_cap(const ReferenceCell &rc)
+// deal.II 9.8.0 builds all three for any n_points_1D; the cap is kept so that
+// one source serves both.
+template <int dim, typename RefCell>
+static unsigned int rule_cap(const RefCell &rc)
 {
   if (mutate() == 3)                 return 100;
-  if (rc == ReferenceCells::Pyramid) return 2;
   if (rc.is_hyper_cube())            return 100;
+  if constexpr (dim == 3) {
+    if (rc == ReferenceCells::Pyramid) return 2;
+  }
   return 4;
 }
 static int n_ok = 0, n_fail = 0;
+// Classes this release does not have, as "<name>  <why>" rows for the
+// NOT ATTEMPTED block (the coverage judge books them as not attemptable).
+static std::vector<std::string> not_attempted;
 
 static bool cholesky(FullMatrix<double> A, double &min_pivot)
 {
@@ -222,12 +271,12 @@ static bool cholesky(FullMatrix<double> A, double &min_pivot)
 
 // Pick a Gauss rule for this reference cell that ACTUALLY HAS POINTS, and say
 // so when the requested one did not.
-template <int dim>
-static Quadrature<dim> safe_rule(const ReferenceCell &rc, unsigned int want,
+template <int dim, typename RefCell>
+static Quadrature<dim> safe_rule(const RefCell &rc, unsigned int want,
                                  std::string &note)
 {
   for (unsigned int n = want; n >= 1; --n) {
-    const Quadrature<dim> q = rc.template get_gauss_type_quadrature<dim>(n);
+    const Quadrature<dim> q = gauss_rule<dim>(rc, n);
     if (q.size() > 0) {
       if (n != want)
         note += " [rule " + std::to_string(want) + " is EMPTY here, fell back to "
@@ -287,7 +336,7 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
     dh.distribute_dofs(fe);
     const unsigned int N = dh.n_dofs(), nc = fe.n_components(), deg = fe.degree;
 
-    const unsigned int cap = rule_cap(fe.reference_cell());
+    const unsigned int cap = rule_cap<dim>(fe.reference_cell());
     const Quadrature<dim> qa = safe_rule<dim>(fe.reference_cell(), std::min(deg + 2, cap), note);
     const Quadrature<dim> qb = safe_rule<dim>(fe.reference_cell(), std::min(deg + 4, cap), note);
     if (qa.size() == 0 || qb.size() == 0) {
@@ -305,8 +354,7 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
       // A face element has NO interior basis: its mass matrix lives on the
       // faces. Summing over every face of the cell gives an SPD matrix.
       const Quadrature<dim - 1> qf =
-        fe.reference_cell().face_reference_cell(0)
-          .template get_gauss_type_quadrature<dim - 1>(deg + 2);
+        gauss_rule<dim - 1>(fe.reference_cell().face_reference_cell(0), deg + 2);
       // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
       FEFaceValues<dim> ff(mapping, fe, qf, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
@@ -449,8 +497,7 @@ void check(const std::string &name, const FiniteElement<dim> &fe,
     double err2 = 0.0;
     if (mode == FACE) {
       const Quadrature<dim - 1> qf2 =
-        fe.reference_cell().face_reference_cell(0)
-          .template get_gauss_type_quadrature<dim - 1>(deg + 4);
+        gauss_rule<dim - 1>(fe.reference_cell().face_reference_cell(0), deg + 4);
       // every flag this loop reads: a Release-only deal.II build segfaults, with no message, on a missing one
       FEFaceValues<dim> fb(mapping, fe, qf2, update_values | update_JxW_values | update_quadrature_points);
       for (const auto &cell : dh.active_cell_iterators()) {
@@ -576,7 +623,14 @@ int main()
   check<2>("FE_Nedelec",     FE_Nedelec<2>(0));
   check<2>("FE_NedelecSZ",   FE_NedelecSZ<2>(0));
   check<2>("FE_DGNedelec",   FE_DGNedelec<2>(0));
+  // FE_NedelecNodal is declared in fe_nedelec.h from deal.II 9.8.0 on; 9.7.1
+  // and older do not have it, and the survey would not compile there.
+#if DEAL_II_VERSION_GTE(9, 8, 0)
   check<3>("FE_NedelecNodal", FE_NedelecNodal<3>(0));
+#else
+  not_attempted.push_back(std::string("FE_NedelecNodal  not in deal.II ") +
+                          DEAL_II_PACKAGE_VERSION + ", first released in 9.8.0");
+#endif
 
   // ---- nonconforming ---------------------------------------------------
   check<2>("FE_RannacherTurek", FE_RannacherTurek<2>(0));
@@ -605,7 +659,15 @@ int main()
   check<3>("FE_PyramidP",         FE_PyramidP<3>(1));
   check<3>("FE_PyramidDGP",       FE_PyramidDGP<3>(1));
 
-  std::printf("\nSURVEY %d built and checked, %d failed%s\n", n_ok, n_fail,
+  if (!not_attempted.empty())
+    {
+      std::printf("\nNOT ATTEMPTED (%zu, not in this deal.II release):\n",
+                  not_attempted.size());
+      for (const std::string &row : not_attempted)
+        std::printf("  %s\n", row.c_str());
+    }
+  std::printf("\nSURVEY %d built and checked, %d failed, %zu not in this release%s\n",
+              n_ok, n_fail, not_attempted.size(),
               mutate() ? "  [MUTATED: failures here are the control working]" : "");
   return 0;
 }
@@ -636,12 +698,15 @@ PITFALLS = [
     "cell->measure() or with reference_cell().volume(); every integral is off "
     "by a constant factor and the solve still 'converges'.",
 
-    "[silent-wrong] ReferenceCell::get_gauss_type_quadrature returns an "
+    "[silent-wrong] Up to deal.II 9.7.1 (and in 9.8.0-pre snapshots from "
+    "before June 2026), ReferenceCell::get_gauss_type_quadrature returns an "
     "EMPTY rule for orders its underlying formula does not implement: "
     "QGaussSimplex and QGaussWedge stop at n_points_1D = 4, QGaussPyramid at 2. "
     "The only guard is a debug-only Assert, so a Release build silently accepts "
     "a rule with zero points -- FEValues::reinit succeeds, no exception is "
-    "thrown, and every integral evaluates to exactly 0. Signal: "
+    "thrown, and every integral evaluates to exactly 0. deal.II 9.8.0 builds "
+    "all three for any n_points_1D (QGaussSimplex falls back to QStroudSimplex "
+    "above 4, QGaussPyramid is a collapsed Gauss-Jacobi rule). Signal: "
     "quadrature.size() == 0, a mass matrix of all zeros, or a cell volume of "
     "0.0 from summing JxW. Check q.size() > 0 before assembling.",
 
@@ -687,12 +752,20 @@ KNOWLEDGE = {
         "unit cube or the shoelace area of the distorted quad's own vertices, "
         "the summed face measure, the predicted null vector of a singular "
         "element as |M v|/(max|M| |v|) against 0, and the constant's "
-        "projection error against 0. Measured on 9.8.0-pre: 41 of 41 built "
-        "and checked, 0 failed, through this backend's own compile path; the "
-        "SURVEY_MUTATE control turns 7 of those VERDICT lines to FAIL.",
+        "projection error against 0. Measured on a 9.8.0-pre snapshot of "
+        "March 2026: 41 of 41 built and checked, 0 failed, through this "
+        "backend's own compile path; the SURVEY_MUTATE control turns 7 of "
+        "those VERDICT lines to FAIL. On 9.7.1: 40 built and checked, 0 "
+        "failed; FE_NedelecNodal is listed under NOT ATTEMPTED because 9.8.0 "
+        "is its first release. In the 9.8.0 release ReferenceCell is the "
+        "class template ReferenceCell<dim>; the survey's helpers take the "
+        "reference cell as a template argument, and the source passes a "
+        "syntax-only compile against the 9.8.0 headers but has not been run "
+        "on 9.8.0.",
     "function_space":
-        "all 41 FE_* classes the installed headers declare, including "
-        "FESystem; see the survey source for the exact constructor of each",
+        "every FE_* class the installed headers declare, including "
+        "FESystem (41 in 9.8, 40 in 9.7.1); see the survey source for the "
+        "exact constructor of each",
     "mapping":
         "MappingQ1 is correct ONLY on hypercubes. Use "
         "MappingFE<dim>(FE_SimplexP<dim>(1)), MappingFE<dim>(FE_WedgeP<dim>(1)) "

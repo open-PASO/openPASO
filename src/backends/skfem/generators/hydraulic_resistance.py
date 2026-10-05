@@ -13,8 +13,6 @@ Stokes flow through a 2D channel:
 The closed-form Poiseuille resistance for a channel of height H and
 length L is R_exact = 12 μ L / H³.  We compare the FE-computed
 resistance to this analytic value.
-
-Matches scikit-fem upstream ex29 (linear hydraulic resistance).
 """
 
 
@@ -178,8 +176,7 @@ KNOWLEDGE: dict = {
             "rectangular channel. Pressure-driven boundary "
             "conditions (p=p_in at inlet, p=0 at outlet, no-slip "
             "on top/bottom walls). FE result compared to the "
-            "closed-form Poiseuille resistance R = 12 μ L / H³. "
-            "Matches scikit-fem upstream ex29."
+            "closed-form Poiseuille resistance R = 12 μ L / H³."
         ),
         "weak_form": (
             "Stokes: 2μ ∫ ε(u):ε(v) - ∫ div(u) q - ∫ div(v) p = "
@@ -378,7 +375,8 @@ KNOWLEDGE: dict = {
             "print-versus-render symptom is unreliable.)",
         ],
         "references": [
-            "scikit-fem ex29 (linear hydraulic resistance)",
+            "scikit-fem ex18 (Stokes equations) / ex24 (Stokes "
+            "flow with plane-Poiseuille inlet)",
             "White, F. M. (2011), 'Viscous Fluid Flow' 3rd ed., "
             "Ch. 3 (Poiseuille flow).",
         ],

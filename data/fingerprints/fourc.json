@@ -1,0 +1,14 @@
+{
+  "solver": "fourc",
+  "timestamp": "2026-05-09T00:32:16.616742",
+  "binary_found": true,
+  "binary_path": null,
+  "version_output": "Invalid MIT-MAGIC-COOKIE-1 keyThe following argument was not expected: --version\nRun with --help for more information.\n",
+  "smoke_test": {
+    "solver": "fourc",
+    "passed": true,
+    "version": "found",
+    "duration_ms": 590.6,
+    "tested_at": "2026-05-09T00:32:18.801305"
+  }
+}

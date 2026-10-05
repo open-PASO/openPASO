@@ -77,28 +77,33 @@ are what is documented. A deck with these sections runs.
     nodes only leaves the rest free in z, the slab is then neither plane
     strain nor plane stress, and FEBio says nothing (measured).
 
-  A POSITION-DEPENDENT BODY FORCE, measured on this build (4.12). Two forms
-  run and give the same field (a constant load gives another):
+  A POSITION-DEPENDENT BODY FORCE, measured on this build (4.12):
+  * It IS writable, as a `<body_load type="non-const">` inside `<Loads>`
+    whose components are math expressions (`type="math"` is optional there:
+    a component that is not a plain number is read as math):
         <Loads>
-          <body_load type="body force">
-            <force type="math">-1*X^2,0,0</force>
+          <body_load type="non-const">
+            <x>0</x><y>0</y><z>-1*X^2</z>
           </body_load>
         </Loads>
-        <Loads>
-          <body_load type="non-const"><x>-1*X^2</x><y>0</y><z>0</z></body_load>
-        </Loads>
-  * `<body_load type="const">` with a `type="math"` component is REFUSED
-    here: `tag "x" ... : invalid attribute "type"`.
+    or as `<body_load type="body force">` with
+    `<force type="math">0, 0, -1*X^2</force>`; the two give the same result.
+  * `type="const"` CANNOT CARRY AN EXPRESSION. `<z type="math">` on it is a
+    hard failure, `Reading file ...FAILED!` with
+        tag "z" (line N) : invalid attribute "type"
+    Without the attribute the component is read as a number: the leading
+    numeric prefix is taken and the rest of the expression is DISCARDED, so
+    `-1*X^2` becomes the constant -1 and the run succeeds with the wrong
+    load; `<force>0, 0, -1*X^2</force>` without `type="math"` does the same.
+    Measured: the resulting displacement was bit-identical to a
+    constant-load run.
   * The body force is PER UNIT MASS: FEBio multiplies it by the material's
     density (measured: density 2 doubles the displacement). A load per unit
     volume is divided by the density, or the density is 1.
   * It enters with the OPPOSITE SIGN: `<force>0.3,0,0</force>` moves the body
     toward -x, where a `<nodal_load>` of +0.3 in x moves it toward +x
     (measured, every form above). The b of -div(sigma) = b is written -b/density.
-  * OMITTING `type="math"` on `<force>` IS USUALLY SILENT: the numeric prefix
-    is taken and the rest of the expression is discarded, so the run
-    succeeds with a constant load.
-  * `**` IS A PARSE ERROR, not a silent one: `-1*X**2` gives
+  * `**` IS A PARSE ERROR here, not a silent one: `-1*X**2` gives
         Token expected (position 6)
     while `-1*X^2` is accepted. Rewrite every term of a Python expression.
   * A `<body_load>` placed in `<LoadData>` is a hard `unrecognized tag`

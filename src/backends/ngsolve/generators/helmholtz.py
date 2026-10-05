@@ -122,20 +122,25 @@ KNOWLEDGE = {
             "(same family as maxwell#5), while a shift well away "
             "from zero completes — so the failure is specific to "
             "shift=0, not to a badly chosen shift. "
-            "Signal: guard on the EXCEPTION alone. Of the two "
-            "strings the old text quoted, only one is usable: "
-            "'matrix is singular' is written by UMFPACK through "
-            "C stdio and flushed at PROCESS EXIT, so a capture "
-            "placed around the ArnoldiSolver call comes back "
-            "EMPTY and an agent guarding on that text concludes "
-            "nothing happened. Catch NgException; if you want "
+            "Signal: guard on the EXCEPTION. The companion line "
+            "'UMFPACK V5.7.4 (Feb 1, 2016): WARNING: matrix is "
+            "singular' is written by UMFPACK through C stdio, "
+            "which by default holds it until PROCESS EXIT when "
+            "stdout is a file or a pipe, so a capture placed "
+            "around the ArnoldiSolver call comes back EMPTY (an "
+            "fd-level os.dup2 of fd 1 as well as "
+            "contextlib.redirect_stdout) and an agent guarding "
+            "on that text concludes nothing happened; only a "
+            "line-buffered stdout (a terminal, or stdbuf -oL) "
+            "shows it during the call. Catch NgException; if you want "
             "corroboration, check that the returned lowest "
             "non-zero resonance is within a small percentage of "
             "the closed-form k^2 and that the degenerate pair "
             "comes back as two nearly equal values rather than "
             "collapsing to one. (Verified empirically 2026-06-01, "
             "signal corrected 2026-08-06 on NGSolve 6.2.2604 — "
-            "the UMFPACK warning text is not capturable.)",
+            "the UMFPACK warning text is not capturable around "
+            "the call.)",
         ],
     },
 }

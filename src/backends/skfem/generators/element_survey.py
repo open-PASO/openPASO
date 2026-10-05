@@ -192,8 +192,9 @@ def fresh(proto):
 def l2_error(basis, x):
     # measured on a RICHER rule than the one that built the matrix, so a
     # low-degree element cannot reproduce the target at its own points
-    # (order 8 is the richest tetrahedral rule this scikit-fem ships; above it
-    # get_quadrature raises NotImplementedError)
+    # (intorder 9 is the highest tetrahedral order get_quadrature accepts, a
+    # 45-point rule exact through degree 8; intorder 10+ raises
+    # NotImplementedError)
     richer = 8 if basis.mesh.dim() == 3 else max(8, 2 * basis.elem.maxdeg + 2)
     eb = Basis(basis.mesh, fresh(basis.elem), intorder=richer)
     diff = np.asarray(eb.interpolate(x)) - u_exact(eb.global_coordinates())

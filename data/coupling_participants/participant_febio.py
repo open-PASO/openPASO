@@ -16,10 +16,13 @@ therefore a WRAPPER that, each coupling iteration:
   5. writes exports.json.
 
 PHYSICS.  FEBio 4 has no heat module (FEBioHeat was removed upstream and is
-only available as a plugin), so the canonical heat problem of SPEC.md cannot
-be run.  What is solved instead is its exact linear analogue: a uniaxial-strain
-elastic bar.  With uy = uz = 0 enforced on every node the 3D problem collapses
-to the 1D equation
+only available as a plugin).  Steady conduction can be solved with the
+thermo-fluid module with the fluid held at rest (see the heat_3d_bar template;
+prescribed temperatures and a `fluid heat flux` both reproduce the exact linear
+profile, and its only volumetric source, `constant fluid heat supply`, takes a
+single constant), but this participant instead solves an exact linear analogue
+of the canonical heat problem of SPEC.md: a uniaxial-strain elastic bar.  With
+uy = uz = 0 enforced on every node the 3D problem collapses to the 1D equation
 
     d/dx ( M du/dx ) = 0 ,   M = lambda + 2 mu   (P-wave / oedometric modulus)
 

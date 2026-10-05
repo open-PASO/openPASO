@@ -1032,9 +1032,9 @@ int main()
   std::vector<AffineConstraints<double>> boundary_constraints(n_levels);
   for (unsigned int level = 0; level < n_levels; ++level)
     {
-      IndexSet relevant;
-      DoFTools::extract_locally_relevant_level_dofs(dof_handler, level, relevant);
-      boundary_constraints[level].reinit(relevant);
+      const IndexSet relevant =
+        DoFTools::extract_locally_relevant_level_dofs(dof_handler, level);
+      boundary_constraints[level].reinit(dof_handler.locally_owned_mg_dofs(level), relevant);
       for (const auto idx : mg_constrained_dofs.get_refinement_edge_indices(level))
         boundary_constraints[level].add_line(idx);
       for (const auto idx : mg_constrained_dofs.get_boundary_indices(level))
@@ -1831,14 +1831,17 @@ KNOWLEDGE = {
             (
                 "[API] H(div) elements (FE_RaviartThomas) have a "
                 "DIFFERENT DOF structure from H1 — DoFs live on "
-                "faces, not vertices. Signal: post-processing "
-                "treating RT DoFs as nodal (e.g. "
-                "DataOut::add_data_vector(..., DataOutBase::"
-                "vertex_data)) raises an `ExcInternalError` or "
-                "produces a per-vertex flux field that does not "
-                "match the cell-face flux integral. Use "
-                "DataOutBase::DG output or interpolate to a P1 "
-                "post-processing space."
+                "faces, not vertices, so they are not nodal values. "
+                "Signal: post-processing that treats RT DoF values as "
+                "nodal produces a per-vertex flux field that does not "
+                "match the cell-face flux integral. Pass the solution "
+                "to DataOut::add_data_vector as DoF data with "
+                "DataComponentInterpretation::component_is_part_of_vector "
+                "(as step-20 does); DataOut evaluates the RT field at "
+                "the patch points itself. For nodal values, interpolate "
+                "or project to an FE_Q or FE_DGQ post-processing space. "
+                "(There is no DataOutBase::vertex_data or "
+                "DataOutBase::DG.)"
             ),
             (
                 "[Numerical] Schur complement solver for saddle-"
@@ -1911,7 +1914,7 @@ KNOWLEDGE = {
         ],
     },
     "time_dependent_ns": {
-        "description": "Transient Boussinesq flow — buoyancy-driven convection (step-35)",
+        "description": "Transient Boussinesq flow — buoyancy-driven convection (Boussinesq tutorials: step-31, step-32)",
         "pitfalls": [
             (
                 "[Numerical] Rayleigh number controls flow "
@@ -1933,9 +1936,11 @@ KNOWLEDGE = {
                 "-rho * beta * (T - T_ref) * g_hat as a "
                 "FEValuesExtractors::Vector source; without it "
                 "the BlockVector temperature component stays "
-                "decoupled. step-35 implements via "
-                "BlockSparseMatrix and DoFTools::"
-                "make_sparsity_pattern."
+                "decoupled. step-31 does this with a separate "
+                "temperature DoFHandler and matrix: the buoyancy term, "
+                "evaluated from the old temperature, is assembled into "
+                "the right-hand side of the Stokes block system "
+                "(step-35 has no temperature at all)."
             ),
         ],
     },
@@ -2088,7 +2093,8 @@ KNOWLEDGE = {
     "multigrid": {
         "description": ("Geometric multigrid preconditioner (step-16 "
                         "matrix-based, step-37/50 matrix-free, step-56 "
-                        "Vanka for Stokes). Verified working in 3D on this "
+                        "GMG on the velocity block of a Stokes block "
+                        "preconditioner). Verified working in 3D on this "
                         "catalog's supported deal.II with no external "
                         "dependencies: MGTransferPrebuilt + "
                         "mg::SmootherRelaxation + MGCoarseGridHouseholder, "
@@ -2180,9 +2186,12 @@ KNOWLEDGE = {
                 "saddle-point system produces V-cycles whose residual "
                 "GROWS from cycle to cycle rather than shrinking — "
                 "watch SolverControl::last_value() across the outer "
-                "iterations. For Stokes use a Vanka-type smoother "
-                "(step-56), not point Jacobi: the pressure block has "
-                "a zero diagonal, so point Jacobi is undefined there."
+                "iterations. For Stokes, point Jacobi on the full "
+                "saddle-point matrix is undefined (the pressure block "
+                "has a zero diagonal); step-56 instead applies GMG with "
+                "an SOR smoother (mg::SmootherRelaxation) only to the "
+                "velocity block A, inside a block-triangular "
+                "Schur-complement preconditioner for FGMRES."
             ),
             (
                 "[Numerical] Coarse-grid solver: solve the coarsest "
@@ -2221,7 +2230,7 @@ KNOWLEDGE = {
         ],
     },
     "error_estimation": {
-        "description": "Dual-weighted residual (DWR) error estimation (step-14, step-74)",
+        "description": "Dual-weighted residual (DWR) error estimation (step-14)",
         "method": "Solve dual/adjoint problem, weight residual for goal-oriented refinement",
         "pitfalls": [
             (
@@ -2232,8 +2241,9 @@ KNOWLEDGE = {
                 "regardless of the goal functional; the "
                 "effectivity index (estimated / true error) is "
                 "typically O(1) to 10x off without the dual. "
-                "step-14 / step-74 show the canonical DWR "
-                "(residual * weighted-dual) loop."
+                "step-14 shows the canonical DWR "
+                "(residual * weighted-dual) loop (step-74 uses a "
+                "residual-based estimator for SIPG, not DWR)."
             ),
             (
                 "[Numerical] Higher-order dual solution needed "

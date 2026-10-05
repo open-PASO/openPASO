@@ -52,21 +52,20 @@ class SolidMechanicsGenerator(BaseGenerator):
                 "  WALL  QUAD4 <n..> MAT m KINEM k EAS e THICK t "
                 "STRESS_STRAIN s GP a b\n"
                 "  SOLID QUAD4 <n..> MAT m KINEM k THICKNESS t "
-                "<that build's plane-assumption key>\n"
-                "(the second line is what a build that gives SOLID the 2D "
-                "cells looks like; the plane-assumption key is named by that "
-                "build's own grammar dump. There is no PLANE_ASSUMPTION key "
-                "in the 4C measured here -- it occurs in zero files of src/ "
-                "and zero of the 1978 test decks, and this build's SOLID owns "
-                "only HEX/TET/WEDGE/PYRAMID, so 2D is WALL's.)\n"
+                "PLANE_ASSUMPTION p\n"
+                "(measured: a 4C before 2026.2.0 has WALL and no "
+                "PLANE_ASSUMPTION key, its SOLID owns only "
+                "HEX/TET/WEDGE/PYRAMID; 4C 2026.2.0 and 2026.3.0 have no "
+                "WALL, and their SOLID takes QUAD4, QUAD8, QUAD9, TRI3 and "
+                "TRI6 with THICKNESS and PLANE_ASSUMPTION.)\n"
                 "Decide it, do not guess: `4C --parameters` lists, per "
                 "element type, the cell types it owns. If SOLID's list is "
                 "3D-only (HEX/TET/WEDGE/PYRAMID), 2D belongs to WALL and "
                 "'SOLID QUAD4' aborts with \"Element 'SOLID' does not seem "
                 "to know cell type 'quad4'.\"; if SOLID lists QUAD4/TRI3 "
                 "then 'WALL' aborts with \"Unknown type 'WALL' of finite "
-                "element\". On the build this catalogue was verified "
-                "against, WALL owns 2D and needs all six of its keys."
+                "element\". Before 4C 2026.2.0 WALL owns 2D and needs all six "
+                "of its keys; from 4C 2026.2.0 on the 2D SOLID needs four."
             ),
             "minimal_working_input_3d": """\
 # Complete 3D cantilever. The mesh is GENERATED - not one node coordinate.
@@ -304,12 +303,18 @@ RESULT DESCRIPTION:
                     "SOLVER": "Belos",
                     "AZPREC": "MueLu",
                     "SOLVER_XML_FILE": "iterative_gmres_template.xml",
-                    "MUELU_XML_FILE": "elasticity_template.xml",
+                    "preconditioner_file_by_release": {
+                        "4C 2026.2.0 and later": {"PRECONDITIONER_XML_FILE": "elasticity_template.xml"},
+                        "4C before 2026.2.0": {"MUELU_XML_FILE": "elasticity_template.xml"},
+                    },
                     "description": (
                         "Iterative Krylov solver (GMRES) with MueLu AMG "
                         "preconditioner.  Scalable to millions of DOFs.  "
                         "Requires XML configuration files for solver and "
-                        "preconditioner."
+                        "preconditioner.  The preconditioner file key is the "
+                        "one of the release that runs the deck: 4C 2026.2.0 "
+                        "and later accept only PRECONDITIONER_XML_FILE, a 4C "
+                        "before 2026.2.0 only MUELU_XML_FILE."
                     ),
                 },
             },
@@ -531,7 +536,7 @@ RESULT DESCRIPTION:
                     "  WALL  QUAD4 <n..> MAT m KINEM k EAS e "
                     "THICK t STRESS_STRAIN s GP a b\n"
                     "  SOLID QUAD4 <n..> MAT m KINEM k "
-                    "THICKNESS t <plane-assumption key>\n"
+                    "THICKNESS t PLANE_ASSUMPTION p\n"
                     "Determine which one the installed build "
                     "registers BEFORE writing anything: "
                     "`4C --parameters` lists, per element type, "
@@ -539,11 +544,12 @@ RESULT DESCRIPTION:
                     "3D-only (HEX/TET/WEDGE/PYRAMID), 2D is "
                     "WALL's; if SOLID lists QUAD4/TRI3, 2D is "
                     "SOLID's. 3D is always SOLID and takes no "
-                    "thickness or plane-assumption key at all. On "
-                    "the build measured here SOLID owns only "
-                    "HEX/TET/WEDGE/PYRAMID, so 2D is WALL's and "
-                    "no plane-assumption key exists anywhere in "
-                    "the source tree. Signal: the "
+                    "thickness or plane-assumption key at all. "
+                    "Measured: on a 4C before 2026.2.0 SOLID owns "
+                    "only HEX/TET/WEDGE/PYRAMID, so 2D is WALL's and "
+                    "no plane-assumption key exists; 4C 2026.2.0 and "
+                    "2026.3.0 have no WALL and give SOLID the 2D cells. "
+                    "Signal: the "
                     "element type this build does not register "
                     "raises \"Unknown type 'WALL' of finite "
                     "element\" from "
@@ -633,6 +639,9 @@ RESULT DESCRIPTION:
     _TEMPLATES: dict[str, str] = {
         "linear_2d": """\
 # FORMAT TEMPLATE — 2D linear elasticity (plane strain)
+# Written in the input grammar of 4C before 2026.2.0 (the WALL element); from
+# 4C 2026.2.0 on a 2-D solid is SOLID with THICKNESS and PLANE_ASSUMPTION. The
+# decks openPASO runs are served in the grammar of the 4C it finds.
 # All numerical values are placeholders — determine from your specific problem.
 # Check 4C test files via examples(keyword, solver='fourc', action='search') for reference setups.
 TITLE:
@@ -689,8 +698,10 @@ STRUCTURE GEOMETRY:
         QUAD4:
           MAT: 1
           KINEM: linear
+          EAS: none
           THICK: <thickness>
           STRESS_STRAIN: plane_strain
+          GP: [2, 2]
   FILE: <mesh_file.e>
   SHOW_INFO: detailed_summary
 """,

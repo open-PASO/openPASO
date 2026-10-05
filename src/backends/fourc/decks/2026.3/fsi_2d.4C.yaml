@@ -1,0 +1,160 @@
+TITLE:
+  - "Partitioned 2-D FSI: elastic block driving a channel flow (Dirichlet-Neumann)"
+PROBLEM SIZE:
+  DIM: 2
+PROBLEM TYPE:
+  PROBLEMTYPE: "Fluid_Structure_Interaction"
+STRUCTURAL DYNAMIC:
+  PREDICT: "ConstAcc"
+  LINEAR_SOLVER: 1
+STRUCTURAL DYNAMIC/GENALPHA:
+  BETA: 0.5
+  GAMMA: 1
+  ALPHA_M: 0
+  ALPHA_F: 0
+  RHO_INF: -1
+STRUCT NOX/Printing:
+  Inner Iteration: false
+  Outer Iteration StatusTest: false
+FLUID DYNAMIC:
+  LINEAR_SOLVER: 1
+  NONLINITER: Newton
+  THETA: 1
+FLUID DYNAMIC/RESIDUAL-BASED STABILIZATION:
+  CHARELELENGTH_PC: "root_of_volume"
+ALE DYNAMIC:
+  LINEAR_SOLVER: 1
+FSI DYNAMIC:
+  COUPALGO: "iter_stagg_fixed_rel_param"
+  TIMESTEP: 0.1
+  NUMSTEP: 10
+  MAXTIME: 1
+  RESTARTEVERY: 10
+SOLVER 1:
+  SOLVER: "UMFPACK"
+IO/RUNTIME VTK OUTPUT:
+  INTERVAL_STEPS: 1
+IO/RUNTIME VTK OUTPUT/STRUCTURE:
+  OUTPUT_STRUCTURE: true
+  DISPLACEMENT: true
+IO/RUNTIME VTK OUTPUT/FLUID:
+  OUTPUT_FLUID: true
+  VELOCITY: true
+  # 4C 2026.3.0 writes the 2-D pressure as its own array and velocity with two components.
+  # (4C 2026.2.0 and older builds write the pressure as a third velocity component and a
+  # NaN pressure array.)
+  PRESSURE: true
+  DISPLACEMENT: true
+MATERIALS:
+  - MAT: 1
+    MAT_Struct_StVenantKirchhoff:
+      YOUNG: 10000
+      NUE: 0
+      DENS: 1000
+  - MAT: 2
+    MAT_fluid:
+      DYNVISCOSITY: 1
+      DENSITY: 1
+  - MAT: 3
+    MAT_Struct_StVenantKirchhoff:
+      YOUNG: 1
+      NUE: 0
+      DENS: 0
+CLONING MATERIAL MAP:
+  - SRC_FIELD: "fluid"
+    SRC_MAT: 2
+    TAR_FIELD: "ale"
+    TAR_MAT: 3
+FUNCT1:
+  - COMPONENT: 0
+    SYMBOLIC_FUNCTION_OF_SPACE_TIME: "0.05*(1.0-cos(pi*t))"
+DESIGN POINT DIRICH CONDITIONS:
+  - E: 1
+    NUMDOF: 2
+    ONOFF: [1, 1]
+    VAL: [1, 0]
+    FUNCT: [1, 0]
+DESIGN LINE ALE DIRICH CONDITIONS:
+  - E: 3
+    NUMDOF: 2
+    ONOFF: [1, 1]
+    VAL: [0, 0]
+    FUNCT: [0, 0]
+DESIGN FSI COUPLING LINE CONDITIONS:
+  - E: 1
+    coupling_id: 1
+  - E: 2
+    coupling_id: 1
+DNODE-NODE TOPOLOGY:
+  - "NODE 1 DNODE 1"
+  - "NODE 2 DNODE 1"
+  - "NODE 5 DNODE 1"
+DLINE-NODE TOPOLOGY:
+  - "NODE 7 DLINE 1"
+  - "NODE 8 DLINE 1"
+  - "NODE 9 DLINE 1"
+  - "NODE 10 DLINE 2"
+  - "NODE 11 DLINE 2"
+  - "NODE 14 DLINE 2"
+  - "NODE 34 DLINE 3"
+  - "NODE 35 DLINE 3"
+  - "NODE 36 DLINE 3"
+NODE COORDS:
+  - "NODE 1 COORD -1.0 -1.0 0.0"
+  - "NODE 2 COORD -1.0  0.0 0.0"
+  - "NODE 3 COORD  0.0  0.0 0.0"
+  - "NODE 4 COORD  0.0 -1.0 0.0"
+  - "NODE 5 COORD -1.0  1.0 0.0"
+  - "NODE 6 COORD  0.0  1.0 0.0"
+  - "NODE 7 COORD  1.0  0.0 0.0"
+  - "NODE 8 COORD  1.0 -1.0 0.0"
+  - "NODE 9 COORD  1.0  1.0 0.0"
+  - "NODE 10 COORD 1.0 -1.0 0.0"
+  - "NODE 11 COORD 1.0  0.0 0.0"
+  - "NODE 12 COORD 1.5 0.0 0.0"
+  - "NODE 13 COORD 1.5 -1.0 0.0"
+  - "NODE 14 COORD 1.0 1.0 0.0"
+  - "NODE 15 COORD 1.5 1.0 0.0"
+  - "NODE 16 COORD 2.0 0.0 0.0"
+  - "NODE 17 COORD 2.0 -1.0 0.0"
+  - "NODE 18 COORD 2.0 1.0 0.0"
+  - "NODE 19 COORD 2.5 0.0 0.0"
+  - "NODE 20 COORD 2.5 -1.0 0.0"
+  - "NODE 21 COORD 2.5 1.0 0.0"
+  - "NODE 22 COORD 3.0 0.0 0.0"
+  - "NODE 23 COORD 3.0 -1.0 0.0"
+  - "NODE 24 COORD 3.0 1.0 0.0"
+  - "NODE 25 COORD 3.5 0.0 0.0"
+  - "NODE 26 COORD 3.5 -1.0 0.0"
+  - "NODE 27 COORD 3.5 1.0 0.0"
+  - "NODE 28 COORD 4.0 0.0 0.0"
+  - "NODE 29 COORD 4.0 -1.0 0.0"
+  - "NODE 30 COORD 4.0 1.0 0.0"
+  - "NODE 31 COORD 4.5 0.0 0.0"
+  - "NODE 32 COORD 4.5 -1.0 0.0"
+  - "NODE 33 COORD 4.5 1.0 0.0"
+  - "NODE 34 COORD 5.0 0.0 0.0"
+  - "NODE 35 COORD 5.0 -1.0 0.0"
+  - "NODE 36 COORD 5.0 1.0 0.0"
+STRUCTURE ELEMENTS:
+  - "1 SOLID QUAD4 3 2 1 4 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "2 SOLID QUAD4 6 5 2 3 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "3 SOLID QUAD4 7 3 4 8 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+  - "4 SOLID QUAD4 9 6 3 7 MAT 1 KINEM nonlinear THICKNESS 1.0 PLANE_ASSUMPTION plane_strain"
+FLUID ELEMENTS:
+  - "5 FLUID QUAD4 12 11 10 13 MAT 2 NA ALE"
+  - "6 FLUID QUAD4 15 14 11 12 MAT 2 NA ALE"
+  - "7 FLUID QUAD4 16 12 13 17 MAT 2 NA ALE"
+  - "8 FLUID QUAD4 18 15 12 16 MAT 2 NA ALE"
+  - "9 FLUID QUAD4 19 16 17 20 MAT 2 NA ALE"
+  - "10 FLUID QUAD4 21 18 16 19 MAT 2 NA ALE"
+  - "11 FLUID QUAD4 22 19 20 23 MAT 2 NA ALE"
+  - "12 FLUID QUAD4 24 21 19 22 MAT 2 NA ALE"
+  - "13 FLUID QUAD4 25 22 23 26 MAT 2 NA ALE"
+  - "14 FLUID QUAD4 27 24 22 25 MAT 2 NA ALE"
+  - "15 FLUID QUAD4 28 25 26 29 MAT 2 NA ALE"
+  - "16 FLUID QUAD4 30 27 25 28 MAT 2 NA ALE"
+  - "17 FLUID QUAD4 31 28 29 32 MAT 2 NA ALE"
+  - "18 FLUID QUAD4 33 30 28 31 MAT 2 NA ALE"
+  - "19 FLUID QUAD4 34 31 32 35 MAT 2 NA ALE"
+  - "20 FLUID QUAD4 36 33 31 34 MAT 2 NA ALE"

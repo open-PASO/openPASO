@@ -204,13 +204,15 @@ GENERAL_KNOWLEDGE = {'description': 'FEniCSx (dolfinx) general capabilities',
                       'Crouzeix-Raviart': 'Nonconforming, order 1 only',
                       'Bubble': 'For MINI element enrichment',
                       'Hermite': 'C1 conforming on simplices',
-                      'Serendipity': 'Quad/hex only, fewer DOFs',
+                      'Serendipity': 'Interval/quad/hex only (no triangle/tet/prism/pyramid), '
+                                     'fewer DOFs than Q on quad/hex for degree >= 2',
                       'Regge': 'For elasticity complexes'},
  'mesh_types': ['create_unit_square, create_unit_cube, create_box, create_rectangle',
                 'Gmsh: dolfinx.io.gmsh.model_to_mesh / dolfinx.io.gmsh.read_from_msh '
                 '(2D/3D, mixed cell types) — the module is `gmsh`, NOT `gmshio`, which '
                 'was removed in dolfinx 0.10',
-                'XDMF import/export, refinement (refine, plaza_refine)'],
+                'XDMF import/export, refinement (dolfinx.mesh.refine — Plaza algorithm '
+                'on triangles/tets — and dolfinx.mesh.uniform_refine)'],
  'solver_catalogue': {'direct': 'MUMPS, SuperLU_dist, UMFPACK (via PETSc)',
                       'iterative': 'CG, GMRES, BiCGStab, MinRes, Richardson',
                       'preconditioners': 'ILU, ICC, Jacobi, SOR, GAMG, '
@@ -224,20 +226,25 @@ GENERAL_KNOWLEDGE = {'description': 'FEniCSx (dolfinx) general capabilities',
                      'Complex-valued problems: complex PETSc build',
                      'Mixed elements: arbitrary combinations via mixed_element()',
                      'Checkpointing via adios4dolfinx'],
- 'petsc_index_size_solver_compat': {'description': 'PETSc-direct-solver compatibility '
-                                                   'depends on the PETSc index size: '
-                                                   'MUMPS works only with 32-bit '
-                                                   'PetscInt (the default build), '
-                                                   'SuperLU_DIST is the '
-                                                   '64-bit-PetscInt drop-in '
-                                                   'replacement. The C++ mixed_poisson '
+ 'petsc_index_size_solver_compat': {'description': 'PETSc-direct-solver choice in several '
+                                                   'dolfinx demos depends on the PETSc '
+                                                   "index size. PETSc's MUMPS interface "
+                                                   'is supported with 64-bit PetscInt '
+                                                   "(--with-64-bit-indices); dolfinx's "
+                                                   'own test image builds its '
+                                                   '64-bit-int PETSc with '
+                                                   '--download-mumps (MUMPS is rejected '
+                                                   'only with 64-bit BLAS indices). '
+                                                   'Those demos nevertheless avoid '
+                                                   'MUMPS when PetscInt is '
+                                                   '64-bit: the C++ mixed_poisson '
                                                    'demo dispatches at compile time '
                                                    "(sizeof(PetscInt) == 4 ? 'mumps' : "
-                                                   "'superlu_dist'); Python users hit "
-                                                   'the same wall at runtime when '
-                                                   'their conda-forge build was '
-                                                   'compiled with '
-                                                   '--with-64-bit-indices. Source: '
+                                                   "'superlu_dist'), and "
+                                                   'demo_half_loaded_waveguide / '
+                                                   'demo_scattering_boundary_conditions '
+                                                   'exit on int64 with >1 rank, citing '
+                                                   "'memory errors in MUMPS'. Source: "
                                                    'cpp/demo/mixed_poisson/main.cpp:345-348.',
                                     'Signal': '[Solver] dolfinx generators that '
                                               'hardcode '
@@ -246,19 +253,19 @@ GENERAL_KNOWLEDGE = {'description': 'FEniCSx (dolfinx) general capabilities',
                                               'nearly_incompressible_elasticity, '
                                               'stokes_darcy, hyperelasticity, '
                                               'helmholtz, reaction_diffusion, '
-                                              'mixed_poisson, and others) will FAIL on '
-                                              'a PETSc build with 64-bit indices '
-                                              '(--with-64-bit-indices, '
-                                              'sizeof(PetscInt) == 8). MUMPS does not '
-                                              'support 64-bit indices and PETSc raises '
-                                              "a runtime error like 'PCFactor: matrix "
-                                              'solver type mumps does not support '
-                                              "64-bit integers' / 'MatSolverType for "
-                                              "serial is not '. Diagnostic: `python -c "
+                                              'mixed_poisson, and others) are not '
+                                              'rejected by a PETSc build with 64-bit '
+                                              'indices (--with-64-bit-indices, '
+                                              'sizeof(PetscInt) == 8): PETSc has no '
+                                              "'mumps does not support 64-bit "
+                                              "integers' error. Several dolfinx demos "
+                                              'still avoid MUMPS there (two exit in '
+                                              'parallel on int64 citing memory errors '
+                                              'in MUMPS). Diagnostic: `python -c '
                                               '"from petsc4py import PETSc; '
                                               'print(PETSc.IntType)"` returns int64 vs '
-                                              'int32. Workaround: switch to '
-                                              "'superlu_dist' (or 'pastix' / "
+                                              'int32. To follow those demos on int64: '
+                                              "switch to 'superlu_dist' (or 'pastix' / "
                                               "'mkl_pardiso' if available) in "
                                               'petsc_options, OR rebuild PETSc with '
                                               'the default 32-bit indices. The '
@@ -441,9 +448,11 @@ GENERAL_KNOWLEDGE = {'description': 'FEniCSx (dolfinx) general capabilities',
                                      'subdomain getting integrated. Use distinct '
                                      'numeric values (e.g. 2 in MeshTags, 3 in dx) '
                                      "until you've validated the mapping. Plus: "
-                                     'dolfinx demos use '
-                                     'mesh.create_cell_partitioner(GhostMode.shared_facet, '
-                                     '2) for these mixed assemblies (extra overlap=2 '
-                                     'needed for cross-mesh entity matching). (File '
+                                     'the C++ demo builds its mesh with '
+                                     'mesh::create_cell_partitioner(mesh::GhostMode::shared_facet) '
+                                     '(the optional integer argument of '
+                                     'create_cell_partitioner is '
+                                     'max_facet_to_cell_links, default 2, not an '
+                                     'overlap depth). (File '
                                      'walk cpp/demo/codim_0_assembly/main.cpp '
                                      '2026-06-03.)'}}

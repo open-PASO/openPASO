@@ -8,7 +8,18 @@ Discontinuous Galerkin methods and adaptive meshes.
 pip install dune-fem mpi4py
 ```
 
-`mpi4py` is a hidden requirement: without it the first import stops with "Please run pip install mpi4py before rerunning your Dune script."
+`mpi4py` is a hidden requirement (no dune-* package declares it) when DUNE was built against MPI, which happens when an MPI library is found while the dune-* packages are built. Without it the first import then stops with:
+
+```
+RuntimeError:
+The Dune modules were configured using MPI. For the Python bindings to work,
+the Python package 'mpi4py' is required.
+Please run
+    pip install mpi4py
+before rerunning your Dune script.
+```
+
+A DUNE built without MPI imports without `mpi4py`.
 
 Then check that openPASO sees it:
 
@@ -38,5 +49,5 @@ python check_install.py
 | `poisson_mms` | 3D variable-coefficient Poisson manufactured-solution (MMS) convergence family — -div(kappa grad u) = f on [0,L]^3, affine kappa, exact Dirichlet data, uniform refinement with per-level L2/H1 error lines; theoretical L2 order k+1 / H1 order k | 3-D | `3d_varcoeff` |
 | `reaction_diffusion` | Reaction-diffusion (transient) | 2-D | `2d` |
 | `registry_survey` | Registry survey: builds every entry this dune-fem install declares across all 8 axes (spaces, schemes, solvers, storages, models, operators, functions, views) and checks each against something independent of the run. Also records the first-use JIT cost, which is 85-200s per new space and 0.1s once cached. | 2-D | `default` |
-| `stokes` | Stokes flow with Uzawa iteration (UFL) | 2-D | `2d` |
+| `stokes` | Stokes flow, Taylor-Hood P2/P1 on one composite space, one monolithic direct solve (UFL) | 2-D | `2d` |
 | `time_dependent_heat` | Transient heat du/dt - alpha*Δu = f via implicit Euler time-stepping | 2-D | `2d` |

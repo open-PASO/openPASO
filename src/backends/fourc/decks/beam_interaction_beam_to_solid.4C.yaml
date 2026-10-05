@@ -36,7 +36,9 @@ SOLVER 1:
   NAME: "Structure_Solver"
 BEAM INTERACTION:
   REPARTITIONSTRATEGY: "Everydt"
-  SEARCH_STRATEGY: "bruteforce_with_binning"
+  # No SEARCH_STRATEGY: a 4C before 2026.2.0 defaults to bruteforce_with_binning, and
+  # 4C 2026.2.0 removed the key (it always searches with ArborX), so leaving it out
+  # reads on every release.
 BEAM INTERACTION/BEAM TO SOLID VOLUME MESHTYING:
   CONTACT_DISCRETIZATION: gauss_point_to_segment
   CONSTRAINT_STRATEGY: penalty

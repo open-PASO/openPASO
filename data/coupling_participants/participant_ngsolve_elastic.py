@@ -84,8 +84,8 @@ def B_SRC(x, y):
     `x`, `y` are CoefficientFunctions and carry NO NumPy ufuncs, so do NOT call
     this function on them (np.sin(x) raises; np.zeros_like(x) silently returns
     a 0-d object array and the source collapses to a constant), and do NOT wrap
-    the function -- CoefficientFunction(B_SRC) is a TypeError ("incompatible
-    constructor arguments", measured). Sample it at the mesh vertices instead,
+    the function -- CoefficientFunction(B_SRC) raises ValueError ("Cannot make
+    CoefficientFunction from <function ...>", measured). Sample it at the mesh vertices instead,
     np.array([vert.point for vert in mesh.vertices]), into one P1 GridFunction per component on
     your space (gf.vec.FV().NumPy()[vertex_dofs] = B_SRC(vx, vy)[i]); a GridFunction IS
     a CoefficientFunction and integrates as gf_x * v[0] * dx + gf_y * v[1] * dx, with v the test

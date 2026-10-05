@@ -120,9 +120,14 @@ def load_all_backends():
                 # named the server's own venv as DUNE's Python; promoting it made it look
                 # user-set, and every later lookup trusted it over the backend's own
                 # verified finder. Those finders search the conda envs themselves. A
-                # recorded 4C binary is still promoted, but only while it exists.
+                # recorded 4C binary is still promoted, but only while it exists, and
+                # not when it is a Spack build: the Spack lookup picks the newest
+                # build on every start, and promoting the recorded hashed path would
+                # pin whichever build was newest when rediscovery ran.
                 if backend == "fourc" and loc and os.path.isfile(loc):
-                    os.environ.setdefault("FOURC_BINARY", loc)
+                    from core.spack import build_prefix
+                    if build_prefix(loc) is None:
+                        os.environ.setdefault("FOURC_BINARY", loc)
                 src_root = info.get("source_root", "")
                 # An UNBUILT checkout is not a root anyone should run from. Measured 2026-09-24:
                 # discovered_config.json recorded /home/<user>/Kratos with needs_build: true, this

@@ -18,7 +18,8 @@
  * checks, consistent traction recovery, output -- is served and runs as it
  * stands once the holes are filled. Holes 1, 3, 4 and 5 fill variables
  * declared above them: keep their own helpers inside a { } block, since the
- * served lines after them declare names of their own.
+ * served lines after them declare names of their own. Hole 2 declares the
+ * two names it leaves, at the level of main, outside any block.
  *
  * THE DISPLACEMENT HAS TWO COMPONENTS. fe is FESystem<2>(FE_Q<2>(degree), 2):
  * every support point carries one dof per component, fe.n_dofs_per_cell()
@@ -342,7 +343,9 @@ int main(int argc, char **argv)
     // Uses: in.lam and in.mu (the plane-strain Lame constants the wrapper
     // passed) and source_sample(in, p) (the wrapper's samples of the body
     // force b, interpolated to a point p, as a Tensor<1, 2>).
-    // Leaves: `stress` and `body_force`. stress(e) is the stress of linear
+    // Leaves: `stress` and `body_force`, declared here at the level of main
+    // (inside a { } block they end at its brace, and the build stops on
+    // hole 3's first use of them). stress(e) is the stress of linear
     // elasticity for a symmetric strain e, both a SymmetricTensor<2, 2>: lam
     // times the trace of e times the identity, plus 2 mu times e.
     // body_force(p) is b at a const Point<2> p, as a Tensor<1, 2>. Hole 3
@@ -401,8 +404,9 @@ int main(int argc, char **argv)
     // emptied has lost the traction it carried.
     // The lines after it stop when b is non-zero and volume_rhs is zero, when
     // system_matrix does not vanish on the three rigid motions (the two
-    // translations and the rotation), and when it does not give the strain
-    // energy of the three uniform unit strains.
+    // translations and the rotation), when it does not give the strain
+    // energy of the three uniform unit strains, and when volume_rhs . v is not
+    // the integral of b . v for those six linear displacements v.
     // ── SOLVE ─ openPASO DOES NOT SERVE THIS ─ begin
     {
       FEValues<2> fe_values(mapping, fe, QGauss<2>(fe.degree + 1),
@@ -476,6 +480,38 @@ int main(int argc, char **argv)
                  std::to_string(b) + " (0: e_xx, 1: e_yy, 2: e_xy) is " + num(got) + " from system_matrix and " +
                  num(want) + " from the law over the box: system_matrix is not the stiffness of stress : eps");
         }
+      // served: volume_rhs is the load of b, read off the same six linear displacements v: entry i being
+      // the integral of b . phi_i, volume_rhs . v is the integral of b . v over the box
+      FEValues<2> load_values(mapping, fe, QGauss<2>(fe.degree + 2), update_quadrature_points | update_JxW_values);
+      double want[6] = {0, 0, 0, 0, 0, 0}, size[6] = {0, 0, 0, 0, 0, 0}, gap = 0, flip = 0;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        load_values.reinit(cell);
+        for (unsigned int p = 0; p < load_values.n_quadrature_points; ++p)
+        {
+          const Point<2> &at = load_values.quadrature_point(p);
+          const Tensor<1, 2> b_at = body_force(at);
+          const double x = at[0] - xc, y = at[1] - yc, dv = load_values.JxW(p);
+          const double ux[6] = {1, 0, -y, x, 0, y}, uy[6] = {0, 1, x, 0, y, x};
+          for (unsigned int k = 0; k < 6; ++k)
+          {
+            want[k] += (b_at[0] * ux[k] + b_at[1] * uy[k]) * dv;
+            size[k] += (std::abs(b_at[0] * ux[k]) + std::abs(b_at[1] * uy[k])) * dv;
+          }
+        }
+      }
+      const double top = *std::max_element(size, size + 6);
+      for (unsigned int k = 0; k < 6; ++k)
+      {
+        field(k, u);
+        gap = std::max(gap, std::abs(volume_rhs * u - want[k]));
+        flip = std::max(flip, std::abs(volume_rhs * u + want[k]));
+      }
+      if (top > 0 && gap > 0.05 * top)
+        fail("BODY_FORCE: volume_rhs is not the load of b: on the six linear displacements v (two translations, "
+             "the rotation, three uniform strains) volume_rhs . v misses the integral of b . v over the box by up "
+             "to " + num(100 * gap / top) + " % of its size" + (flip <= 0.05 * top ? ", and meets it with the "
+             "opposite sign: hole 3 integrates -b" : "") + ". Entry i of volume_rhs is the integral of b . phi_i");
     }
     std::cout << "BODY_FORCE " << (b_max > 0 ? "on" : "off") << ": max|b| = " << b_max
               << ", max|volume_rhs| = " << volume_rhs.linfty_norm() << std::endl;

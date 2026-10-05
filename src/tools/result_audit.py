@@ -1172,6 +1172,13 @@ def solver_stopped_findings(work: Path) -> list[dict]:
                 text = log.read_text(errors="replace")
             except OSError:
                 continue
+            # A SCRIPT THAT STOPPED WITH ITS SOLVER EXPORTED NOTHING. The captured console says its own
+            # return code; files beside it are an earlier run's. Measured: a deal.II side whose program
+            # stopped (returncode 1) was told it "exported anyway" from a field file a standalone run
+            # had left a minute before.
+            _rc = re.search(r"^returncode:\s*(-?\d+)", text, re.M)
+            if _rc and int(_rc.group(1)) != 0:
+                continue
             hits = []
             code_name = ""
             for code, needles in _SOLVER_STOP_LINES:
@@ -1237,6 +1244,8 @@ def unparsed_level_files_findings(work: Path) -> list[dict]:
         name = q.name
         if _LEVEL_FILE.match(name):
             continue
+        if re.fullmatch(r"residual_level\d+\.previous\.csv", name):
+            continue        # couple() keeps an earlier history so before an empty run replaces it
         if not _LOOKS_PER_LEVEL.search(name):
             continue
         stem = name.split("_")[0].lower() if "_" in name else ""
@@ -2683,7 +2692,13 @@ def interface_sign_findings(work: Path) -> list[dict]:
     # about that size. Reading "the fluxes are equal and opposite" as an
     # instruction to CONSTRUCT one side from the other leaves the claim that
     # two codes met at the interface with no support at all.
-    mirror_lvls = []
+    # AND A CONSTANT IS HANDED BACK EXACTLY. A Neumann side's consistent recovery returns a load that
+    # is one value along the interface unchanged (an assembly identity), so the two files cancel to
+    # their last digit with nobody copying a column. Measured: a FEBio Dirichlet side that never read
+    # its reaction exported its body force's nodal load over W -- one value along the whole interface
+    # -- its scikit-fem partner handed it back exactly, and the "constructed" reading sent the cell
+    # to fix the right side.
+    mirror_lvls, flat_lvls = [], []
     for lvl in sorted({l for l, _ in ifs}):
         a, b = ifs.get((lvl, "A")), ifs.get((lvl, "B"))
         if not (a and b):
@@ -2701,9 +2716,25 @@ def interface_sign_findings(work: Path) -> list[dict]:
             n = min(len(qa), len(qb))
             if n and max(abs(qa[i]) for i in range(n)) > 0 and \
                     all(qa[i] + qb[i] == 0.0 for i in range(n)):
-                mirror_lvls.append(lvl)
+                cols = [c for c in zip(*ga[2]) if any(c)]
+                if len(ga[2]) > 2 and all(max(c) - min(c) <= 1e-12 * max(abs(v) for v in c) for c in cols):
+                    flat_lvls.append(lvl)
+                else:
+                    mirror_lvls.append(lvl)
         except Exception:
             continue
+    if flat_lvls:
+        out.append({"sequence": "interface flux one value",
+                    "values": flat_lvls, "finding": (
+            "THE INTERFACE FLUX IS ONE VALUE ALONG THE WHOLE INTERFACE at level"
+            + ("s " if len(flat_lvls) > 1 else " ") + ", ".join(str(l) for l in flat_lvls)
+            + ", on both sides (per component), and side B's is side A's negated to the last digit. That "
+            "cancellation is no sign of a copied column: a Neumann side's own recovery hands a load "
+            "that is one value along the interface back unchanged. The one value is the thing to look "
+            "at: a flux recovered from a solve with a source, or with interface values that vary, is "
+            "one number along the whole interface only where the problem's own flux is that constant. "
+            "If yours is not, the Dirichlet side's export did not come from its solve: see whether it "
+            "moves when the displacement or temperature it is handed moves.")})
     if mirror_lvls:
         out.append({"sequence": "interface flux constructed",
                     "values": mirror_lvls, "finding": (
@@ -4303,8 +4334,8 @@ def field_continuity_finding(export_a: dict, export_b: dict,
             num = max(num, abs(ra[c] - rb[c]))
     scale = max((abs(x) for r in ua for x in r[:ncomp]), default=0.0)
     scale = max(scale, max((abs(x) for r in ub for x in r[:ncomp]), default=0.0))
-    if scale <= 0:
-        return None                         # near-zero owns this, not continuity
+    if scale <= 1e-14:
+        return None                         # near-zero / transmitted-nothing own this, not continuity
     rel = num / scale
     if rel < 0.25:
         return None
@@ -4626,7 +4657,7 @@ def pde_source_findings(pde_json: str, task_text: str = "") -> list[dict]:
 # be edited to be ranked.
 _PRIORITY_TABLE = [
     (10, ("NOT COUPLED", "NEVER RECEIVED", "IDENTICALLY ZERO ON BOTH SIDES",
-          "NEGATED TO THE LAST BIT", "SMALLER THAN ITS PARTNER",
+          "NEGATED TO THE LAST BIT", "ONE VALUE ALONG THE WHOLE INTERFACE", "SMALLER THAN ITS PARTNER",
           "TRANSMITTED NOTHING", "WAS NEVER RUN", "NEVER RUN",
           "PRODUCED BYTE-IDENTICAL", "NOT A FUNCTION OF ITS IMPORTS",
           "NOT COUPLED TO ITS PARTNER", "EXITED NON-ZERO", "TIMED OUT")),
@@ -6883,23 +6914,37 @@ def _momentum_findings(work: Path, side: str, op: dict, since=None) -> list[dict
         # mu grad(u):grad(v) + lambda div u div v is elasticity with (lambda - mu, mu).
         # This verdict never named the form, which caused every such failure on record;
         # re-judging the same field with those two materials names it when it fits.
+        # AND THE LOAD, MEASURED. A body force that entered the solve with the opposite sign or twice
+        # or half its size is the third wrong form on record (a deal.II side's assembly subtracted it;
+        # FEBio sides integrated it with 0.25 for a hex8's 1/8, or with a wrong Jacobian): the field then
+        # solves the stated equation with c f, and this verdict named no cause.
         form = ""
-        for (lam2, mu2), what in (((el["lam"], 0.5 * el["mu"]),
-                                   "mu eps(u):eps(v) where 2 mu eps(u):eps(v) belongs -- the "
-                                   "factor 2 on mu is missing"),
-                                  ((el["lam"] - el["mu"], el["mu"]),
-                                   "mu grad(u):grad(v) + lambda div(u) div(v) -- a gradient "
-                                   "inner product where the symmetric strain eps(u) = "
-                                   "(grad u + grad u^T)/2 belongs")):
+        for (lam2, mu2, sx, sy), what in (((el["lam"], 0.5 * el["mu"], fx, fy),
+                                           "mu eps(u):eps(v) where 2 mu eps(u):eps(v) belongs -- the "
+                                           "factor 2 on mu is missing"),
+                                          ((el["lam"] - el["mu"], el["mu"], fx, fy),
+                                           "mu grad(u):grad(v) + lambda div(u) div(v) -- a gradient "
+                                           "inner product where the symmetric strain eps(u) = "
+                                           "(grad u + grad u^T)/2 belongs"),
+                                          *(((el["lam"], el["mu"], f"{c}*({fx})", f"{c}*({fy})"), c)
+                                            for c in (-1.0, 2.0, 0.5))):
             try:
-                alt = check_levels_thermoelastic(levels, fx, fy, lam2, mu2, el["beta"],
+                alt = check_levels_thermoelastic(levels, sx, sy, lam2, mu2, el["beta"],
                                                  op["box"]).as_dict()
             except Exception:                              # noqa: BLE001
                 continue
             if str(alt.get("verdict")) == "CONSISTENT":
                 form = (f" MEASURED ON YOUR FIELD: it DOES satisfy the same equation with "
                         f"lambda = {lam2:g}, mu = {mu2:g}, which is what the stiffness form "
-                        f"{what} solves. Check that form first.")
+                        f"{what} solves. Check that form first." if isinstance(what, str) else
+                        " MEASURED ON YOUR FIELD: it DOES satisfy the same equation with the body "
+                        "force reversed (source_ux and source_uy times -1): the load enters this "
+                        "side's solve with the opposite sign. Check the sign of the body force in "
+                        "its load first." if what < 0 else
+                        f" MEASURED ON YOUR FIELD: it DOES satisfy the same equation with the body "
+                        f"force times {what:g} (source_ux and source_uy times {what:g}): the load "
+                        f"enters this side's solve {'twice' if what > 1 else 'half'} its size. Check "
+                        f"how the body force is integrated into its load first.")
                 break
         out.append({
             "sequence": f"momentum check side {side}", "values": resid,
@@ -7097,6 +7142,14 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
         if isinstance(cfg, dict) and isinstance(cfg.get("full_outer_dirichlet"), bool):
             said.append(cfg["full_outer_dirichlet"])
             continue
+        # THE ELASTIC CONTRACTS SAY IT WITH udx AND udy: their config's outer displacement is the one
+        # on the WHOLE non-interface boundary, the faces the interface ends on included, and they
+        # carry no knob that frees a face. Measured: a scikit-fem elastic side took the interface's
+        # two end nodes out of its held set, both corners went free, the ladder converged at order
+        # 1.2 instead of 2, and this stayed silent for want of a full_outer_dirichlet key.
+        if isinstance(cfg, dict) and cfg.get("udx") is not None and cfg.get("udy") is not None:
+            said.append(True)
+            continue
         for q in sorted(q for q in d.glob("participant*.py") if not _is_backup(q)):
             if ".replaced-" in q.name:
                 continue
@@ -7128,18 +7181,19 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
                 continue
             if not ({"x", "y"} <= set(hf) and {"x", "y"} <= set(hi)) or len(rf) < 16 or len(ri) < 3:
                 continue
-            vc = next((hf.index(c) for c in hf if c not in ("x", "y", "z")), None)
-            if vc is None:
+            vcs = [hf.index(c) for c in hf if c not in ("x", "y", "z")][:3]   # a vector side: each component
+            if not vcs:
                 continue
+            vc = vcs[0]
             F = _np.asarray(rf, float)
             I = _np.asarray(ri, float)
             xy, u = F[:, [hf.index("x"), hf.index("y")]], F[:, vc]
-            if not (_np.isfinite(xy).all() and _np.isfinite(u).all()):
+            if not (_np.isfinite(xy).all() and _np.isfinite(F[:, vcs]).all()):
                 continue
             _legs, _bad = _curve_legs(I[:, [hi.index("x"), hi.index("y")]])
             if _legs is not None or _bad is not None:
                 if _legs is not None:
-                    hits += [(lvl,) + h for h in _free_ends_on_bent(
+                    hits += [(lvl,) + h + (0, hf[vc]) for h in _free_ends_on_bent(
                         xy, u, I[:, [hi.index("x"), hi.index("y")]],
                         [_iface_xy(o / q.name) for o in folders if o != d])]
                 continue
@@ -7150,23 +7204,26 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
             span = float(_np.ptp(xy, axis=0).max()) or 1.0
             tol = 1e-9 * span
             plane = float(_np.median(I[:, [hi.index("x"), hi.index("y")][iax]]))
-            scale = float(_np.abs(u).max()) or 0.0
-            if scale <= 0.0:
-                continue
-            for edge in (float(xy[:, along].min()), float(xy[:, along].max())):
-                on = _np.where(_np.abs(xy[:, along] - edge) <= tol)[0]
-                if len(on) < 4:
+            for k_c, col in enumerate(vcs):
+                u = F[:, col]
+                scale = float(_np.abs(u).max()) or 0.0
+                if scale <= 0.0:
                     continue
-                end = [i for i in on if abs(xy[i, iax] - plane) <= tol]
-                rest = [i for i in on if i not in end]
-                if len(end) != 1 or len(rest) < 3:
-                    continue
-                c = float(_np.median(u[rest]))
-                if _np.abs(u[rest] - c).max() > 1e-12 * scale:
-                    continue                                  # the edge is not held at one value
-                gap = abs(float(u[end[0]]) - c)
-                if gap > 1e-6 * scale:
-                    hits.append((lvl, tuple(float(v) for v in xy[end[0]]), float(u[end[0]]), c, gap / scale))
+                for edge in (float(xy[:, along].min()), float(xy[:, along].max())):
+                    on = _np.where(_np.abs(xy[:, along] - edge) <= tol)[0]
+                    if len(on) < 4:
+                        continue
+                    end = [i for i in on if abs(xy[i, iax] - plane) <= tol]
+                    rest = [i for i in on if i not in end]
+                    if len(end) != 1 or len(rest) < 3:
+                        continue
+                    c = float(_np.median(u[rest]))
+                    if _np.abs(u[rest] - c).max() > 1e-12 * scale:
+                        continue                              # the edge is not held at one value
+                    gap = abs(float(u[end[0]]) - c)
+                    if gap > 1e-6 * scale:
+                        hits.append((lvl, tuple(float(v) for v in xy[end[0]]), float(u[end[0]]), c,
+                                     gap / scale, k_c, hf[col]))
         if not hits:
             continue
         # does this side hold, at those nodes, exactly what it imported there?
@@ -7175,13 +7232,15 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
             imp = json.loads((d / "imports.json").read_text() or "{}")
             blk = next(iter(imp.values()), {}) if isinstance(imp, dict) else {}
             ic = _np.asarray(blk.get("coordinates") or [], float)
-            iv = _np.asarray(blk.get("values") or [], float).ravel()
-            if ic.ndim == 2 and len(ic) == len(iv) and len(iv):
+            iv = _np.asarray(blk.get("values") or [], float)
+            iv = iv.reshape(len(ic), -1) if ic.ndim == 2 and len(ic) and iv.size % len(ic) == 0 else None
+            if iv is not None:
                 lvl_last = max(h[0] for h in hits)
                 last = [h for h in hits if h[0] == lvl_last]
                 imposed = all(_np.abs(_np.hypot(ic[:, 0] - h[1][0], ic[:, 1] - h[1][1])).min() <= 1e-9 * max(span, 1.0)
-                              and abs(iv[int(_np.argmin(_np.hypot(ic[:, 0] - h[1][0], ic[:, 1] - h[1][1])))] - h[2])
-                              <= 1e-9 * max(abs(h[2]), scale) for h in last)
+                              and h[5] < iv.shape[1]
+                              and abs(iv[int(_np.argmin(_np.hypot(ic[:, 0] - h[1][0], ic[:, 1] - h[1][1]))), h[5]]
+                                      - h[2]) <= 1e-9 * max(abs(h[2]), abs(h[3]), 1e-300) for h in last)
         except Exception:                                    # noqa: BLE001
             imposed = False
         try:
@@ -7196,8 +7255,9 @@ def free_interface_end_findings(work: Path, dirs=None, levels=None) -> list[dict
             "priority": 7 if not imposed else 27,
             "finding": (
                 f"{name.upper()}'S FIELD DEPARTS AT THE NODE WHERE THE INTERFACE MEETS AN EDGE IT "
-                f"HOLDS: every other node of that edge carries {worst[3]:.6g} exactly, and the "
-                f"interface end node ({worst[1][0]:g}, {worst[1][1]:g}) carries {worst[2]:.3g} -- "
+                f"HOLDS: every other node of that edge carries {worst[3]:.6g} exactly"
+                + (f" in {worst[6]}" if len({h[6] for h in hits}) > 1 or worst[6] not in ("u", "T") else "")
+                + f", and the interface end node ({worst[1][0]:g}, {worst[1][1]:g}) carries {worst[2]:.3g} -- "
                 f"{share} of the side's peak at level(s) {', '.join(str(l) for l in lv)}. "
                 + ("This side holds there exactly the value it imported: it carries its partner's "
                    "end node, and the partner is where to look -- a partner whose held edges skip "
@@ -9868,8 +9928,8 @@ def _imported_trace_not_held(work: Path, converged: bool | None = None) -> list[
                 continue                                 # not the trace-holding side
             iv, ev = iv.reshape(len(ic), -1), ev.reshape(len(ec), -1)
             scale = float(abs(iv).max())
-            if scale == 0.0:
-                continue
+            if scale == 0.0 or max(scale, float(abs(ev).max())) <= 1e-14:
+                continue                    # both at round-off: "transmitted nothing" owns it
             pr = _pair(ic, ec)
             if pr is None or len(pr["ia"]) < 2 or (pr["only_a"] and pr["only_b"]):
                 continue                                 # not the same points: no pointwise reading

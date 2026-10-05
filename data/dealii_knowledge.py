@@ -6,14 +6,16 @@ from Poisson to compressible Euler, Maxwell, FSI, contact, topology optimization
 deal.II won the 2025 SIAM/ACM CSE Prize.
 
 IMPORTANT about the tutorial count: the step numbering HAS GAPS, so the
-highest number is not the number of tutorials. Counted on a deal.II 9.8
-source checkout there are 88 examples/step-* directories while the
-numbering runs to step-97. In particular step-73 does NOT exist upstream
+highest number is not the number of tutorials. Counted on deal.II 9.7.0
+and 9.7.1 (and on a 9.8.0-pre checkout of March 2026) there are 88
+examples/step-* directories while the numbering runs to step-97; the
+9.8.0 release has 91, numbered up to step-104 (step-98, step-100 and
+step-104 were added). In particular step-73 does NOT exist upstream
 (the AD tutorials are step-71 and step-72); the "step-73 (AD-assisted /
 elasticity)" references that used to appear below have been removed.
-The full set of numbers that do NOT exist, checked against a 9.8
-examples/ directory, is 52, 73, 80, 84, 88, 91, 92, 94, 96 — every
-step-* reference in this catalog was checked against that directory and
+The numbers that do NOT exist are 52, 73, 80, 84, 88, 91, 92, 94, 96 in
+9.7.x, and in the 9.8.0 examples/ directory also 99, 101, 102 and 103 —
+every step-* reference in this catalog was checked against that directory and
 the two dangling ones (step-52, step-80) were corrected.
 Enumerate examples/step-* in the source checkout you actually have -
 a binary package prefix ships no tutorials at all.
@@ -60,7 +62,7 @@ DEALII_KNOWLEDGE = {
                 "basic": ["step-3 (first program)", "step-4 (dim-independent)", "step-5 (variable coeff)"],
                 "adaptive": ["step-6 (AMR + Kelly)", "step-14 (DWR goal-oriented)"],
                 "parallel": ["step-40 (p4est distributed)", "step-50 (parallel GMG)"],
-                "matrix_free": ["step-37 (MF + GMG)", "step-59 (MF DG)", "step-64 (GPU CUDA)"],
+                "matrix_free": ["step-37 (MF + GMG)", "step-59 (MF DG)", "step-64 (GPU, Kokkos)"],
                 "hp": ["step-27 (hp-adaptive)", "step-75 (hp + MF + parallel)"],
             },
             "Helmholtz": ["step-7 (real)", "step-29 (complex-valued, ultrasound)"],
@@ -71,13 +73,13 @@ DEALII_KNOWLEDGE = {
 
         "structural_mechanics": {
             "linear_elasticity": ["step-8 (basic)", "step-17 (MPI parallel)", "step-18 (quasi-static)"],
-            "hyperelasticity": ["step-44 (3-field Neo-Hookean)", "step-72 (AD-assisted)"],
+            "hyperelasticity": ["step-44 (3-field Neo-Hookean)", "step-71 (AD/SD for (magneto-)hyperelastic constitutive laws)"],
             "contact": ["step-41 (obstacle problem)", "step-42 (3D elasto-plastic contact, parallel)"],
             "topology_optimization": ["step-79 (SIMP method, density-based)"],
         },
 
         "fluid_mechanics": {
-            "Stokes": ["step-22 (block precond)", "step-55 (MPI parallel)", "step-56 (GMG Vanka)"],
+            "Stokes": ["step-22 (block precond)", "step-55 (MPI parallel)", "step-56 (GMG on the velocity block, SOR smoother)"],
             "Navier_Stokes": ["step-35 (projection method)", "step-57 (stationary Newton + AMR)"],
             "compressible_Euler": ["step-33 (implicit Newton)", "step-67 (explicit DG, MF, SIMD)",
                                   "step-69 (first-order)", "step-76 (optimized 67)"],
@@ -86,14 +88,14 @@ DEALII_KNOWLEDGE = {
         },
 
         "heat_and_diffusion": {
-            "heat_transient": ["step-26 (AMR in time)", "step-86 (SUNDIALS ARKode)"],
+            "heat_transient": ["step-26 (AMR in time)", "step-86 (PETSc TS)"],
             "advection_diffusion": ["step-9 (SUPG)", "step-12 (DG upwind)", "step-30 (anisotropic AMR)",
                                    "step-51 (HDG)", "step-63 (GMG block smoothers)"],
         },
 
         "wave_and_dynamics": {
-            "acoustic_wave": ["step-23 (Newmark)", "step-24 (absorbing BC)"],
-            "soliton": ["step-25 (Sine-Gordon)", "step-48 (MF explicit RK)"],
+            "acoustic_wave": ["step-23 (theta scheme; Crank-Nicolson at theta=1/2, which equals Newmark beta=1/4, gamma=1/2)", "step-24 (absorbing BC)"],
+            "soliton": ["step-25 (Sine-Gordon)", "step-48 (MF explicit leap-frog)"],
             "elastic_wave": ["step-62 (frequency domain, PML)"],
             "Schrodinger": ["step-58 (nonlinear, operator splitting)"],
         },
@@ -105,9 +107,10 @@ DEALII_KNOWLEDGE = {
         "multiphysics_coupling": {
             "Stokes_elasticity": ["step-46 (subdomain coupling via FE_Nothing)"],
             "Stokes_temperature": ["step-31 (Boussinesq)", "step-32 (parallel)"],
-            # step-80 does NOT exist upstream — checked against a 9.8
-            # examples/ directory, where the missing numbers are
-            # 52, 73, 80, 84, 88, 91, 92, 94 and 96. The
+            # step-80 does NOT exist upstream — checked against the 9.7.x
+            # and 9.8.0 examples/ directories, where the missing numbers
+            # are 52, 73, 80, 84, 88, 91, 92, 94 and 96 (and in 9.8.0
+            # also 99, 101, 102 and 103). The
             # non-matching-grid tutorials are step-89 (mortaring) and
             # step-90 (TraceFEM); the immersed / distributed-Lagrange
             # route is step-60.
@@ -128,7 +131,7 @@ DEALII_KNOWLEDGE = {
             # step-73 does not exist upstream (verified against
             # a 9.8 examples/ directory).
             "AD": ["step-71 (concepts)", "step-72 (energy functional)"],
-            "SUNDIALS": ["step-77 (KINSOL nonlinear)", "step-86 (ARKode time stepping)"],
+            "SUNDIALS": ["step-77 (KINSOL nonlinear)"],
         },
     },
 
@@ -140,10 +143,12 @@ DEALII_KNOWLEDGE = {
             "FE_Q(p)": "Standard Lagrange on quads/hexes, any order p, Gauss-Lobatto points",
             "FE_Q_Hierarchical(p)": "Hierarchical basis (efficient for hp-adaptivity)",
             "FE_Bernstein(p)": "Bernstein polynomial basis (positive, partition of unity)",
-            "FE_Hermite(p)": ("Hermite interpolation (C1 at vertices). deal.II "
-                              "reports conforming_space == Conformity::H2, not H1 "
-                              "(verified by instantiation); it is listed under H1 here "
-                              "because H2 is contained in H1."),
+            "FE_Hermite(p)": ("Hermite interpolation of odd degree p, continuous in "
+                              "derivatives up to order (p-1)/2 (C1 for p=3). deal.II "
+                              "reports conforming_space == Conformity::H2, not H1, for "
+                              "p >= 3, and Conformity::H1 for p = 1, which has only "
+                              "vertex values (verified by instantiation); it is listed "
+                              "under H1 here because H2 is contained in H1."),
             "FE_SimplexP(p)": "Lagrange on simplices (triangles/tetrahedra)",
             "FE_SimplexP_Bubbles(p)": "Simplex Lagrange + bubble enrichment",
         },
@@ -330,7 +335,7 @@ DEALII_KNOWLEDGE = {
         "multigrid": {
             "geometric": "mg::SmootherRelaxation + MGTransferPrebuilt (step-16)",
             "matrix_free_GMG": "MGTransferMatrixFree + Chebyshev smoother (step-37, 50, 59)",
-            "block_smoothers": "Point/block Jacobi/SOR for advection (step-63), Vanka for Stokes (step-56)",
+            "block_smoothers": "Point/block Jacobi/SOR for advection (step-63); SOR-smoothed GMG on the Stokes velocity block (step-56)",
         },
         "matrix_free": {
             "description": "MatrixFree + FEEvaluation: 3 levels of parallelism (MPI + threading + SIMD)",
@@ -338,7 +343,7 @@ DEALII_KNOWLEDGE = {
             "key_advantage": "10x faster than sparse matrix assembly for high-order elements",
         },
         "nonlinear": ["Manual Newton loop", "SUNDIALS KINSOL (step-77)"],
-        "time_integration": ["Manual theta-scheme", "SUNDIALS ARKode (step-86)", "PETSc TS (step-86)",
+        "time_integration": ["Manual theta-scheme", "SUNDIALS ARKode (no tutorial uses it)", "PETSc TS (step-86)",
                             # step-52 does NOT exist upstream (see the gap
                             # list above). The TimeStepping / Runge-Kutta
                             # machinery is used by step-67 and step-76,
@@ -355,7 +360,9 @@ DEALII_KNOWLEDGE = {
     "parallel": {
         "shared_memory": "TBB (Threading Building Blocks), Taskflow (v9.7), WorkStream pattern",
         "distributed": "MPI + p4est: parallel::distributed::Triangulation, scalable to 300,000+ processes",
-        "GPU": "CUDA via CUDAWrappers::MatrixFree (step-64), Kokkos (v9.7) for portability",
+        "GPU": ("Kokkos-based Portable::MatrixFree / Portable::FEEvaluation (step-64); "
+                "Kokkos is required since 9.5, and CUDAWrappers::MatrixFree was "
+                "deprecated in 9.6 and removed in 9.7"),
         "demonstrated_scale": "2 × 10^12 unknowns on 304,128 MPI processes",
     },
 
@@ -363,7 +370,7 @@ DEALII_KNOWLEDGE = {
     # ADVANCED FEATURES
     # ═══════════════════════════════════════════════════════════════════════
     "advanced": {
-        "automatic_differentiation": "Sacado (Trilinos), ADOL-C, SymEngine — step-71/72/73",
+        "automatic_differentiation": "Sacado (Trilinos), ADOL-C, SymEngine — step-71/72",
         "manifold_descriptions": ["SphericalManifold", "CylindricalManifold",
                                   "TransfiniteInterpolationManifold (step-65)", "OpenCASCADE (step-54)"],
         "periodic_BCs": "DoFTools::make_periodicity_constraints (step-45)",
@@ -378,9 +385,9 @@ DEALII_KNOWLEDGE = {
     # ═══════════════════════════════════════════════════════════════════════
     "code_generation": {
         "cmake": """cmake_minimum_required(VERSION 3.13.4)
-project(my_simulation)
 find_package(deal.II 9.5.0 REQUIRED HINTS ${DEAL_II_DIR})
 deal_ii_initialize_cached_variables()
+project(my_simulation)
 add_executable(my_simulation main.cpp)
 deal_ii_setup_target(my_simulation)""",
 

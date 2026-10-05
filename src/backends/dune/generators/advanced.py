@@ -1216,8 +1216,6 @@ KNOWLEDGE = {
         "time_stepping": {
             "backward_euler": "1st order, A-stable, unconditionally stable",
             "crank_nicolson": "2nd order, A-stable, better accuracy",
-            "dirk23": "2nd/3rd order DIRK via dune-fem's Runge-Kutta steppers",
-            "sdirk22": "2nd order singly-diagonal implicit RK",
         },
         "required_vs_optional": {
             "REQUIRED": [
@@ -1225,10 +1223,27 @@ KNOWLEDGE = {
                 "RIGHT — without it the 'transient' run just re-solves "
                 "the steady problem every step",
                 "ONE scheme built OUTSIDE the time loop",
-                "a stage/output function distinct from the one the "
-                "right-hand side reads",
             ],
             "OPTIONAL": [
+                "an output function distinct from the one the "
+                "right-hand side reads, copied back after each step. "
+                "This template solves INTO u_n, and for this LINEAR "
+                "scheme dune-fem 2.12.0.2 reads the right-hand side "
+                "before it overwrites the target, so that is the same "
+                "step (measured 2026-10-01: 2.1e-8 apart after the "
+                "template's 50 steps, max value 0.4995, because the "
+                "solve first sets the target's boundary dofs to the "
+                "Dirichlet value (femscheme.hh _solve: "
+                "setConstraints(solution)) and only then reads the "
+                "right-hand side, and the Gaussian start is 3.7e-6 "
+                "there, not 0; 1.1e-15 apart with a "
+                "start that is 0 on the boundary and linear.tolerance "
+                "1e-14). It is NOT optional when the Dirichlet data "
+                "change in time (g = t: 1.1e-2 apart after 5 steps) or "
+                "when the form is nonlinear (a (1+u^2) diffusion step "
+                "with nonlinear.maxiterations=50: the aliased solve "
+                "returned converged=False after 50 iterations, the "
+                "separate-target solve converged in 3)",
                 "dune.ufl.Constant for dt and for time-dependent "
                 "coefficients — assigning .value avoids a JIT rebuild, "
                 "while changing a float literal inside the form forces "
@@ -1239,9 +1254,19 @@ KNOWLEDGE = {
             ],
             "NOT AVAILABLE": [
                 "DIRK23 / SDIRK22 / Heun / SSP-RK as ready-made "
-                "dune-fem objects. Older catalog text listed them; "
-                "they belong to dune-fem-dg, which is NOT importable "
-                "from a plain dune-fem install (executed 2026-08-03). "
+                "steppers callable from Python. Older catalog text "
+                "listed them. dune-fem 2.12.0.2 implements its "
+                "Runge-Kutta ODE solvers only in C++ "
+                "(dune/fem/solver/rungekutta: DIRK23 with 2 stages and "
+                "order 3, DIRK34, the explicit tvd2 table (Heun) and "
+                "others; SDIRK22 is "
+                "accepted by the name selector but has no Butcher "
+                "table, so selecting it throws NotImplemented) and has "
+                "no Python binding for them. The Python wrappers (the "
+                "rk module of dune.femdg with Heun/ssp2/ssp3, "
+                "femdgStepper, rungeKuttaSolver) are in dune-fem-dg, "
+                "which is NOT importable from a plain dune-fem install "
+                "(executed 2026-08-03, re-checked 2026-10-01). "
                 "Implement the stepper yourself — SSP-RK2 is four "
                 "lines and there is a working one in the dg_advection "
                 "template.",
@@ -1436,17 +1461,20 @@ KNOWLEDGE = {
                 "working sign convention is in the executed template.)"
             ),
             (
-                "[API] The multi-field factory is "
-                "dune.fem.space.product(S, V) or .composite(S, V) — "
+                "[API] The multi-field factory for this monolithic "
+                "system is dune.fem.space.composite(S, V) — "
                 "there is NO dune.fem.space.product_space, the name is "
-                "ABSENT / FALSIFIED. Signal: importing product_space "
+                "ABSENT / FALSIFIED (executed 2026-08-03: hasattr("
+                "dune.fem.space,'product_space') is False). Signal: "
+                "importing product_space "
                 "raises ImportError; the name only ever existed as a "
-                "local alias in this catalog's own template. product "
-                "and "
-                "composite were measured to produce the SAME object "
-                "for the same arguments (same dimRange, same size). "
-                "(Executed 2026-08-03: hasattr("
-                "dune.fem.space,'product_space') is False.)"
+                "local alias in this catalog's own template. "
+                "dune.fem.space.product(S, V) is NOT the same: it has "
+                "the same C++ type, dimRange and size as composite, "
+                "but it is dune-fem's space for a DECOUPLED solve, has "
+                "no storage, and galerkin() on it raises TypeError at "
+                "scheme construction (measured 2026-10-01 with this "
+                "template's form: composite solved, product raised)."
             ),
             (
                 "[Numerical] Equal-order flux and potential spaces "

@@ -692,10 +692,14 @@ _CAPABILITY_LIMITS = [
     "(Verified 2026-08-06 on the installed FEBio binary, each of its shared "
     "libraries and its source tree: zero hits in every probe)",
 
-    "[Coupling][Physics] FEBio 4 HAS NO HEAT MODULE, so a conduction "
-    "participant cannot be written in FEBio at all — the heat module was "
-    "removed upstream and survives only as a plugin. The substitute for a "
-    "thermal coupling demonstration is the exact linear analogue: a "
+    "[Coupling][Physics] FEBio 4 HAS NO HEAT MODULE — the heat module was "
+    "removed upstream and survives only as a plugin — but a conduction "
+    "participant CAN still be written in FEBio: the `thermo-fluid` module "
+    "with every fluid velocity DOF fixed reduces its energy equation to "
+    "Fourier conduction (the heat_3d_bar template), with `prescribed fluid "
+    "temperature` for a Dirichlet temperature and the `fluid heat flux` "
+    "surface load for a Neumann flux. The shipped FEBio coupling participant "
+    "solves the exact linear analogue instead: a "
     "uniaxial-strain elastic bar, where displacement plays the role of "
     "temperature and the P-wave modulus the role of conductivity, which "
     "couples through the same Dirichlet-Neumann contract with a traction in "

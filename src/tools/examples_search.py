@@ -520,7 +520,8 @@ The element section name is per field and is one of:
     ALE ELEMENTS, LUBRICATION ELEMENTS, ARTERY ELEMENTS,
     REDUCED D AIRWAYS ELEMENTS, TRANSPORT2 ELEMENTS, PARTICLES
 The topology sections are DNODE-NODE, DLINE-NODE, DSURF-NODE, DVOL-NODE
-TOPOLOGY, and the entity words inside them are DNODE, DLINE, DSURFACE, DVOL.
+TOPOLOGY, and the entity words inside them are DNODE, DLINE, DSURFACE (or
+DSURF), DVOL (or DVOLUME); the short and long forms give identical results.
 
 ### Route B — external Exodus mesh
     STRUCTURE GEOMETRY:
@@ -592,7 +593,8 @@ the element does not own is fatal ("After parsing, the line still contains
 | ELETYPE | cell types | REQUIRED keys |
 |---|---|---|
 | SOLID  | HEX8 HEX18 HEX20 HEX27 TET4 TET10 WEDGE6 PYRAMID5 NURBS27 | MAT, KINEM |
-| WALL   | QUAD4 QUAD8 QUAD9 TRI3 TRI6 | MAT, KINEM, EAS, THICK, STRESS_STRAIN, GP |
+| WALL (4C before 2026.2.0) | QUAD4 QUAD8 QUAD9 TRI3 TRI6 | MAT, KINEM, EAS, THICK, STRESS_STRAIN, GP |
+| SOLID, 2D (4C 2026.2.0 and later) | QUAD4 QUAD8 QUAD9 TRI3 TRI6 | MAT, KINEM, THICKNESS, PLANE_ASSUMPTION |
 | THERMO | QUAD4 QUAD8 QUAD9 TRI3 HEX8 HEX20 HEX27 TET4 TET10 WEDGE6 PYRAMID5 LINE2 | MAT |
 | TRANSP | QUAD4 QUAD8 QUAD9 TRI3 TRI6 HEX8 HEX20 HEX27 TET4 TET10 WEDGE6 WEDGE15 PYRAMID5 LINE2 LINE3 | MAT, TYPE (`TYPE Std` for plain convection-diffusion) |
 | FLUID  | QUAD4 QUAD8 QUAD9 TRI3 TRI6 HEX8 HEX20 HEX27 TET4 TET10 WEDGE6 WEDGE15 PYRAMID5 | MAT, NA (`NA Euler` for a fixed mesh, `NA ALE` for a moving one) |
@@ -605,23 +607,28 @@ also declares NURBS cells, which are omitted here because they need the
 separate NURBS apparatus (SHAPEFCT, KNOTVECTORS, CP lines) described
 below and are not drop-in replacements.
 
-SOLID owns NO 2D cell type on this build — 2D structural cells belong to
+Before 4C 2026.2.0 SOLID owns NO 2D cell type — 2D structural cells belong to
 WALL. Getting this backwards gives
 "Element 'SOLID' does not seem to know cell type 'quad4'."
-(the cell type is echoed in LOWERCASE).
+(the cell type is echoed in LOWERCASE). 4C 2026.2.0 and 2026.3.0 have no WALL:
+their SOLID takes the 2D cells with THICKNESS and PLANE_ASSUMPTION, and a WALL
+line gives
+"Unknown type 'WALL' of finite element".
 
 BEING LISTED BY `4C --parameters` IS NOT THE SAME AS WORKING. `--parameters`
 describes the PARSER; some cell types parse and then die at element
-evaluation. Confirmed dead on this build: WALL NURBS4/NURBS9 (the registered
+evaluation. Confirmed dead on a development build with WALL: WALL NURBS4/NURBS9 (the registered
 type for those is WALLNURBS, and the rejection misleadingly says "Unknown
 type 'WALL' of finite element"), and THERMO TRI6/WEDGE15/LINE3/NURBS4/NURBS9,
 which abort with "Element shape TRI6 (6 nodes) not activated. Just do it."
-The tables above list only what was executed successfully.
+The tables above list only what was executed successfully: on a development
+build before 2026.2.0, and the 2D SOLID row on 4C 2026.2.0 and 2026.3.0.
 
-WALL GP is per direction for quads ("GP 2 2", QUAD9 wants "GP 3 3") but for
-TRI3/TRI6 the SECOND number must be 0: "GP 3 0". "GP 3 3" on a triangle
-aborts with "Unknown number of Gauss points for tri element". WALL EAS full
-is 4-node only.
+WALL's GP (before 4C 2026.2.0) is per direction for quads ("GP 2 2", QUAD9 wants "GP 3 3")
+but for TRI3/TRI6 the SECOND number must be 0: "GP 3 0". "GP 3 3" on a
+triangle aborts with "Unknown number of Gauss points for tri element". WALL
+EAS full is 4-node only. The 2D SOLID of 4C 2026.2.0 and 2026.3.0 has no GP key, and only its
+QUAD4 takes TECH: none or eas_full, which needs KINEM nonlinear.
 
 KINEM takes exactly "linear" or "nonlinear". "nonlinearTotLag" is what 4C
 echoes back internally after parsing "nonlinear"; writing it is rejected with
@@ -633,8 +640,8 @@ NURBS cells of any element type additionally need PROBLEM TYPE/SHAPEFCT:
 "CP <id> COORD x y z <weight>" instead of "NODE". Omitting SHAPEFCT gives
 "Received discretization which is not Nurbs!"; omitting the knotvectors gives
 "cannot get ele knots when filled is false". Some element/cell combinations
-fail hard instead: WALLNURBS with plain NODE lines segfaults with no message
-at all (exit 139). Treat NURBS as a separate exercise, not a drop-in cell
+fail hard instead: WALLNURBS (before 4C 2026.2.0) with plain NODE lines segfaults with
+no message at all (exit 139). Treat NURBS as a separate exercise, not a drop-in cell
 type.
 An element type that does not exist at all gives
 "Unknown type 'BOGUS' of finite element".
@@ -825,8 +832,9 @@ complete deck plus the three sections contact adds.
   PORO GEOMETRY instead of POROELASTICITY DYNAMIC;
   IO/RUNTIME VTK OUTPUT/PARTICLES — no such section, particle output is
   configured inside PARTICLE DYNAMIC.
-- `SOLID QUAD4` in 2D when SOLID owns no 2D cell type — use WALL with all
-  six of its keys.
+- The 2D element of the other release: before 4C 2026.2.0 SOLID owns no 2D
+  cell type, so use WALL with all six of its keys; from 4C 2026.2.0 on there
+  is no WALL, so use SOLID with THICKNESS and PLANE_ASSUMPTION.
 - Missing DENS in a structural material (zero mass matrix = singular).
 - Forgetting KINEM: nonlinear for large-deformation problems.
 - In a standalone PROBLEMTYPE: Thermo run, using the THERMO-prefixed
@@ -943,9 +951,9 @@ compile that reads /usr/include/deal.II is building against that package.
 1. Always refine BEFORE distributing DOFs
 2. Use DynamicSparsityPattern → copy_from → SparsityPattern
 3. Vector FE: FESystem<dim>(FE_Q<dim>(1), dim)
-4. Boundary IDs depend on GridGenerator: hyper_cube and hyper_rectangle give every face id 0;
-   with colorize = true as their last argument, hyper_rectangle (and subdivided_hyper_rectangle)
-   give 0 at x = x0, 1 at x = x1, 2 at y = y0, 3 at y = y1
+4. Boundary IDs depend on GridGenerator: hyper_cube and hyper_rectangle give every boundary face id 0 by
+   default (2-D and 3-D); with colorize = true as their last argument, hyper_rectangle (and
+   subdivided_hyper_rectangle) give 0 at x = x0, 1 at x = x1, 2 at y = y0, 3 at y = y1 (4 and 5 at z = z0, z1)
 5. DataOut for VTU output
 """
 
@@ -1100,9 +1108,11 @@ vals = u_h.as_numpy  # returns a numpy view (read/write)
    solver is its own C++ type so it costs an extra ~60 s JIT build).
    The string is not validated in Python — a wrong name fails at scheme
    construction with a message about `'fem.solver.linear.method'`.
-9. `dune.fem.threading.use` defaults to 1 even when
-   `dune.fem.threading.max` reports every core; `threading.useMax()`
-   opts in to all of them.
+9. `dune.fem.threading.use` starts at DUNE_NUM_THREADS, else
+   OMP_NUM_THREADS, else 1, and `dune.fem.threading.max` at
+   DUNE_NUM_THREADS, else OMP_NUM_THREADS, else the core count: with
+   neither variable set, use is 1 while max reports every core;
+   `threading.useMax()` opts in to all of them.
 10. `dune.fem.globalRefine(level, uh)` is a SILENT NO-OP on a YaspGrid
    (element count, space size and dof array all unchanged, no
    exception). It only refines-and-prolongs on
@@ -1184,11 +1194,11 @@ Per-physics pitfalls, deck skeletons and runnable templates:
 _FEBIO_INPUT_GUIDE = """\
 # FEBio Input File Guide (.feb XML)
 
-## Structure (v4.0)
+## Structure (v4.0), in this order
 ```xml
 <?xml version="1.0"?>
 <febio_spec version="4.0">
-  <Module type="solid"/>  <!-- solid, biphasic, heat, etc. -->
+  <Module type="solid"/>  <!-- solid, biphasic, solute, multiphasic, fluid, fluid-FSI, fluid-solutes, thermo-fluid, multiphasic-FSI, polar fluid; there is no heat module -->
   <Control>...</Control>
   <Globals>...</Globals>
   <Material>...</Material>
@@ -1198,8 +1208,10 @@ _FEBIO_INPUT_GUIDE = """\
     <NodeSet>...</NodeSet>
   </Mesh>
   <MeshDomains>...</MeshDomains>
-  <Boundary>...</Boundary>
-  <LoadData>...</LoadData>
+  <MeshData>...</MeshData>    <!-- NodeData maps: after MeshDomains, never inside Mesh -->
+  <Boundary>...</Boundary>    <!-- <bc type="zero displacement"|"prescribed displacement"> -->
+  <Loads>...</Loads>          <!-- nodal_load, surface_load, body_load: only here -->
+  <LoadData>...</LoadData>    <!-- <load_controller id="1" type="loadcurve"> -->
   <Output>...</Output>
 </febio_spec>
 ```
@@ -1210,4 +1222,8 @@ _FEBIO_INPUT_GUIDE = """\
 3. MeshDomains links elements to materials (required in v4.0)
 4. LoadData with load_controller for time-varying BCs
 5. Module type determines available materials and BCs
+6. Id lists are comma-separated: <elem id="1">1,2,3,4,5,6,7,8</elem>, <NodeSet>1,2,3</NodeSet>
+   (measured on this install: spaces in an <elem> crash FEBio while it reads the deck; in a
+   NodeSet FEBio keeps the first number between two commas)
+7. A NodeData <node lid="k"> is the k-th node of its node_set (1-based), not a node id
 """

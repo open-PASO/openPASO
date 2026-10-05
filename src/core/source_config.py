@@ -291,8 +291,8 @@ if __name__ == "__main__":
 
     if args.show or not (args.example or args.write_example or args.paths):
         cfg = load()
-        print(f"Layers loaded: {cfg.sources_used or '(none — built-in '
-              f'defaults only)'}")
+        layers = cfg.sources_used or "(none — built-in defaults only)"
+        print(f"Layers loaded: {layers}")
         print(f"\nExtra scan paths ({len(cfg.scan_paths)}):")
         for p in cfg.scan_paths:
             print(f"  {p}")

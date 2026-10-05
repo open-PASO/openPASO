@@ -33,18 +33,22 @@ input_files` holds 1978 parseable decks that 4C's own CI runs; each template
 starts from a named one of those (`upstream`) and is reduced — mesh shrunk,
 regression `RESULT DESCRIPTION` deleted, Belos+XML solvers replaced by direct
 UMFPACK — until it is self-contained and small enough to render whole. Two
-(`particle_pd_*`) had no upstream deck to start from and were built from the
-grammar dump plus the deck shape used by the author of 4C's PD module.
+(`particle_pd_*`) were not started from upstream's PD-body decks and were built
+from the grammar dump plus the deck shape used by the author of 4C's PD module.
+Their form for a 4C with the WALL element uses keys upstream 4C does not accept
+(PRE_CRACKS, IMPACTOR_VELOCITY, PDFIXED) and needs a bond-based peridynamics
+branch build; their decks/2026.3/ form uses upstream's PRE_CRACK_LINES and
+DIRICHLET_FUNCT and runs on 4C 2026.2.0 and 4C 2026.3.0.
 
 THE TWO DEPENDENCIES THAT COULD NOT BE REMOVED
 -----------------------------------------------
 `fs3i` and `multiscale` name a file outside the deck. Both were established by
 execution, not assumed:
 
-  * FS3I refuses any direct solver — `4C_fs3i_partitioned.cpp:604` throws
-    "Iterative solver expected" unless COUPLED_LINEAR_SOLVER is Belos, `:610`
+  * FS3I refuses any direct solver — `4C_fs3i_partitioned.cpp` throws
+    "Iterative solver expected" unless COUPLED_LINEAR_SOLVER is Belos, then
     demands AZPREC Teko, and `TekoPreconditioner::setup` then demands
-    TEKO_XML_FILE. The deck therefore names 4C's own recommended block
+    TEKO_XML_FILE (PRECONDITIONER_XML_FILE from 4C 2026.2.0 on). The deck therefore names 4C's own recommended block
     preconditioner by absolute path.
   * FE2 multiscale reads the RVE from a second, standalone `InputFile` through
     `Global::read_micro_fields`, one per macro multiscale material, so
@@ -63,7 +67,21 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from backends.fourc.grammar_dialect import CURRENT, LEGACY, RELEASE_2026_2
+
 _DECK_DIR = Path(__file__).resolve().parent / "decks"
+# Decks whose input changed at the 4C 2026.2.0 release (the element, solver and
+# particle forms) have a second file under decks/2026.3/, chosen when the
+# discovered 4C reads a grammar without WALL (backends.fourc.grammar_dialect).
+# The three whose materials changed again at 2026.3.0 (reduced_lung, sti, ssti)
+# have a third file under decks/2026.2/ for the 2026.2.0 release. Each was run on
+# 4C 2026.3.0, on 4C 2026.2.0 and on a development build with WALL, and its
+# fields compared: the same, except the two particle_pd decks, whose prescribed
+# motion starts one time step earlier on 2026.2.0 and 2026.3.0 than on the
+# development build (x = x0 + v*t from t = 0, exact; mean damage agrees within
+# 2%), and reduced_lung, which on 2026.3.0 writes the pressure in the deck's
+# units where the older builds wrote mmHg, and as r the current radius where
+# they wrote the reference one (flow and area identical).
 
 # Placeholder that the loader rewrites to an absolute path under FOURC_ROOT.
 FOURC_ROOT_TOKEN = "@FOURC_ROOT@"
@@ -83,11 +101,22 @@ class Deck:
     requires_fourc_root: bool = False
     pitfalls: tuple[str, ...] = field(default_factory=tuple)
 
-    def path(self) -> Path:
+    def path(self, dialect: str = LEGACY) -> Path:
+        """This deck's file for a 4C that reads the `dialect` grammar: the file
+        written for that release where there is one; for 2026.2.0 otherwise the
+        2026.3.0 file, whose element forms it shares."""
+        order = {CURRENT: (CURRENT,), RELEASE_2026_2: (RELEASE_2026_2, CURRENT)}.get(dialect, ())
+        for release in order:
+            newer = _DECK_DIR / release / self.filename
+            if newer.is_file():
+                return newer
         return _DECK_DIR / self.filename
 
-    def text(self) -> str:
-        raw = self.path().read_text()
+    def has_current_form(self) -> bool:
+        return (_DECK_DIR / CURRENT / self.filename).is_file()
+
+    def text(self, dialect: str = LEGACY) -> str:
+        raw = self.path(dialect).read_text()
         return _resolve_root(raw)
 
 
@@ -164,10 +193,14 @@ DECKS: tuple[Deck, ...] = (
                  "every step, so pairs are found and the penalty law is "
                  "evaluated.",
         pitfalls=(
-            "SEARCH_STRATEGY: bounding_volume_hierarchy needs ArborX. On a "
-            "build without it every beam-interaction deck aborts in "
-            "4C_geometric_search_bounding_volume.hpp:79. The default "
-            "bruteforce_with_binning has no such dependency.",
+            "From 4C 2026.2.0 on, beam interaction always searches with ArborX "
+            "(SEARCH_STRATEGY is gone), and 4C's own CMake builds without it, "
+            "so on such a build every beam-interaction deck aborts in "
+            "4C_geometric_search_bounding_volume.hpp:79: 'The struct "
+            "Core::GeometricSearch::BoundingVolume can only be used with "
+            "ArborX'. Before 4C 2026.2.0 only SEARCH_STRATEGY: "
+            "bounding_volume_hierarchy needs ArborX; the default, "
+            "bruteforce_with_binning, does not.",
             "BINNING STRATEGY DOMAINBOUNDINGBOX must enclose the DEFORMED "
             "geometry — pairs outside it are silently never searched.",
         ),
@@ -641,10 +674,13 @@ DECKS: tuple[Deck, ...] = (
             "Runtime VTK output needs STRUCTURAL DYNAMIC INT_STRATEGY: "
             "Standard; the old integrator throws 'Runtime output is not "
             "available in the old structure time integration!'",
-            "In 2-D the porofluid VTU 'pressure' array is all NaN and the pore "
-            "pressure lands in the THIRD component of 'velocity' — "
+            "Before 4C 2026.3.0 (the 2026.2.0 release included) the 2-D "
+            "porofluid VTU 'pressure' array is all NaN and "
+            "the pore pressure lands in the THIRD component of 'velocity' — "
             "FluidImplicitTimeInt::write_runtime_output hardcodes three "
-            "velocity components. The 3-D output is fine.",
+            "velocity components. 4C 2026.3.0 writes a correct 'pressure' array "
+            "(PRESSURE: true) and a two-component velocity. The 3-D output is "
+            "fine in both.",
         ),
     ),
     Deck(
@@ -705,9 +741,11 @@ DECKS: tuple[Deck, ...] = (
                  "scalar transported in conservative form on the stretched "
                  "element.",
         pitfalls=(
-            "The structure elements must be a *SCATRA type (WALLSCATRA, "
-            "SOLIDSCATRA, …) with a meaningful TYPE. A plain WALL/SOLID aborts "
-            "in 4C_ssi_clonestrategy.cpp:97, naming ImplType 'Undefined'.",
+            "The structure elements must be a *SCATRA type (SOLIDSCATRA, or "
+            "WALLSCATRA on a 4C before 2026.2.0, …) with a meaningful TYPE. A "
+            "plain SOLID (or WALL on a 4C before 2026.2.0) aborts "
+            "in 4C_ssi_clonestrategy.cpp (line 97; 98 in 4C 2026.2.0), naming "
+            "ImplType 'Undefined'.",
             "COUPALGO chooses one-way, staggered or monolithic; the one-way "
             "variants run happily and simply do not feed the scalar back.",
         ),
@@ -775,7 +813,7 @@ DECKS: tuple[Deck, ...] = (
     ),
     Deck(
         physics="fluid_turbulence", variant="les_channel_3d",
-        filename="fluid_turbulence.4C.yaml", np=2,
+        filename="fluid_turbulence.4C.yaml", np=4,
         upstream="f3_cha_8x8x8_recongradl2.4C.yaml + "
                  "f3_stokes_residualbased_rotboxgeom.4C.yaml",
         summary="Large-eddy simulation of turbulent channel flow of height 2: "
@@ -785,11 +823,16 @@ DECKS: tuple[Deck, ...] = (
                  "constant Cs= 0.1' and opens plane-and-time averaged channel "
                  "statistics over the sampling window.",
         pitfalls=(
-            "On ONE MPI rank this deck aborts inside "
-            "Core::Conditions::PeriodicBoundaryConditions::balance_load with "
-            "'terminate called after throwing an instance of int' (SIGABRT, "
-            "rc 134). It runs clean on 2 and 4 ranks; reproduced three times. "
-            "Periodic boundary conditions need np > 1 on this build.",
+            "Run it on 4 MPI ranks. On ONE rank it aborts on every build "
+            "measured (a development build before 2026.2.0, 4C 2026.2.0 and "
+            "4C 2026.3.0): rc 134, 'terminate called after throwing an "
+            "instance of int', inside "
+            "Core::Conditions::PeriodicBoundaryConditions::balance_load. On "
+            "TWO ranks the first two builds finish, but 4C 2026.3.0 stops at "
+            "step 5 with both ranks busy, each waiting in a different MPI "
+            "collective (a reduce in Tpetra's Directory, a broadcast in "
+            "Amesos2), until the run's timeout; measured twice. On FOUR "
+            "ranks all three builds run the 10 steps and exit 0.",
             "Every boundary here is periodic or Dirichlet, so the pressure has "
             "a null space. Without DESIGN VOL MODE FOR KRYLOV SPACE PROJECTION "
             "the run stops with 'Nullspace check for sysmat_ failed'.",
@@ -810,16 +853,22 @@ DECKS: tuple[Deck, ...] = (
                  "stays at zero means the interface transfer is not happening.",
         requires_fourc_root=True,
         pitfalls=(
-            "FS3I rejects direct solvers. 4C_fs3i_partitioned.cpp:604 throws "
+            "FS3I rejects direct solvers. 4C_fs3i_partitioned.cpp throws "
             "'Iterative solver expected' unless COUPLED_LINEAR_SOLVER names a "
-            "Belos solver, :610 demands AZPREC Teko, and "
+            "Belos solver, then 'Block Gauss-Seidel preconditioner expected' "
+            "unless AZPREC is Teko, and "
             "4C_linear_solver_preconditioner_teko.cpp:48 then throws "
-            "'TEKO_XML_FILE parameter not set!'. This is the one deck here "
-            "that cannot use UMFPACK and cannot be a single file.",
-            "A plain SOLID element aborts in 4C_ssi_clonestrategy.cpp:97 — the "
-            "structure elements must be SOLIDSCATRA / WALLSCATRA / SHELLSCATRA "
-            "/ TRUSS3SCATRA carrying a meaningful TYPE.",
-            "Np_Gen_Alpha for the fluid aborts in 4C_fs3i.cpp:204; BDF2 and "
+            "'TEKO_XML_FILE parameter not set!'. 4C 2026.2.0 renamed that key, "
+            "and MUELU_XML_FILE, IFPACK_XML_FILE and AMGNXN_XML_FILE with it, "
+            "to PRECONDITIONER_XML_FILE, and its message names the new key. "
+            "This is the one deck here that cannot use UMFPACK and cannot be a "
+            "single file.",
+            "A plain SOLID element aborts in 4C_ssi_clonestrategy.cpp (line 97; 98 "
+            "in 4C 2026.2.0) — the "
+            "structure elements must be SOLIDSCATRA / SHELL7PSCATRA / "
+            "TRUSS3SCATRA (or WALLSCATRA before 4C 2026.2.0) carrying a "
+            "meaningful TYPE; 4C's message calls the shell SHELLSCATRA.",
+            "Np_Gen_Alpha for the fluid aborts in 4C_fs3i.cpp; BDF2 and "
             "Stationary are rejected as well. One_Step_Theta in all three "
             "fields works.",
         ),
@@ -850,8 +899,11 @@ DECKS: tuple[Deck, ...] = (
     Deck(
         physics="particle_pd", variant="plate_2d",
         filename="particle_pd_plate.4C.yaml", np=1,
-        upstream="none — no bond-based PD deck exists upstream; built from the "
-                 "grammar dump and 4C's own PD generator script",
+        upstream="none used — upstream has bond-based PD decks (tests/"
+                 "input_files/particle_sph_{2d,3d}_pdbody_*.4C.yaml), but none "
+                 "uses PRE_CRACKS, IMPACTOR_VELOCITY or PDFIXED, which this "
+                 "deck's form for a 4C with the WALL element needs; built from "
+                 "the grammar dump and 4C's own PD generator script",
         summary="Bond-based peridynamics: a pre-cracked plate pulled in "
                 "tension until the crack runs from the notch tip.",
         evidence="The mean damage must start at whatever the pre-crack alone "
@@ -867,8 +919,23 @@ DECKS: tuple[Deck, ...] = (
             "4C_particle_interaction_sph_peridynamic.cpp:92 with 'Plane stress "
             "or plane strain for peridynamic requested. CONSTRAINT must be set "
             "to Projection2D!'",
-            "PDFIXED 1 pins a particle at its reference position; PDFIXED 2 "
-            "makes it part of a rigid body moved at IMPACTOR_VELOCITY.",
+            "How a particle is held, driven or pre-cracked depends on the "
+            "build. 4C 2026.2.0 and later: DIRICHLET_FUNCT <n> on the particle line plus "
+            "DIRICHLET_BOUNDARY_CONDITION_FLAGGED: [pdphase] in PARTICLE "
+            "DYNAMIC/INITIAL AND BOUNDARY CONDITIONS, where FUNCT<n> is the "
+            "displacement from the reference position (zero pins the particle, "
+            "v*t drives it at velocity v) and FUNCTs are numbered from 1 "
+            "without gaps; pre-cracks are PRE_CRACK_LINES / PRE_CRACK_PLANES "
+            "lists of START and END points. PDFIXED, PRE_CRACKS and "
+            "IMPACTOR_VELOCITY are the keys of the pre-merge bond-based "
+            "peridynamics branch: there PDFIXED 1 pins a particle at its "
+            "reference position, PDFIXED 2 makes it part of a rigid body moved "
+            "at IMPACTOR_VELOCITY, and PRE_CRACKS is a string of segments. "
+            "Upstream 4C stops on PDFIXED with \"Optional particle state with "
+            "label 'PDFIXED' unknown!\" and on the two PARTICLE DYNAMIC/PD keys "
+            "with 'Could not match this input'; the 4C 2026.1.0 release reads "
+            "neither form. The deck served is the 2026.2.0 form for a 4C "
+            "without the WALL element and the extension's form for one with it.",
         ),
     ),
     Deck(
@@ -882,9 +949,11 @@ DECKS: tuple[Deck, ...] = (
                  "impactor velocity you imposed. A second body that is absent is the "
                  "usual failure here.",
         pitfalls=(
-            "The impactor is a second PDBODYID whose particles carry PDFIXED 2; "
-            "contact between bodies is the NORMALCONTACTLAW / NORMAL_STIFF "
-            "penalty pair in PARTICLE DYNAMIC/PD.",
+            "The impactor is a second PDBODYID whose particles are driven at "
+            "the impact velocity (see the plate_2d note for how each build "
+            "writes that; PDFIXED 2 is the pre-merge branch's flag, not "
+            "upstream 4C); contact between bodies is the NORMALCONTACTLAW / "
+            "NORMAL_STIFF penalty pair in PARTICLE DYNAMIC/PD.",
             "dx = 12.5 mm here is a teaching resolution. The published "
             "Kalthoff-Winkler study resolves the same specimen at dx = 0.5 mm; "
             "crack paths at this spacing are indicative only.",
@@ -900,8 +969,12 @@ def get(physics: str, variant: str) -> Deck | None:
     return _BY_KEY.get((physics, variant))
 
 
-def render(physics: str, variant: str) -> str | None:
-    """Return the deck text with a short provenance header, or None."""
+def render(physics: str, variant: str, dialect: str = LEGACY) -> str | None:
+    """Return the deck text with a short provenance header, or None.
+
+    `dialect` is the input grammar the 4C that will run it reads
+    (grammar_dialect.dialect_of); it picks the file written for that grammar
+    where one exists."""
     d = get(physics, variant)
     if d is None:
         return None
@@ -921,13 +994,22 @@ def render(physics: str, variant: str) -> str | None:
         f"than merely parsing: {d.evidence}",
         f"# Derived from upstream deck(s): {d.upstream}",
     ]
+    if d.has_current_form():
+        head.append({
+            CURRENT: "# Written for the input grammar of 4C 2026.3.0, the one your 4C reads.",
+            RELEASE_2026_2: "# Written for the input grammar of 4C 2026.2.0, the one your 4C "
+                            "reads: no WALL element, and the material forms 2026.3.0 replaced.",
+        }.get(dialect,
+              "# Written for the input grammar with the WALL element, which your 4C has "
+              "(development builds before the 2026.2.0 release). A 4C without WALL gets "
+              "this deck's form for its release."))
     if d.requires_fourc_root:
         head.append(
             "# NOTE: this deck names a file from the 4C source tree; set "
             "FOURC_ROOT so the path resolves.")
     for p in d.pitfalls:
         head.append(f"# Pitfall: {p}")
-    return "\n".join(head) + "\n" + d.text()
+    return "\n".join(head) + "\n" + d.text(dialect)
 
 
 def variants_for(physics: str) -> list[str]:

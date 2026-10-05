@@ -472,15 +472,19 @@ class FSIGenerator(BaseGenerator):
             },
             "valid_2d_elements": {
                 "FLUID": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
-                "WALL (2-D structure)": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
+                "WALL (2-D structure, 4C before 2026.2.0)": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
+                "SOLID (2-D structure, 4C 2026.2.0 and later)": ["QUAD4", "QUAD8", "QUAD9", "TRI3", "TRI6"],
                 "notes": (
-                    "The 2-D structural element type is WALL, NOT SOLID.  "
-                    "SOLID is 3-D only (HEX8/HEX18/HEX20/HEX27, TET4/TET10, "
-                    "WEDGE6, PYRAMID5, NURBS27); asking for 'SOLID: QUAD4' "
-                    "is rejected with 'Could not match this input'.  A WALL "
-                    "QUAD4 element block requires all six of MAT, KINEM, EAS, "
-                    "THICK, STRESS_STRAIN and GP -- the token is THICK, not "
-                    "THICKNESS, and GP is a 2-vector such as [2, 2].  "
+                    "Which element owns 2-D structure depends on the build. "
+                    "Before 4C 2026.2.0: WALL, and SOLID is 3-D only (HEX8/HEX18/HEX20/"
+                    "HEX27, TET4/TET10, WEDGE6, PYRAMID5, NURBS27), so 'SOLID "
+                    "QUAD4' is rejected; a WALL QUAD4 element needs all six "
+                    "of MAT, KINEM, EAS, THICK, STRESS_STRAIN and GP -- the "
+                    "token is THICK, not THICKNESS, and GP is a 2-vector such "
+                    "as [2, 2].  4C 2026.2.0 and later have no WALL: the same element is "
+                    "'SOLID QUAD4 <nodes> MAT m KINEM k THICKNESS t "
+                    "PLANE_ASSUMPTION plane_strain' (EAS none and GP 2 2 are "
+                    "its defaults).  "
                     "QUAD4 is most commonly used and best validated for FSI.  "
                     "TRI3 works but is less accurate for pressure.  "
                     "For 3-D FSI: FLUID HEX8/TET4, SOLID HEX8/TET4 (SOLID "
@@ -532,6 +536,9 @@ class FSIGenerator(BaseGenerator):
     def _template_fsi_2d() -> str:
         return textwrap.dedent("""\
             # FORMAT TEMPLATE — all numerical values are placeholders.
+            # Written in the input grammar of 4C before 2026.2.0 (the WALL element);
+            # from 4C 2026.2.0 on a 2-D solid is SOLID with THICKNESS and PLANE_ASSUMPTION. The decks openPASO runs are served in the grammar of the
+            # 4C it finds.
             # ---------------------------------------------------------------
             # 2-D Monolithic FSI -- Channel with Deformable Wall
             #
@@ -647,13 +654,14 @@ class FSIGenerator(BaseGenerator):
 
             # == Geometry ==================================================
             # ELEMENT_BLOCKS entries are ID -> <ELEMENT_TYPE> -> <CELL_TYPE> ->
-            # tokens, and the element type must match the dimension.  SOLID is
-            # 3-D ONLY: its legal cell types are HEX8/HEX18/HEX20/HEX27/TET4/
-            # TET10/WEDGE6/PYRAMID5/NURBS27, so 'SOLID: QUAD4:' is rejected
-            # with "Could not match this input".  The 2-D structural element
-            # type is WALL, and its QUAD4 block requires ALL SIX of MAT, KINEM,
-            # EAS, THICK, STRESS_STRAIN and GP.  Note THICK, not THICKNESS --
-            # THICKNESS is not an element token anywhere in 4C.
+            # tokens, and the element type must match the dimension.  Before 4C
+            # 2026.2.0 SOLID is 3-D ONLY: its legal cell types are HEX8/HEX18/
+            # HEX20/HEX27/TET4/TET10/WEDGE6/PYRAMID5/NURBS27, so 'SOLID: QUAD4:'
+            # is rejected with "Could not match this input".  The 2-D
+            # structural element type there is WALL, and its QUAD4 block
+            # requires ALL SIX of MAT, KINEM, EAS, THICK, STRESS_STRAIN and GP
+            # (THICK, not THICKNESS).  4C 2026.2.0 and later have no WALL: their
+            # SOLID takes QUAD4 with THICKNESS and PLANE_ASSUMPTION.
             STRUCTURE GEOMETRY:
               FILE: "fsi_2d.e"
               ELEMENT_BLOCKS:

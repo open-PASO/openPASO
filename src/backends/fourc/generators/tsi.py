@@ -65,8 +65,9 @@ class TSIGenerator(BaseGenerator):
                     "description": (
                         "Thermo-elastic St. Venant-Kirchhoff material.  Extends "
                         "the standard SVK material with thermal expansion "
-                        "coefficient and reference temperature.  Links to a "
-                        "thermal material via THERMOMAT."
+                        "coefficient and reference temperature.  On a 4C "
+                        "before 2026.3.0 it can name a thermal material via "
+                        "THERMOMAT (optional); 4C 2026.3.0 removed the key."
                     ),
                     "parameters": {
                         "YOUNGNUM": {
@@ -108,7 +109,9 @@ class TSIGenerator(BaseGenerator):
                         "THERMOMAT": {
                             "description": (
                                 "Material ID of the associated thermal material "
-                                "(MAT_Fourier)"
+                                "(MAT_Fourier). 4C before 2026.3.0 only: 4C 2026.3.0 has "
+                                "no THERMOMAT and rejects the MATERIALS section "
+                                "that sets it"
                             ),
                             "range": "valid MAT ID",
                         },
@@ -197,21 +200,27 @@ class TSIGenerator(BaseGenerator):
                 #   tests/input_files/tsi_heatflux_monolithic.4C.yaml
                 #     (carries a DESIGN SURF THERMO NEUMANN heat flux)
                 (
-                    "[Input] 4C has NO 2D TSI elements — the coupled element "
-                    "module is solid_scatra_3D_ele and every TSI deck in the "
-                    "upstream corpus is 3D. A 2D thermo-mechanical deck "
-                    "dead-ends whichever element you reach for, and by three "
-                    "different messages, so do not grep for one. Signal: on the "
-                    "one-way dilatation deck with the HEX8 pair swapped for "
-                    "QUAD4s, SOLIDSCATRA QUAD4 gives \"Element 'SOLIDSCATRA' "
-                    "does not seem to know cell type 'quad4'.\" and SOLID QUAD4 "
-                    "gives the same sentence with 'SOLID', both from "
+                    "[Input] 4C runs NO 2D TSI, measured on a 4C before 2026.2.0, "
+                    "on 2026.2.0 and on 2026.3.0, and every TSI deck in the "
+                    "upstream corpus is "
+                    "3D. A 2D thermo-mechanical deck dead-ends whichever "
+                    "element you reach for, and by different messages, so do "
+                    "not grep for one. Signal: on the one-way dilatation deck "
+                    "with the HEX8 pair swapped for QUAD4s, a 4C before 2026.2.0 answers "
+                    "SOLIDSCATRA QUAD4 with \"Element 'SOLIDSCATRA' does not "
+                    "seem to know cell type 'quad4'.\" and SOLID QUAD4 with "
+                    "the same sentence naming 'SOLID', both from "
                     "core/fem/src/general/element/"
-                    "4C_fem_general_element_definition.cpp:29; WALL QUAD4 with "
-                    "MAT_Struct_ThermoStVenantK gets FURTHER and then aborts with "
-                    "'Unsupported solid element type!' from "
-                    "src/tsi/4C_tsi_utils.cpp:76. All exit 1 before a mesh is "
-                    "built. An earlier version of this entry attributed the WALL "
+                    "4C_fem_general_element_definition.cpp:29, before a mesh "
+                    "is built; WALL QUAD4 with MAT_Struct_ThermoStVenantK gets "
+                    "FURTHER and then aborts with 'Unsupported solid element "
+                    "type!' from src/tsi/4C_tsi_utils.cpp:76. 4C 2026.2.0 and "
+                    "2026.3.0 have no WALL and accept SOLIDSCATRA QUAD4 and "
+                    "SOLID QUAD4 "
+                    "(with THICKNESS and PLANE_ASSUMPTION); both build the "
+                    "structure and then abort with the same 'Unsupported solid "
+                    "element type!', from src/tsi/4C_tsi_utils.cpp:77. All "
+                    "exit 1. An earlier version of this entry attributed the WALL "
                     "case to 'Invalid type of material law for wall element' in "
                     "4C_w1_mat.cpp — that string is real code but is NEVER "
                     "reached, because TSI's clone strategy rejects any non-"
@@ -285,7 +294,9 @@ class TSIGenerator(BaseGenerator):
                     "core/io/src/4C_io_input_spec.cpp:33. The clone message "
                     "names neither SOLID nor SOLIDSCATRA, so grep the "
                     "file name 4C_tsi_utils.cpp, and note it is the SAME message "
-                    "a 2D WALL element produces. Those four words are all 4C "
+                    "a 2D element produces (WALL on a 4C before 2026.2.0, SOLID "
+                    "or SOLIDSCATRA on 2026.2.0 and 2026.3.0). Those four words "
+                    "are all 4C "
                     "prints — read them as meaning the element cannot be cloned "
                     "into a thermo field, whatever the reason, but do not expect "
                     "any such sentence in the output. "
@@ -322,7 +333,8 @@ class TSIGenerator(BaseGenerator):
                     "Mat::Trait::Thermo so the STRUCTURAL material can answer "
                     "conductivity()/capacity()/heat-flux queries. Thermal strain "
                     "comes from THEXPANS and INITTEMP. Signal: there is nothing "
-                    "to observe, and that IS the diagnostic — deleting THERMOMAT "
+                    "to observe, and that IS the diagnostic — on a 4C before "
+                    "2026.3.0 (2026.3.0 has no THERMOMAT key) deleting THERMOMAT "
                     "from the one-way dilatation deck AND from "
                     "tsi_lincompression_monolithic leaves every pinned value "
                     "CORRECT and unchanged (dispy at node 7 still matches 2e-05 "
@@ -331,7 +343,14 @@ class TSIGenerator(BaseGenerator):
                     "both at exit 0. So if a heated body does not expand, "
                     "THERMOMAT is the wrong place to look: check COUPVARIABLE "
                     "and INITTEMP, each of which does move the answer. "
-                    "(Verified by execution 2026-08-09.)"
+                    "(Verified by execution 2026-08-09 on a development build, "
+                    "and on 4C 2026.2.0 on 2026-09-30 with its own copies of "
+                    "the two decks: identical result lines.) 4C 2026.3.0 removed "
+                    "THERMOMAT from the grammar: a deck that sets it stops "
+                    "with `Failed to match specification in section "
+                    "'MATERIALS'`. Leaving it out reads on all three (measured "
+                    "2026-09-28: displacement and temperature unchanged on "
+                    "the development build)."
                 ),
                 (
                     "[Numerical] Monolithic TSI needs an ITERATIVE (Belos) "
@@ -349,7 +368,8 @@ class TSIGenerator(BaseGenerator):
                     "TSI. Please set LINEAR_SOLVER in TSI DYNAMIC to a valid "
                     "number!' from the same file at :229. Both exit 1 before the "
                     "first time step. Note the Belos block also needs its "
-                    "SOLVER_XML_FILE and TEKO_XML_FILE to resolve relative to the "
+                    "SOLVER_XML_FILE and TEKO_XML_FILE (PRECONDITIONER_XML_FILE "
+                    "from 4C 2026.2.0 on) to resolve relative to the "
                     "deck, or Teuchos dies on SIGABRT (exit 134) with no 4C "
                     "message at all. For simple one-way problems use "
                     "tsi_oneway + UMFPACK and avoid all of this. "
@@ -494,6 +514,9 @@ class TSIGenerator(BaseGenerator):
     def _template_monolithic_3d() -> str:
         return textwrap.dedent("""\
             # FORMAT TEMPLATE — all numerical values are placeholders.
+            # Written in the input grammar of 4C before 2026.3.0 (the 2026.2.0 release
+            # included); 4C 2026.3.0 renamed some of the keys below. The decks openPASO runs are served in the grammar of the
+            # 4C it finds.
             # ---------------------------------------------------------------
             # 3-D Monolithic Thermo-Structure Interaction
             #
@@ -574,7 +597,6 @@ class TSIGenerator(BaseGenerator):
                   DENS: <density>
                   THEXPANS: <thermal_expansion_coefficient>
                   INITTEMP: <reference_temperature>
-                  THERMOMAT: 2
               # Fourier heat conduction material (for thermal field)
               - MAT: 2
                 MAT_Fourier:
@@ -736,24 +758,26 @@ class TSIGenerator(BaseGenerator):
                 "structural material to the thermal material."
             )
 
-        # Check element type
+        # Check element type. A 2-D cell is refused whatever the element
+        # name: 4C 2026.3.0 accepts SOLIDSCATRA QUAD4 as input, and the run
+        # still stops.
         elem_type = params.get("element_type", "")
-        if elem_type and "SOLIDSCATRA" not in str(elem_type).upper():
-            et = str(elem_type).upper()
-            if "WALL" in et or "QUAD" in et or "TRI" in et:
-                issues.append(
-                    f"TSI cannot use 2D elements ({elem_type}): 4C has no "
-                    f"2D TSI elements, and MAT_Struct_ThermoStVenantK is "
-                    f"rejected by WALL ('Invalid type of material law for "
-                    f"wall element').  For 2D plane-strain "
-                    f"thermo-mechanics build a pseudo-2D deck from the "
-                    f"'monolithic_3d' template: a one-element-thick "
-                    f"SOLIDSCATRA HEX8 slab with u_z fixed everywhere."
-                )
-            else:
-                issues.append(
-                    f"TSI requires SOLIDSCATRA elements (not {elem_type}).  "
-                    f"Plain SOLID elements do not carry the thermal DOF."
-                )
+        et = str(elem_type).upper()
+        if elem_type and ("WALL" in et or "QUAD" in et or "TRI" in et):
+            issues.append(
+                f"TSI cannot use 2D elements ({elem_type}): 4C runs no 2D "
+                f"TSI.  Measured on a 4C before 2026.2.0, on 2026.2.0 and on "
+                f"2026.3.0, a 2D deck stops with 'Unsupported solid element "
+                f"type!' (a 4C before 2026.2.0 refuses a QUAD4 SOLIDSCATRA or "
+                f"SOLID even earlier, at the cell type).  For 2D plane-strain thermo-mechanics build a "
+                f"pseudo-2D deck from the 'monolithic_3d' template: a "
+                f"one-element-thick SOLIDSCATRA HEX8 slab with u_z fixed "
+                f"everywhere."
+            )
+        elif elem_type and "SOLIDSCATRA" not in et:
+            issues.append(
+                f"TSI requires SOLIDSCATRA elements (not {elem_type}).  "
+                f"Plain SOLID elements do not carry the thermal DOF."
+            )
 
         return issues

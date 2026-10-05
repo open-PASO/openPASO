@@ -275,11 +275,15 @@ class SolverBackend(ABC):
                 "vid = p.set_mesh_vertices(MESH, coords)   # interface coordinates\n"
                 "p.initialize()\n"
                 "while p.is_coupling_ongoing():\n"
+                "    if p.requires_writing_checkpoint():   # *-implicit: save this solver's state\n"
+                "        ...\n"
                 "    dt = p.get_max_time_step_size()\n"
                 "    read_vals = p.read_data(MESH, READ_DATA, vid, dt)   # inputs from partner\n"
                 "    # ... advance this solver one window using read_vals ...\n"
                 "    p.write_data(MESH, WRITE_DATA, vid, out_vals)        # outputs to partner\n"
                 "    p.advance(dt)\n"
+                "    if p.requires_reading_checkpoint():   # *-implicit, not converged: restore the state, redo the window\n"
+                "        ...\n"
                 "p.finalize()"
             ),
             "notes": "Set LD_LIBRARY_PATH to libprecice; match pyprecice to the libprecice version.",
