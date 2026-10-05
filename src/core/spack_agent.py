@@ -216,8 +216,8 @@ def write_config(workspace: Path, *, source: Path, spec: str, recipe_path: str, 
     # 01d2cd0 and the agent-backends branch: "must contain a [agent] table"). `backend` is written
     # only when named: upstream offers only its Copilot default and refuses the setting.
     lines += ["[agent]"]
-    lines += [f"backend = {_toml_string(agent)}"] if agent else []
-    lines += [f"model = {_toml_string(model)}"] if model else []
+    lines += [f"backend = {_toml_string(agent)}"] if agent is not None else []
+    lines += [f"model = {_toml_string(model)}"] if model is not None else []
     lines += ["", "[runner]", 'backend = "host"']
     if max_iterations is not None:
         lines.append(f"max_iterations = {int(max_iterations)}")
@@ -273,6 +273,27 @@ def write_spack_wrapper(workspace: Path, spack: str, recipes: Path) -> Path:
                        f"exec {shlex.quote(os.path.abspath(spack))} -E -C {shlex.quote(str(scope))} \"$@\"\n")
     wrapper.chmod(0o755)
     return wrapper
+
+
+def clone_matches(source: Path, entry: dict) -> bool:
+    """Whether `source` is the clone openPASO makes for this target: of the target's repository,
+    with its release checked out. The default clone stays in the workspace across openPASO
+    upgrades, and one made for an older release must not reach spack-agent for a newer spec."""
+    if not (source / ".git").exists():
+        return False
+    git = ["git", "-C", str(source)]
+
+    def ask(*args: str) -> str | None:
+        done = subprocess.run([*git, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    try:
+        url = ask("remote", "get-url", "origin")
+        head = ask("rev-parse", "HEAD")
+        release = ask("rev-parse", "--verify", "--quiet", f"{entry['ref']}^{{commit}}")
+    except OSError:
+        return False
+    return url == entry["git"] and head is not None and head == release
 
 
 def clone_command(entry: dict, destination: Path) -> list[str]:

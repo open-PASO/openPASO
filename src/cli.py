@@ -372,8 +372,11 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
         print(f"    Earlier:   {why}; this run starts again from openPASO's recipes and keeps that "
               f"copy as {kept}" + (", replacing the one kept there before" if kept.exists() else "")
               + f". To continue that run instead: {shlex.join(resume)}")
-    cloned = not source and not (src / ".git").exists()
-    print(f"    Source:    {src}" + (f" (a shallow clone of {entry['git']} at {entry['ref']})" if cloned else ""))
+    cloned = not source and not sa.clone_matches(src, entry)
+    replaced = ("; the clone there is of another repository or release and is replaced"
+                if cloned and src.exists() else "")
+    print(f"    Source:    {src}"
+          + (f" (a shallow clone of {entry['git']} at {entry['ref']}{replaced})" if cloned else ""))
     who = agent or "spack-agent's default (the GitHub Copilot CLI)"
     print(f"    Agent:     {who}" + (f", model {model}" if model else ""))
     print("    spack-agent lets an AI agent edit that recipe and runs the builds it scripts, on this "
@@ -385,7 +388,7 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
         return 1
     try:
         with sa.hold_session(workspace):
-            if not source and not (src / ".git").exists():
+            if cloned:
                 if src.exists():
                     shutil.rmtree(src)
                 clone = sa.clone_command(entry, src)
@@ -556,5 +559,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--agent, --model, --source and --max-iterations go with --via spack-agent")
     if args.max_iterations is not None and args.max_iterations < 1:
         ap.error("--max-iterations must be 1 or more")
+    for option, value in (("--model", args.model), ("--source", args.source)):
+        if value is not None and not value.strip():
+            ap.error(f"{option} needs a value")
     return install(args.solver, yes=args.yes, via=args.via, agent=args.agent, model=args.model,
                    source=args.source, max_iterations=args.max_iterations)
