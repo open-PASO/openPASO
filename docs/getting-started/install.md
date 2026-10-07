@@ -139,6 +139,42 @@ openpaso install fourc --via spack      # 4C with its whole dependency tree; ove
   started.
 - **Which solvers have a Spack route?** For a missing solver, `openpaso doctor` names it.
 
+### When a recipe needs work: spack-agent
+
+[spack-agent](https://github.com/Hereon-InstituteMS/spack-agent) lets an AI agent repair or write
+a Spack recipe, and builds the spec after each change until a build passes. openPASO prepares such
+a run and starts it:
+
+```bash
+openpaso install sparta --via spack-agent   # repair openPASO's recipe where it fails here
+openpaso install febio --via spack-agent    # write a recipe FEBio does not have yet
+```
+
+- **Targets:** 4C, deal.II and SPARTA (openPASO's recipes) and FEBio (a new recipe). openPASO
+  finds each build through Spack afterwards.
+- **Install spack-agent first** (Python 3.11 or newer), with the agent program it drives logged in.
+  spack-agent runs on Linux, or in WSL on Windows, with Bash and Git; openPASO offers this
+  route only there. Its host runner checks every recipe with Ruff, which the command below
+  installs with it. That spack-agent drives the GitHub Copilot CLI and no other agent.
+  `--agent claude` or `--agent openai` need a spack-agent that offers them; openPASO asks the
+  installed one before anything starts and stops if it does not. `openpaso doctor` says whether
+  spack-agent and the tools it needs are installed.
+  ```bash
+  python -m pip install ruff "spack-agent @ git+https://github.com/Hereon-InstituteMS/spack-agent"
+  ```
+- **What openPASO prepares**, under its state directory and never in its install:
+  - a git copy of its recipes, where the agent edits;
+  - the solver's source, cloned at the release tag unless `--source` names your own checkout;
+  - a Spack wrapper that adds the recipes, as `--via spack` does;
+  - the spack-agent configuration.
+- **Afterwards**, the command prints a `git diff` against the copy's first commit. It shows
+  everything the agent changed, also what it staged or committed, and new files. Then the
+  command re-checks the solver. A later run starts again from openPASO's recipes and keeps
+  the edited copy as `recipes.previous`. Only one run per solver can go at a time; a second one
+  stops before it changes anything.
+- **The agent edits and builds on your machine, with your rights.** Each round is a full build
+  (over an hour for 4C), so the command asks first; `--max-iterations` caps the rounds.
+
 **If a solver will not install**, ask openPASO once it is connected:
 
 > How do I install 4C on Ubuntu? Use the knowledge tool.
