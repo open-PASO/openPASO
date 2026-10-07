@@ -145,24 +145,32 @@ def hold_session(workspace: Path):
 def recipe_copy_state(workspace: Path) -> str:
     """The workspace's recipe copy: "absent"; "unchanged" from the recipes it was copied from;
     "edited" by an earlier run's agent; or "unknown" when git cannot tell (git missing, the
-    copy's repository unreadable). Only an "unchanged" copy may be deleted: a recipe edit must
-    not be lost because the check failed."""
+    copy's repository unreadable, no recorded base). Only an "unchanged" copy may be deleted: a
+    recipe edit must not be lost because the check failed.
+
+    "Unchanged" means a clean tree whose commit holds the tree prepare_recipes recorded outside
+    the copy (recipes.base): the agent has a shell in the copy, and an edit it committed with
+    `git commit --amend` still leaves one commit and a clean tree."""
     recipes = workspace / "recipes"
     if not recipes.exists():
         return "absent"
     if not (recipes / ".git").is_dir():
         return "unknown"
+    try:
+        base = (workspace / "recipes.base").read_text().strip()
+    except OSError:
+        return "unknown"
     git = ["git", "-C", str(recipes)]
     try:
         status = subprocess.run([*git, "status", "--porcelain"], capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL)
-        commits = subprocess.run([*git, "rev-list", "--count", "HEAD"], capture_output=True,
-                                 text=True, stdin=subprocess.DEVNULL)
+        tree = subprocess.run([*git, "rev-parse", "HEAD^{tree}"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
     except OSError:
         return "unknown"
-    if status.returncode != 0 or commits.returncode != 0:
+    if status.returncode != 0 or tree.returncode != 0 or not base:
         return "unknown"
-    return "edited" if status.stdout.strip() or commits.stdout.strip() != "1" else "unchanged"
+    return "edited" if status.stdout.strip() or tree.stdout.strip() != base else "unchanged"
 
 
 def head_commit(recipes: Path) -> str | None:
@@ -222,9 +230,11 @@ def target(solver: str, route: dict | None) -> dict | None:
 
 
 def _toml_string(value: str) -> str:
-    # A JSON string is a valid TOML basic string for what is written here: paths, a spec,
-    # prose, and backslash escapes for quotes and newlines.
-    return json.dumps(value)
+    # A TOML basic string. JSON's escapes for quotes, backslashes and control characters are
+    # TOML's too, but its \uXXXX surrogate pairs for characters beyond U+FFFF are not (tomllib:
+    # "not a Unicode scalar value"), so characters are written as they are, in UTF-8; DEL, which
+    # TOML wants escaped and JSON leaves alone, is escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def write_config(workspace: Path, *, source: Path, spec: str, recipe_path: str, context: str,
@@ -254,7 +264,7 @@ def write_config(workspace: Path, *, source: Path, spec: str, recipe_path: str, 
     if max_iterations is not None:
         lines.append(f"max_iterations = {int(max_iterations)}")
     path = workspace / "spack-agent.toml"
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 
@@ -290,6 +300,9 @@ def prepare_recipes(workspace: Path) -> Path:
     for args in (["add", "-A"], ["commit", "-q", "-m", "openPASO's shipped recipes"]):
         subprocess.run([*git, *args], check=True, stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    tree = subprocess.run([*git, "rev-parse", "HEAD^{tree}"], check=True, capture_output=True,
+                          text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    (workspace / "recipes.base").write_text(tree + "\n")
     return recipes
 
 
@@ -299,18 +312,21 @@ def write_spack_wrapper(workspace: Path, spack: str, recipes: Path) -> Path:
     scope = workspace / "scope"
     scope.mkdir(parents=True, exist_ok=True)
     repo = recipes / "spack_repo" / "openpaso"
-    (scope / "repos.yaml").write_text(f"repos:\n  openpaso: {json.dumps(str(repo))}\n")
+    (scope / "repos.yaml").write_text(f"repos:\n  openpaso: {json.dumps(str(repo), ensure_ascii=False)}\n",
+                                      encoding="utf-8")
     wrapper = workspace / "spack"
     wrapper.write_text("#!/bin/sh\n"
-                       f"exec {shlex.quote(os.path.abspath(spack))} -E -C {shlex.quote(str(scope))} \"$@\"\n")
+                       f"exec {shlex.quote(os.path.abspath(spack))} -E -C {shlex.quote(str(scope))} \"$@\"\n",
+                       encoding="utf-8")
     wrapper.chmod(0o755)
     return wrapper
 
 
 def clone_matches(source: Path, entry: dict) -> bool:
     """Whether `source` is the clone openPASO makes for this target: of the target's repository,
-    with its release checked out. The default clone stays in the workspace across openPASO
-    upgrades, and one made for an older release must not reach spack-agent for a newer spec."""
+    with its release checked out and no tracked file changed. The default clone stays in the
+    workspace across openPASO upgrades and runs, and one made for an older release, or changed
+    since, must not reach spack-agent as the release's source."""
     if not (source / ".git").exists():
         return False
     git = ["git", "-C", str(source)]
@@ -323,9 +339,11 @@ def clone_matches(source: Path, entry: dict) -> bool:
         url = ask("remote", "get-url", "origin")
         head = ask("rev-parse", "HEAD")
         release = ask("rev-parse", "--verify", "--quiet", f"{entry['ref']}^{{commit}}")
+        changed = ask("status", "--porcelain", "--untracked-files=no")
     except OSError:
         return False
-    return url == entry["git"] and head is not None and head == release
+    return (url == entry["git"] and head is not None and head == release
+            and changed is not None and not changed)
 
 
 def clone_command(entry: dict, destination: Path) -> list[str]:

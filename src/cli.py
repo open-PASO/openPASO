@@ -80,6 +80,11 @@ def _agent_targets() -> set[str]:
     return set(TARGETS)
 
 
+def _spack_agent_platform() -> bool:
+    # spack-agent's stated requirement: Linux or WSL (which reports linux) with Bash and Git.
+    return sys.platform.startswith("linux")
+
+
 def _spack_hint(name: str) -> str:
     if any(r.get("kind") == "spack" for r in _routes(name)):
         return f"      or build it with Spack:  openpaso install {name} --via spack"
@@ -128,7 +133,7 @@ def doctor() -> int:
                   + (f"   (runs: {hint})" if hint else ""))
             if _spack_hint(row["name"]):
                 print(_spack_hint(row["name"]))
-            if row["name"] in _agent_targets():
+            if row["name"] in _agent_targets() and _spack_agent_platform():
                 print(f"      or let spack-agent repair or write its recipe:  openpaso install {row['name']} --via spack-agent")
     print()
     try:
@@ -136,17 +141,18 @@ def doctor() -> int:
         print(f"{OK} The mesh generator (Gmsh) is installed, so `generate_mesh` can build meshes.")
     except Exception:                                    # noqa: BLE001
         print(f"{HM} The mesh generator is not installed -- to get it:  pip install gmsh")
-    try:
-        from core import spack_agent as sa
-        found = sa.find_executable()
-    except Exception:                                    # noqa: BLE001
-        sa, found = None, None
-    if found:
-        print(f"{OK} spack-agent is installed ({found}), so `install --via spack-agent` can repair or "
-              "write a solver's Spack recipe.")
-    elif sa is not None:
-        print(f"{HM} spack-agent is not installed (optional; it repairs or writes a solver's Spack "
-              f"recipe) -- to get it:  {sa.INSTALL_COMMAND}")
+    if _spack_agent_platform():
+        try:
+            from core import spack_agent as sa
+            found = sa.find_executable()
+        except Exception:                                # noqa: BLE001
+            sa, found = None, None
+        if found:
+            print(f"{OK} spack-agent is installed ({found}), so `install --via spack-agent` can "
+                  "repair or write a solver's Spack recipe.")
+        elif sa is not None:
+            print(f"{HM} spack-agent is not installed (optional; it repairs or writes a solver's "
+                  f"Spack recipe) -- to get it:  {sa.INSTALL_COMMAND}")
     print()
     if not usable:
         print(f"{NO} No solver works yet. Start with:  openpaso install skfem")
@@ -303,6 +309,10 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
         print(f"{NO} openPASO has no spack-agent target for {row['display_name']}. "
               f"It has one for: {', '.join(sorted(sa.TARGETS))}.")
         return 2
+    if not _spack_agent_platform():
+        print(f"{NO} spack-agent runs on Linux, or in WSL on Windows: its stated requirement is "
+              f"Linux or WSL with Python 3.11+, Bash and Git. This is {sys.platform}.")
+        return 1
     agent_exe = sa.find_executable()
     if agent_exe is None:
         if os.environ.get("SPACK_AGENT", "").strip():
@@ -321,6 +331,9 @@ def _install_with_spack_agent(name: str, row: dict, yes: bool, agent: str | None
     if shutil.which("git") is None:
         print(f"{NO} git is not on PATH. openPASO keeps spack-agent's recipe copy in a git "
               "repository and clones the solver's source with it.")
+        return 1
+    if shutil.which("bash") is None:
+        print(f"{NO} Bash is not on PATH. spack-agent's runner runs the build scripts with it.")
         return 1
     exe, passed_over = sp.usable_spack()
     for reason in passed_over:
@@ -373,7 +386,8 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
               f"copy as {kept}" + (", replacing the one kept there before" if kept.exists() else "")
               + f". To continue that run instead: {shlex.join(resume)}")
     cloned = not source and not sa.clone_matches(src, entry)
-    replaced = ("; the clone there is of another repository or release and is replaced"
+    replaced = ("; the clone there is of another repository or release, or has changed files, "
+                "and is replaced"
                 if cloned and src.exists() else "")
     print(f"    Source:    {src}"
           + (f" (a shallow clone of {entry['git']} at {entry['ref']}{replaced})" if cloned else ""))

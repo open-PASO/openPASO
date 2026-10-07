@@ -153,6 +153,8 @@ openpaso install febio --via spack-agent    # write a recipe FEBio does not have
 - **Targets:** 4C, deal.II and SPARTA (openPASO's recipes) and FEBio (a new recipe). openPASO
   finds each build through Spack afterwards.
 - **Install spack-agent first** (Python 3.11 or newer), with the agent program it drives logged in.
+  spack-agent runs on Linux, or in WSL on Windows, with Bash and Git; openPASO offers this
+  route only there.
   The spack-agent this command installs drives the GitHub Copilot CLI and no other agent.
   `--agent claude` or `--agent openai` need a spack-agent that offers them; openPASO asks the
   installed one before anything starts and stops if it does not. `openpaso doctor` says whether
