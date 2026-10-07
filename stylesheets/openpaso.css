@@ -1,0 +1,21 @@
+:root, [data-md-color-scheme="default"] {
+  --md-primary-fg-color: #FF6B4A;
+  --md-primary-fg-color--light: #ff8a70;
+  --md-primary-fg-color--dark: #e0512f;
+  --md-accent-fg-color: #e0512f;
+  --md-typeset-a-color: #d9482a;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0D1117;
+  --md-primary-fg-color--dark: #0D1117;
+  --md-accent-fg-color: #FF6B4A;
+  --md-typeset-a-color: #FF8A70;
+  --md-default-bg-color: #0D1117;
+}
+.openpaso-hero { text-align: center; margin: 1rem 0 2rem; }
+.openpaso-hero img.logo { width: 150px; }
+.openpaso-hero .tagline { font-size: 1.15rem; opacity: .85; }
+.openpaso-film { width: 100%; max-width: 900px; border-radius: 10px; display: block; margin: 1rem auto; }
+.md-typeset .md-button { margin: .25rem; }
+/* the coral logo would vanish on the coral header bar */
+[data-md-color-scheme="default"] .md-header__button.md-logo img { filter: brightness(0) invert(1); }
