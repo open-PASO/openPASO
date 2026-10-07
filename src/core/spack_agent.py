@@ -33,7 +33,8 @@ import subprocess
 from pathlib import Path
 
 PROJECT_URL = "https://github.com/Hereon-InstituteMS/spack-agent"
-INSTALL_COMMAND = f'python -m pip install "spack-agent @ git+{PROJECT_URL}"'
+# Ruff is no dependency of spack-agent, but its host runner checks every recipe with it.
+INSTALL_COMMAND = f'python -m pip install ruff "spack-agent @ git+{PROJECT_URL}"'
 
 # What spack-agent needs to know about each solver beyond its Spack route: where the source lives
 # (the agent reads it to learn the build) and what openPASO's templates need from the build.
@@ -324,9 +325,9 @@ def write_spack_wrapper(workspace: Path, spack: str, recipes: Path) -> Path:
 
 def clone_matches(source: Path, entry: dict) -> bool:
     """Whether `source` is the clone openPASO makes for this target: of the target's repository,
-    with its release checked out and no tracked file changed. The default clone stays in the
-    workspace across openPASO upgrades and runs, and one made for an older release, or changed
-    since, must not reach spack-agent as the release's source."""
+    with its release checked out and no file changed or added (ignored ones aside). The default
+    clone stays in the workspace across openPASO upgrades and runs, and one made for an older
+    release, or changed since, must not reach spack-agent as the release's source."""
     if not (source / ".git").exists():
         return False
     git = ["git", "-C", str(source)]
@@ -339,7 +340,7 @@ def clone_matches(source: Path, entry: dict) -> bool:
         url = ask("remote", "get-url", "origin")
         head = ask("rev-parse", "HEAD")
         release = ask("rev-parse", "--verify", "--quiet", f"{entry['ref']}^{{commit}}")
-        changed = ask("status", "--porcelain", "--untracked-files=no")
+        changed = ask("status", "--porcelain")
     except OSError:
         return False
     return (url == entry["git"] and head is not None and head == release

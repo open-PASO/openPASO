@@ -154,13 +154,13 @@ openpaso install febio --via spack-agent    # write a recipe FEBio does not have
   finds each build through Spack afterwards.
 - **Install spack-agent first** (Python 3.11 or newer), with the agent program it drives logged in.
   spack-agent runs on Linux, or in WSL on Windows, with Bash and Git; openPASO offers this
-  route only there.
-  The spack-agent this command installs drives the GitHub Copilot CLI and no other agent.
+  route only there. Its host runner checks every recipe with Ruff, which the command below
+  installs with it. That spack-agent drives the GitHub Copilot CLI and no other agent.
   `--agent claude` or `--agent openai` need a spack-agent that offers them; openPASO asks the
   installed one before anything starts and stops if it does not. `openpaso doctor` says whether
-  spack-agent is installed.
+  spack-agent and the tools it needs are installed.
   ```bash
-  python -m pip install "spack-agent @ git+https://github.com/Hereon-InstituteMS/spack-agent"
+  python -m pip install ruff "spack-agent @ git+https://github.com/Hereon-InstituteMS/spack-agent"
   ```
 - **What openPASO prepares**, under its state directory and never in its install:
   - a git copy of its recipes, where the agent edits;

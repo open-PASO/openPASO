@@ -80,6 +80,11 @@ def _agent_targets() -> set[str]:
     return set(TARGETS)
 
 
+# What `install --via spack-agent` needs besides spack-agent: Ruff (its host runner checks every
+# recipe), git (openPASO's recipe copy and source clone) and Bash (the runner's scripts).
+_SPACK_AGENT_TOOLS = ("ruff", "git", "bash")
+
+
 def _spack_agent_platform() -> bool:
     # spack-agent's stated requirement: Linux or WSL (which reports linux) with Bash and Git.
     return sys.platform.startswith("linux")
@@ -142,12 +147,18 @@ def doctor() -> int:
     except Exception:                                    # noqa: BLE001
         print(f"{HM} The mesh generator is not installed -- to get it:  pip install gmsh")
     if _spack_agent_platform():
+        import shutil
         try:
             from core import spack_agent as sa
             found = sa.find_executable()
         except Exception:                                # noqa: BLE001
             sa, found = None, None
-        if found:
+        missing = [tool for tool in _SPACK_AGENT_TOOLS if shutil.which(tool) is None]
+        if found and missing:
+            print(f"{HM} spack-agent is installed ({found}), but `install --via spack-agent` also "
+                  f"needs {', '.join(missing)} on PATH"
+                  + (" (python -m pip install ruff)" if "ruff" in missing else "") + ".")
+        elif found:
             print(f"{OK} spack-agent is installed ({found}), so `install --via spack-agent` can "
                   "repair or write a solver's Spack recipe.")
         elif sa is not None:
@@ -386,8 +397,8 @@ def _spack_agent_session(name: str, row: dict, entry: dict, workspace: Path, exe
               f"copy as {kept}" + (", replacing the one kept there before" if kept.exists() else "")
               + f". To continue that run instead: {shlex.join(resume)}")
     cloned = not source and not sa.clone_matches(src, entry)
-    replaced = ("; the clone there is of another repository or release, or has changed files, "
-                "and is replaced"
+    replaced = ("; the clone there is of another repository or release, or holds changed or "
+                "added files, and is replaced"
                 if cloned and src.exists() else "")
     print(f"    Source:    {src}"
           + (f" (a shallow clone of {entry['git']} at {entry['ref']}{replaced})" if cloned else ""))
