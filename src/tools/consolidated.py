@@ -1941,7 +1941,9 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                 "reply already carries `residual_csv` (the measured "
                 "iteration history), `interface_csv` (your interface tables) "
                 "and `captured_solver_logs` (the log paths). SAVE THOSE "
-                "VERBATIM as this level's deliverables, then run the NEXT "
+                "VERBATIM as this level's deliverables -- except an interface "
+                "table's q columns, which take the sign its _how_to_use states "
+                "for the quantity your task names -- then run the NEXT "
                 "level. A one-row or hand-written residual file reads as "
                 "no coupling at all — the real multi-row history is in this "
                 "reply. Report the caveat ALONGSIDE the saved files; it is "
@@ -3194,6 +3196,10 @@ from .knowledge import _PER_SIDE_NAMING  # one copy, served on both paths       
 from .knowledge import _physics_tail                            # noqa: E402
 from .knowledge import _UNIVERSAL as _UNIVERSAL_BLOCK          # noqa: E402
 from .knowledge import _UNIVERSAL_CORE as _UNIVERSAL_CORE      # noqa: E402
+# one statement of what the exported flux columns hold, in every reply that sends the agent
+# from them to the task's files (its comment in coupling_knowledge says why)
+from .coupling_knowledge import FLUX_COLUMNS_SIGN as _FLUX_COLUMNS_SIGN   # noqa: E402
+from .coupling_knowledge import FLUX_COLUMNS_SIGN_SHORT as _FLUX_COLUMNS_SIGN_SHORT   # noqa: E402
 
 
 # THE FIRST 1500 CHARACTERS DECIDE THE RUN, SO THEY GO FIRST.
@@ -7513,7 +7519,7 @@ def register_consolidated_tools(mcp: FastMCP):
                             ``iteration,interface_residual``. Use the path of the per-level
                             residual-history file your task names; never retype the returned history.
 
-        iface_level: optional level number stamped into the suggested_filename of the interface_csv blocks the reply carries on convergence (each participant's own final interface data, ready to save verbatim).
+        iface_level: optional level number stamped into the suggested_filename of the interface_csv blocks the reply carries on convergence (each participant's own final interface data, ready to save; their _how_to_use states the sign of the q columns -- for a served Dirichlet-Neumann elastic side, MINUS the outward traction).
 
         pde_check: THE ONE CHECK THAT SEPARATES A RIGHT ANSWER FROM A CONVERGED WRONG ONE, run for you on every converged level. JSON keyed by participant name: {"A": {"solution_files": "<this side's per-level field files, comma-separated, in level order>", "equation": "<your task's EQUATION line, verbatim>", "source": "<that side's source, as your task wrote it>", "coefficient": "<that side's coefficient>", "domain": "[[x0,x1],[y0,y1]]"}, "B": {...}}. The files must be on the PROBE GRID your task prescribes, not your mesh nodes: the test is a midpoint quadrature and on a scatter it reports nothing rather than a misleading number. You name them; openPASO guesses no filename and opens no task file. Give it once and openPASO puts each side's own field back into that side's own equation at every level from the second on, and reports CONSISTENT or INCONSISTENT in `pde_consistency`. A refinement study cannot do this: a field that converges cleanly to the WRONG function is indistinguishable in one -- measured on three recorded coupled runs whose every self-consistency measure reported a converging run while the answer was wrong. Nothing here is read from any task file; these are YOUR strings, and openPASO neither stores nor supplies them. A side whose operator this check does not model is refused by name and the rest still run.
 
@@ -7923,9 +7929,16 @@ def register_consolidated_tools(mcp: FastMCP):
                         cells += [f"{x:.15e}" for x in _flatrow(qs[i])]
                     rows.append(", ".join(cells))
                 ncoord = len(co[0]) if co and co[0] else 2
+                # ONE NAME PER COLUMN. A vector exchange was headed "x, y, u, qn" over six
+                # columns: an elastic side's two displacement and two traction components sat
+                # under two names, and a block saved as it stands could not be read by its
+                # header. Every entry of a point's values and normal_fluxes is named: a
+                # vector's components, or a waveform's time levels.
+                nu = len(_flatrow(vals[0])) if vals else 0
+                nq = len(_flatrow(qs[0])) if qs else 0
                 hdr = ", ".join(list("xyz"[:ncoord])
-                                + (["u"] if vals else [])
-                                + (["qn"] if qs else []))
+                                + (["u"] if nu == 1 else [f"u{c + 1}" for c in range(nu)])
+                                + (["qn"] if nq == 1 else [f"q{c + 1}" for c in range(nq)]))
                 _text = hdr + chr(10) + chr(10).join(rows) + chr(10)
                 _block = {"suggested_filename": f"interface{suffix}_{pname}.csv"}
                 if len(_text) > _inline_left:
@@ -7937,10 +7950,15 @@ def register_consolidated_tools(mcp: FastMCP):
             if iface_csv:
                 iface_csv["_how_to_use"] = (
                     "Each block is that participant OWN interface data at "
-                    "convergence, validated by this verdict. ONE DECISION "
+                    "convergence, validated by this verdict: its coordinates, "
+                    "its exported values (u, or u1, u2, .. one per entry of a "
+                    "point's list) and its exported normal_fluxes (qn, or q1, "
+                    "q2, ..). " + _FLUX_COLUMNS_SIGN_SHORT + " ONE DECISION "
                     "RULE: IF your participants exported AT the exact probe "
-                    "points your task prescribes, save each csv field "
-                    "verbatim with one write_file call and you are done. IF "
+                    "points your task prescribes, save each csv field with "
+                    "one write_file call -- verbatim, except its q columns, "
+                    "which take the sign above for the quantity your task "
+                    "names -- and you are done. IF "
                     "they exported at their own mesh nodes, do NOT save "
                     "these blocks as your reported interface files -- "
                     "follow the reporting key in this same reply, which "
@@ -8440,7 +8458,7 @@ def register_consolidated_tools(mcp: FastMCP):
             "coupled run is made unverifiable: the file is at the nodes, and "
             "the list is not. A task that lists interior "
             "points only has excluded the interface ENDS on purpose; do not "
-            "complete the list with them.")
+            "complete the list with them. " + _FLUX_COLUMNS_SIGN)
 
         # ── ALWAYS-RUN CORRECTIVE FUNNEL: lead the reply with the next fix ────
         # The driver verdict above says whether the ITERATION was sound; it does
@@ -8649,7 +8667,9 @@ def register_consolidated_tools(mcp: FastMCP):
                     "the probe points your task prescribes and write that "
                     "side's per-level field file; (2) write each side's "
                     "per-level interface file at the prescribed interface "
-                    "points from its own converged trace and flux; (3) make "
+                    "points from its own converged trace and flux -- a served "
+                    "Dirichlet-Neumann elastic side's q columns are MINUS the "
+                    "outward traction, a heat side's qn is the outward flux; (3) make "
                     "each side's per-level run log the captured participant "
                     "log whose path this reply returns (the solver's own "
                     "console output), never a summary you type. A summary "
@@ -8923,7 +8943,8 @@ def register_consolidated_tools(mcp: FastMCP):
                            "now and is the step most often lost when it is left to the end: the consoles stay on "
                            "disk, the logs the task asks for are never written, and a coupling that was proven is "
                            "read as not run. Then write the remaining "
-                           "deliverables -- the field and interface files per side from each level's dumps -- in "
+                           "deliverables -- the field and interface files per side from each level's dumps, "
+                           "their q columns in the sign `reporting` states -- in "
                            "ONE pass at the end. A run log copied from another level's console reads as "
                            "an unchanged mesh and sinks the whole sequence, and the write check names it the "
                            "moment it is written; a level set with one level missing is read as no result at "
@@ -9488,7 +9509,8 @@ def register_consolidated_tools(mcp: FastMCP):
                    "interface to the task's interface points with np.interp on the coordinate the interface "
                    "runs along -- griddata refuses points that lie on one line), and its per-level run log from "
                    "participant_output_level<k>.log plus the NDOF line; the coupling histories are already "
-                   "at the history paths above. NO NaN GOES INTO A FILE: griddata(method='linear') returns NaN "
+                   "at the history paths above. " + _FLUX_COLUMNS_SIGN + " "
+                   "NO NaN GOES INTO A FILE: griddata(method='linear') returns NaN "
                    "at a probe outside the convex hull of the dump's nodes, and a probe on the side's edge can "
                    "miss that hull by round-off (measured: 1e-14 outside a unit-size box is enough); count "
                    "them with np.isnan before you write. A probe that round-off put outside is inside at "
@@ -12271,7 +12293,7 @@ A task that splits the DOMAIN into subdomains joined by interface continuity
 conditions is this partitioned domain decomposition however many fields each
 subdomain carries -- temperature and displacement together included. Exchange
 every interface quantity per point: values = [T, ux, uy] and normal_fluxes =
-[q_n, t_x, t_y] on both sides (one row per interface point, the same order
+[q_n, q_x, q_y] on both sides (one row per interface point, the same order
 every iteration); the driver compares them component by component. A FIELD
 coupling in which both codes own the whole body (the `tsi` route) is a
 different setup and does not apply to a split domain.
