@@ -216,7 +216,7 @@ INSTALLED_API = {
     "MeshTri() already IS the unit square; refine with `.refined(n)` (returns a new mesh, not in-place).",
     "Use generic `Basis(mesh, ElementTriP1())` (element instance required).",
     "Decorator arities are mandatory: `@BilinearForm def f(u, v, w)` and `@LinearForm def f(v, w)` — the trailing `w` (global params) is required even if unused. Wrong arity is the #1 error.",
-    "POINT EVALUATION at arbitrary (non-node) points: `basis.probes(P) @ x`, where P is a (dim, npoints) array — probes() returns a sparse matrix that INTERPOLATES the solution vector, so the `@` is the evaluation. Note the shape: points are COLUMNS, not rows. Verified exact on a P1-representable field.",
+    "POINT EVALUATION at arbitrary (non-node) points: `basis.probes(P) @ x`, where P is a (dim, npoints) array — probes() returns a sparse matrix that INTERPOLATES the solution vector, so the `@` is the evaluation. Note the shape: points are COLUMNS, not rows. Verified exact on a P1-representable field. On a VECTOR basis (ElementVector) the result is BLOCKED BY COMPONENT, not interleaved like the dof vector: `(basis.probes(P) @ x).reshape(dim, npoints)` gives row c = component c at every point; [0::2]/[1::2] scrambles the components (measured on 12.0.1 and 12.0.2).",
     "Writing results: numpy.savetxt(..., fmt='%.15e'). str(float) and '%.6f' throw away digits a convergence study needs.",
     "Integrand uses skfem.helpers (dot, grad) and returns the pointwise integrand, not an assembled value.",
     "Assemble via `form.assemble(basis)` or `asm(form, basis)` (equivalent).",
