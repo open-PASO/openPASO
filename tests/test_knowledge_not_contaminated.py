@@ -702,20 +702,25 @@ def test_the_expected_result_guard_can_actually_fail():
 # is the shape. A linear field such as 3*x + 2*y has no power and stays allowed:
 # it is the identity-map check this corpus teaches.
 _MONOMIAL = r"\d+(?:\.\d+)?\*[xyz](?:\*\*\d+)?(?:\*[xyz](?:\*\*\d+)?)*(?:/\d+)?"
-_POLYNOMIAL_EXAMPLE = re.compile(rf"{_MONOMIAL}\s*[-+]\s*{_MONOMIAL}")
+# Every adjacent pair, overlapping ones included: in `3*x + 2*y - 7*x**2*y` the
+# linear pair must not consume the `2*y` that starts the pair with the power. A
+# pair starts at a monomial, never inside a number or a product.
+_POLYNOMIAL_EXAMPLE = re.compile(rf"(?<![\w.*/])(?=({_MONOMIAL}\s*[-+]\s*{_MONOMIAL}))")
 
 
 def _polynomial_examples(text: str) -> list:
-    return [m for m in _POLYNOMIAL_EXAMPLE.finditer(text) if "**" in m.group(0)]
+    """(start, end, pair) of every adjacent monomial pair with a power in it."""
+    return [(m.start(1), m.end(1), m.group(1)) for m in _POLYNOMIAL_EXAMPLE.finditer(text)
+            if "**" in m.group(1)]
 
 
 def test_no_polynomial_source_term_as_an_example():
     hits = []
     for p in _knowledge_files():
         text = _served(p.read_text(errors="ignore"), p.suffix)
-        for m in _polynomial_examples(text):
-            line = text[:m.start()].count("\n") + 1
-            hits.append(f"{p.relative_to(REPO)}:~{line}: …{text[max(0, m.start() - 50):m.end() + 20]!r}…")
+        for start, end, _pair in _polynomial_examples(text):
+            line = text[:start].count("\n") + 1
+            hits.append(f"{p.relative_to(REPO)}:~{line}: …{text[max(0, start - 50):end + 20]!r}…")
     assert not hits, (
         "A polynomial with numeric coefficients is used as an example in agent-reachable text. That is "
         "the form a manufactured problem's source term takes, and the example at hand is usually a "
@@ -727,5 +732,7 @@ def test_the_polynomial_example_guard_can_actually_fail():
     """Planted: both shapes the audit found, and the shapes that must pass."""
     assert _polynomial_examples('notation, e.g. "7*x**3*y - 5*x**2*y**2 + ...".')
     assert _polynomial_examples("e.g. '-4*x**2*y**3/9 + 11*x*y/7 - 3'")
+    # a linear pair in front must not hide the pair with the power behind it
+    assert _polynomial_examples("f = 3*x + 2*y - 7*x**2*y")
     assert not _polynomial_examples("u = 3*x + 2*y, sampled at the probe points")
     assert not _polynomial_examples('e.g. "2*pi**2*sin(pi*x)*sin(pi*y)"')
