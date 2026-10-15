@@ -2198,6 +2198,7 @@ def deliverable_flux_vs_export_findings(work: Path) -> list[dict]:
 
 def _deliverable_finding(work: Path, q: Path, rel: float, owner, src) -> dict:
     """The finding of deliverable_flux_vs_export_findings for one handed-in file."""
+    from .coupling_knowledge import FLUX_COLUMNS_SIGN_SHORT              # noqa: PLC0415
     try:
         where = src.relative_to(work)
     except ValueError:
@@ -2206,16 +2207,16 @@ def _deliverable_finding(work: Path, q: Path, rel: float, owner, src) -> dict:
             "priority": 25, "finding": (
         f"THE FLUX YOU HANDED IN IS NOT THE FLUX YOUR SOLVER PRODUCED. The "
         f"flux column of {q.name} differs by {rel:.0%} of its own size from "
-        f"the outward flux {owner} exported at the same interface points "
+        f"the flux {owner} exported on its own outward normal at the same interface points "
         f"({where}, written by that side's own participant from its own "
-        f"assembled system), so the column was not taken from it. Whatever "
+        f"assembled system), in either sign, so the column was not taken from it. Whatever "
         f"built it -- a recomputation from nodal values, an interpolation over "
         f"points that are not sorted along the interface, another level's file "
         f"each do this -- every two-sided interface finding below is then "
         f"measuring that post-processing rather than your coupling. Build "
         f"this column from that side's own "
         f"interface_level<k>.csv (or its exports.json), and keep those "
-        f"files until the deliverable is written.")}
+        f"files until the deliverable is written. " + FLUX_COLUMNS_SIGN_SHORT)}
 
 
 def _deliverable_by_leg(work: Path, q: Path, mine, cands, level_exports):
@@ -8598,6 +8599,8 @@ def coupled_ladder(work: Path, converged_now: bool = False) -> dict | None:
                          f"file(s), VTU folder and interface data to names containing 'level{max(done_levels)}' NOW (or add the served contract's dump "
                          f"block, which writes field_level<k>.csv and interface_level<k>.csv after exports.json); measured: a side whose runs shared "
                          f"one output prefix handed in identical solution files for every level and no interface file. THEN: ")
+            # what the flux columns of the dumps hold, in the brief that writes the task's files from them
+            from .coupling_knowledge import FLUX_COLUMNS_SIGN as _flux_sign             # noqa: PLC0415
             return step(4, f"LEVEL {k}'S DELIVERABLES ARE NOT WRITTEN (coupled so far: levels {done_levels}; field files for "
                            f"{sorted(sides_f) or 'no'} side(s), interface files for {sorted(sides_i) or 'no'} side(s)). If your task "
                            f"prescribes levels beyond {max(done_levels)}, they come FIRST in ONE couple_levels call -- a level set with "
@@ -8619,7 +8622,8 @@ def coupled_ladder(work: Path, converged_now: bool = False) -> dict | None:
                         "points -- BOTH from its interface_level<k>.csv (a Dirichlet side's trace there is the "
                         "value it imposed, identical to the partner's export; measured: a run that re-sampled "
                         "its field file at the boundary instead handed in a trace 2x off while its field was "
-                        "right, so the result looked unphysical). The interpolation is four lines (measured on a served per-level dump): "
+                        "right, so the result looked unphysical). " + _flux_sign + " "
+                        "The interpolation is four lines (measured on a served per-level dump): "
                         "a = numpy.loadtxt('field_level<k>.csv', delimiter=',', skiprows=1); "
                         "v = scipy.interpolate.griddata(a[:, :2], a[:, 2], P, method='linear') with P the "
                         "(n, 2) probe points -- one such call per value column (a[:, 2], a[:, 3], ... for a "
@@ -8731,6 +8735,7 @@ def missing_fields_findings(work: Path) -> list[dict]:
     if _field_files(work) or _interface_files(work):
         return []
     levels = sorted({_level_of(q) for q in hist + logs if _level_of(q) is not None})
+    from .coupling_knowledge import FLUX_COLUMNS_SIGN as _flux_sign             # noqa: PLC0415
     return [{"sequence": "no field files", "priority": 15, "values": [], "finding": (
         f"NO PER-LEVEL FIELD FILE AND NO INTERFACE FILE EXISTS, while "
         f"{len(hist)} residual history file(s) and {len(logs)} per-level run "
@@ -8743,7 +8748,7 @@ def missing_fields_findings(work: Path) -> list[dict]:
         f"converged trace and flux at the prescribed interface points. Every "
         f"number you already have is on disk in your participants' per-level "
         f"dumps (field_level<k>.csv, interface_level<k>.csv; exports.json holds "
-        f"only the LAST level); no re-solve is needed.")}]
+        f"only the LAST level); no re-solve is needed. " + _flux_sign)}]
 
 
 def summary_names_findings(work: Path) -> list[dict]:

@@ -1631,6 +1631,34 @@ structural code is a THERMO-STRUCTURAL problem and needs a real transfer
 relation in the participant scripts (see `knowledge(topic='tsi')`).
 '''
 
+# WHAT THE FLUX COLUMNS HOLD, SAID WHERE THE FILES ARE WRITTEN. A served Dirichlet-Neumann
+# participant exports normal_fluxes, and dumps them into interface_level<k>.csv, as minus the
+# conormal derivative on its own outward normal. For heat that IS the outward normal flux; for
+# elasticity it is MINUS the outward traction sigma . n_own. The exchange needs exactly that (the
+# two sides' exports cancel, and the Neumann side applies its partner's numbers unchanged), so it
+# stays as it is. Found on an elastic coupling: the reply to a converged ladder told the agent to
+# write the task's interface files from these columns and said nothing about their sign, so a file
+# that asked for the outward traction sigma . n received its negative. Every instruction that sends
+# the agent from the exported columns to the task's files carries this one statement; the
+# regression test runs the elastic and the scalar contracts and checks the statement against them
+# (tests/test_exchanged_traction_is_not_the_outward_traction.py).
+FLUX_COLUMNS_SIGN = (
+    "SIGN OF THE FLUX COLUMNS. A served Dirichlet-Neumann participant exports normal_fluxes -- and "
+    "writes the q columns of its interface_level<k>.csv -- with respect to ITS OWN outward normal "
+    "n_own, in the sign the coupling exchanges (leave the exchange as it is): heat or diffusion "
+    "qn = -(k grad u) . n_own, which IS the outward normal flux; elasticity q = -(sigma . n_own), "
+    "the NEGATIVE of the outward traction sigma . n_own, so a file that asks for the traction gets "
+    "-q (a thermo-elastic dump's tx, ty already hold sigma . n_own). A task that fixes ONE normal n "
+    "for both sides flips the sign once more on the side whose outward normal is -n. An FSI "
+    "participant's sign is the one its own contract states.")
+# The same rule in one sentence, for text that is repeated per level or per file (an interface
+# table's _how_to_use rides on every level of a ladder reply).
+FLUX_COLUMNS_SIGN_SHORT = (
+    "The q columns are each side's export as it is, on its own outward normal n_own; for a served "
+    "Dirichlet-Neumann participant -(k grad u) . n_own for heat or diffusion, the outward normal "
+    "flux itself, and -(sigma . n_own) for elasticity, MINUS the outward traction sigma . n_own, so "
+    "a file that asks for the traction gets -q (an FSI participant: the sign its contract states).")
+
 _VECTOR = '''\
 ## 6a. VECTOR INTERFACES — displacement/traction, velocity/force, any n_comp
 
@@ -1656,6 +1684,11 @@ balance check a conservation statement — and the NEUMANN side applies the
 partner's numbers UNCHANGED (`L += inner(g, v) * ds`), because the natural
 boundary term of the elasticity weak form is +(sigma . n_own) . v. Exporting
 the raw traction instead flips the sign the Neumann side applies.
+That is the EXCHANGE convention, not the outward traction: sigma . n_own is
+-q_out, so a file that asks for the traction gets both components negated when
+you write it from the export or from the qx, qy columns of
+interface_level<k>.csv. A task that fixes ONE normal n for both sides takes
+sigma . n = +q_out on the side whose outward normal is -n.
 
 **3. THE INTERFACE CORNERS BELONG TO THE OUTER BOUNDARY, ON BOTH SIDES.** A
 node where the interface meets a constrained outer face is a constrained node
@@ -2837,7 +2870,10 @@ def _vector_block(script_name: str) -> str:
         "interface point, in the same node order on both sides. The Dirichlet "
         "side imports displacements and exports the traction it needed; the "
         "Neumann side imports that traction and exports the displacement it "
-        "produced. Recover the traction variationally (the interface "
+        "produced. The traction travels as q = -(sigma . n_own), n_own this "
+        "side's outward normal, so the outward traction sigma . n_own is -q: "
+        "the NEGATIVE of the exported numbers and of the qx, qy columns the "
+        "contract dumps. Recover the traction variationally (the interface "
         "reactions of the assembled residual), never by differencing the "
         "displacement field — a differenced traction converges one order too "
         "slowly and drags the coupled field order down with it.\n\n"

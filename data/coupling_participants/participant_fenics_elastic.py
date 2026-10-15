@@ -502,8 +502,8 @@ U = np.column_stack([uh.x.array[2 * iface_n], uh.x.array[2 * iface_n + 1]])
 print(f"[fenics {SIDE}] interface n={len(U)} "
       f"ux=[{U[:,0].min():.6g},{U[:,0].max():.6g}] "
       f"uy=[{U[:,1].min():.6g},{U[:,1].max():.6g}] "
-      f"tx=[{Q[:,0].min():.6g},{Q[:,0].max():.6g}] "
-      f"ty=[{Q[:,1].min():.6g},{Q[:,1].max():.6g}]")
+      f"qx=[{Q[:,0].min():.6g},{Q[:,0].max():.6g}] "
+      f"qy=[{Q[:,1].min():.6g},{Q[:,1].max():.6g}] (export q = -(sigma . n_own))")
 
 # THE RUN-LOG CONTRACT LINE: `NDOF = <integer>` on a line of its OWN.
 # The audit reads that exact shape, and they read it PER

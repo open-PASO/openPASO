@@ -279,7 +279,7 @@ It never explains a failure.
     finished normally'); put the task's thermal sources and boundary
     conditions on that slab in place of its volume-wide temperature, keep the
     thermal expansion from THEXPANS/INITTEMP (alpha = beta/(3*lambda+2*mu)
-    for a task that states beta), and exchange [T, ux, uy] / [q_n, t_x, t_y]
+    for a task that states beta), and exchange [T, ux, uy] / [q_n, q_x, q_y]
     per interface point as the coupling contract says. The alternative of two
     separate problem types (`Structure` with WALL elements, 2-D SOLID from
     2026.2.0 on, and `Thermo` with THERMO elements, exchanging the thermal strain

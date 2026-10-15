@@ -696,11 +696,14 @@ else:
 print(f"[febio {SIDE}] interface n={len(U)} "
       f"ux=[{U[:,0].min():.6g},{U[:,0].max():.6g}] "
       f"uy=[{U[:,1].min():.6g},{U[:,1].max():.6g}] "
-      f"tx=[{Q[:,0].min():.6g},{Q[:,0].max():.6g}] "
-      f"ty=[{Q[:,1].min():.6g},{Q[:,1].max():.6g}]")
+      f"qx=[{Q[:,0].min():.6g},{Q[:,0].max():.6g}] "
+      f"qy=[{Q[:,1].min():.6g},{Q[:,1].max():.6g}] (export q = -(sigma . n_own))")
 
 # PER-LEVEL PERSISTENCE: this level's interface and field, named by LEVEL. Interpolate
-# THESE onto your probe points.
+# THESE onto your probe points. THE qx, qy COLUMNS ARE THIS SIDE'S EXPORT,
+# q_out = -(sigma . n_own) (the sign convention at the top of this file): a task that
+# asks for the traction sigma . n wants their negative, and one that fixes a single
+# normal for both sides flips the side whose own normal points the other way.
 try:
     with open(f"interface_level{LEVEL}.csv", "w") as _f:
         _f.write("x,y,ux,uy,qx,qy\n")
