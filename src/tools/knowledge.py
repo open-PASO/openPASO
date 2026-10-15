@@ -917,13 +917,16 @@ another agent. What they saw was this:
 A SOLVER'S INPUT LANGUAGE IS NOT PYTHON
 ───────────────────────────────────────
 The task states its source term and boundary data in Python notation, e.g.
-`f = 36*x**3*y - 54*x**2*y**2 + ...`. Copying that verbatim into a solver's
+`f = 2*pi**2*sin(pi*x)*sin(pi*y)`. Copying that verbatim into a solver's
 expression field fails, and the two failures below were both measured here.
 
   * `**` IS NOT EXPONENTIATION in these expression parsers. USE `^`.
-    - 4C `SYMBOLIC_FUNCTION_OF_SPACE_TIME`: `-12*x**3*y/5` gives
+    - 4C `SYMBOLIC_FUNCTION_OF_SPACE_TIME`: `2*pi**2*sin(pi*x)*sin(pi*y)` gives
         PROC 0 ERROR ... 4C_utils_symbolic_expression.cpp
-        Error while parsing: -12*x**3*y/5 + ...
+        Error while parsing:
+        2*pi**2*sin(pi*x)*sin(pi*y)
+             ^
+             Expected a primary expression.
       and the identical expression with `^` parses. Measured: converting `**`
       to `^` moved a failing deck past this error entirely.
     - FEBio `type="math"` loads: `-1*X**2` gives `Token expected (position 6)`;

@@ -505,10 +505,8 @@ RESULT DESCRIPTION:
                     "a 10x1x1 HEX8 cantilever, L/h = 20, tip traction, against "
                     "the -1.586797e-01 reference: at NUE 0.499 with nonlinear "
                     "kinematics, plain gives -2.314e-02 (15% of it), fbar "
-                    "-9.133e-02 (58%), eas_full -1.5658e-01 (99%); at NUE "
-                    "0.4999 with KINEM linear, plain gives -9.321e-03 (6%) "
-                    "while eas_full gives -1.5654e-01 (99%) and fbar recovers "
-                    "the reference outright. Pick eas_* when bending is "
+                    "-9.133e-02 (58%), eas_full -1.5658e-01 (99%). Pick "
+                    "eas_* when bending is "
                     "present or when you are unsure; pick fbar when the "
                     "problem is purely volumetric. Higher-order cells (HEX27, "
                     "TET10) are the other route. TECH is an ENUM — "
@@ -525,7 +523,7 @@ RESULT DESCRIPTION:
                     "a 'confirmed by execution 2026-08-06' stamp; the fixture "
                     "behind that stamp has six arms and none of them ran EAS "
                     "at high NUE, so the claim's second half had never been "
-                    "executed. All six numbers above measured 2026-08-30 on "
+                    "executed. The numbers above were measured 2026-08-30 on "
                     "4C 2026.2.0-dev.)"
                 ),
                 (
