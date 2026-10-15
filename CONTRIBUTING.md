@@ -3,10 +3,10 @@
 Thank you for your interest. openPASO is a community project under active development, and it gets
 better every time someone reports what went wrong.
 
-**Development happens in the development repository, <https://github.com/alhermann/openPASO>.** It carries
-the test suite, the fixtures that back each served claim, and the measurement tooling. This
-repository is the released product: what installing and running openPASO needs. Please open issues
-here or there, and pull requests there.
+**Please open issues and pull requests here, in <https://github.com/open-PASO/openPASO>.** This
+repository is the released product: what installing and running openPASO needs. The full test suite,
+the fixtures that back each served claim, and the measurement tooling live in a development
+repository that is not public.
 
 The browser interface's fast tests ship with it and need no key:
 

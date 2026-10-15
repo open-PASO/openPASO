@@ -40,9 +40,9 @@ Please say in the pull request which failure your change catches and how you che
 
 ## Where development happens
 
-Development, the test suite and the measurement tooling live in the development repository,
-<https://github.com/alhermann/openPASO>. Please open pull requests there. The Hereon repository
-carries the released product.
+Please open issues and pull requests in <https://github.com/open-PASO/openPASO>, which carries the
+released product. The full test suite, the fixtures and the measurement tooling live in a development
+repository that is not public.
 
 ## Regenerating the reference pages
 
