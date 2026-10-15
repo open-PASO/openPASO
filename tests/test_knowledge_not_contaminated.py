@@ -685,3 +685,54 @@ def test_the_expected_result_guard_can_actually_fail():
                   '  - "and TOLERANCE when you want 4C to self-check."\n')
     assert not _RESULT_DESCRIPTION.search(legitimate)
     assert not _ASSERTED_VALUE.search(legitimate)
+
+
+# AN EXAMPLE SOURCE TERM THAT IS A PIECE OF A DEVELOPMENT PROBLEM'S SOURCE TERM.
+#
+# A task states its source term as a polynomial with numeric coefficients, and
+# the easiest example to paste into a docstring, a contract or a rule is the one
+# on the screen. An audit found three, each built from the leading terms of a
+# development problem's source term: an argument example of the weak-form check,
+# the config example of a coupling contract, and the example of the rule that a
+# solver's input language is not Python. An example only has to show the
+# notation, and an expression that no task would use does that without
+# resembling an answer: 2*pi**2*sin(pi*x)*sin(pi*y).
+#
+# Two adjacent monomials with numeric coefficients, at least one with a power,
+# is the shape. A linear field such as 3*x + 2*y has no power and stays allowed:
+# it is the identity-map check this corpus teaches.
+_MONOMIAL = r"\d+(?:\.\d+)?\*[xyz](?:\*\*\d+)?(?:\*[xyz](?:\*\*\d+)?)*(?:/\d+)?"
+# Every adjacent pair, overlapping ones included: in `3*x + 2*y - 7*x**2*y` the
+# linear pair must not consume the `2*y` that starts the pair with the power. A
+# pair starts at a monomial, never inside a number or a product.
+_POLYNOMIAL_EXAMPLE = re.compile(rf"(?<![\w.*/])(?=({_MONOMIAL}\s*[-+]\s*{_MONOMIAL}))")
+
+
+def _polynomial_examples(text: str) -> list:
+    """(start, end, pair) of every adjacent monomial pair with a power in it."""
+    return [(m.start(1), m.end(1), m.group(1)) for m in _POLYNOMIAL_EXAMPLE.finditer(text)
+            if "**" in m.group(1)]
+
+
+def test_no_polynomial_source_term_as_an_example():
+    hits = []
+    for p in _knowledge_files():
+        text = _served(p.read_text(errors="ignore"), p.suffix)
+        for start, end, _pair in _polynomial_examples(text):
+            line = text[:start].count("\n") + 1
+            hits.append(f"{p.relative_to(REPO)}:~{line}: …{text[max(0, start - 50):end + 20]!r}…")
+    assert not hits, (
+        "A polynomial with numeric coefficients is used as an example in agent-reachable text. That is "
+        "the form a manufactured problem's source term takes, and the example at hand is usually a "
+        "development problem's. Show the notation with an expression no task uses, e.g. "
+        "2*pi**2*sin(pi*x)*sin(pi*y).\n  " + "\n  ".join(hits[:8]))
+
+
+def test_the_polynomial_example_guard_can_actually_fail():
+    """Planted: both shapes the audit found, and the shapes that must pass."""
+    assert _polynomial_examples('notation, e.g. "7*x**3*y - 5*x**2*y**2 + ...".')
+    assert _polynomial_examples("e.g. '-4*x**2*y**3/9 + 11*x*y/7 - 3'")
+    # a linear pair in front must not hide the pair with the power behind it
+    assert _polynomial_examples("f = 3*x + 2*y - 7*x**2*y")
+    assert not _polynomial_examples("u = 3*x + 2*y, sampled at the probe points")
+    assert not _polynomial_examples('e.g. "2*pi**2*sin(pi*x)*sin(pi*y)"')

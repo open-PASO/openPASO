@@ -1446,9 +1446,10 @@ def contract_findings(work: Path, only_levels: set | None = None) -> list[dict]:
     #
     # The consequence is invisible to every self-consistency test: the form
     # assembles, the solve succeeds, the successive differences fall smoothly,
-    # the audit passed it, and the answer is wrong. Replaying its script
-    # unchanged reproduces 6.158955e-02 against the correct 7.196098e-02, and
-    # order 0.028 against 2.069 measured against an independent reference.
+    # the audit passed it, and the answer is wrong. Replayed on a problem with
+    # a known solution (K = [[5,2],[2,4]], u = sin(pi x) sin(pi y), maxh =
+    # 1/4 to 1/32, NGSolve 6.2.2604): the xref form stays 46% off at order
+    # 0.06, against order 2.07 for the identical script using global x, y.
     #
     # Only flagged when the run ALSO has a coordinate-indexed deliverable, so
     # a legitimate use of xref (a per-element quantity, an error indicator) in
@@ -1483,10 +1484,9 @@ def contract_findings(work: Path, only_levels: set | None = None) -> list[dict]:
                 f"source evaluated at an interior point must equal the "
                 f"arithmetic you do by hand for that point, and must not "
                 f"change when you look at a different element containing it. "
-                f"Measured on a real run: the xref form gave "
-                f"max|u| = 6.158955e-02 and order 0.028 against an independent "
-                f"reference; the identical script using global x, y gave "
-                f"7.196098e-02 and order 2.069.")})
+                f"Measured on a problem with a known solution: the xref form "
+                f"stayed 46% off at order 0.06, while the identical script "
+                f"using global x, y converged to it at order 2.07.")})
             break
 
     # 1d. THE RESIDUAL YOU REPORT MUST MEASURE THE TWO SIDES, NOT AN ITERATE.

@@ -1508,9 +1508,9 @@ For quads split each into two triangles first. On a horizontal interface pass th
 WHICH RECOVERY FEEDS `normal_fluxes`: the consistent (residual) recovery, on
 BOTH sides. A gradient-based recovery's RELATIVE error is inflated on a
 high-diffusivity side (the normal gradient there is ~q/k): measured on a
-1:200 material pair at h=1/8, the gradient route missed the true flux by 6.5%
-pointwise / 6.9% net — outside a 5% conservation tolerance that the
-consistent recovery passed at every level. A gradient recovery remains a fine
+high-contrast material pair at a coarse mesh, the gradient route missed the
+true flux by more than a 5% conservation tolerance that the consistent
+recovery passed at every level. A gradient recovery remains a fine
 INDEPENDENT cross-check for your own reported interface files; it is the
 conservation check you must not feed with it at coarse resolution.
 
@@ -5414,7 +5414,7 @@ Reads ./config.json {"level":..,"nx":..,"ny":..,"x0":..,"x1":..,"y0":..,"y1":..,
 problem prescribes one -- openPASO checks the delivered field against it, and
 the equation check cannot: its test function makes every boundary term vanish>,
 "source_expr":"<f(x, y) as a Python expression, e.g.
-'-10*x**3*y**3/3 + 16*x**2*y/5 - 2'; '0.0' when there is none>","iface":"left|right|bottom|top"}
+'2*pi**2*sin(pi*x)*sin(pi*y)'; '0.0' when there is none>","iface":"left|right|bottom|top"}
 ("source_const": <number> is still accepted for a constant source).
 Contract: reads ./imports.json (partner's interface FIELD values at its points),
 imposes them as the interface Dirichlet trace, solves -div(k grad u) + c*u = f,
@@ -5449,7 +5449,7 @@ HX, HY = (X1 - X0) / NX, (Y1 - Y0) / NY
 # (F_SRC below); the source term of YOUR form is yours to write in UFL, from the
 # same expression. Measured: a run that carried the task's polynomial source
 # nowhere (config source_const 0.0, the same zero in its form) converged at
-# every level to a smooth field 1.2e-2 off the answer, order 0.00; the check
+# every level to a smooth field that stayed off the answer, order 0.00; the check
 # after the recovery now refuses a form that disagrees with this string. A
 # constant 'source_const' still works; when both are absent the source is zero.
 SRC_EXPR = str(CFG.get("source_expr", "")).strip().replace("^", "**")

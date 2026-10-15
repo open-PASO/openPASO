@@ -501,8 +501,8 @@ def _degenerate_elements(text: str) -> list[str]:
 
 
 def _double_star_in_functions(text: str) -> list[str]:
-    """`**` inside a 4C function expression: the parser has no such operator (measured: `-12*x**3*y/5`
-    stops in 4C_utils_symbolic_expression.cpp with 'Error while parsing: ... Expected a primary
+    """`**` inside a 4C function expression: the parser has no such operator (measured: a polynomial source
+    term written with `**` stops in 4C_utils_symbolic_expression.cpp with 'Error while parsing: ... Expected a primary
     expression.', on a development build before 4C 2026.2.0, on 4C 2026.2.0 and on 4C 2026.3.0); the task texts write their
     source terms in Python notation, so a copied expression carries it. Every occurrence, not the first."""
     out = []

@@ -184,7 +184,7 @@ _BODY_FORCE_TRAP = (
     "A POSITION-DEPENDENT BODY FORCE IS WRITABLE IN THE DECK, and this entry "
     "used to say the opposite — \"a math string cannot make it vary per "
     "element, so a POSITION-DEPENDENT source cannot be written in the deck at "
-    "all\". That is false, and agents believed it: FB2 runs reported back "
+    "all\". That is false, and agents believed it: runs reported back "
     "\"FEBio 4.12.0 does not support spatially-varying body forces through "
     "its XML interface\" and stopped. Two forms work, and they give "
     "bit-identical answers:\n"

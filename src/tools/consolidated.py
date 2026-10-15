@@ -6460,9 +6460,9 @@ def register_consolidated_tools(mcp: FastMCP):
             solution_files: comma-separated paths to your solution CSVs, one
                 per mesh level, each `x, y, u` (or `x, y, z, u`) with a header.
             source_term: the task's source term, in the task's own Python
-                notation, e.g. "36*x**3*y - 20*x**3/3 + 8/3".
+                notation, e.g. "2*pi**2*sin(pi*x)*sin(pi*y)".
             coefficient: "2.5" for a scalar, or a symmetric tensor written as
-                "[[3,-1],[-1,2]]". Must match what the task prescribes.
+                "[[5,2],[2,4]]". Must match what the task prescribes.
             domain: the box the problem lives on, "[[x0,x1],[y0,y1]]".
             equation: your task's equation, copied from its EQUATION line.
                 REQUIRED. This check implements the second-order scalar
@@ -6616,7 +6616,7 @@ def register_consolidated_tools(mcp: FastMCP):
                 coeff = float(coefficient)
             except Exception:
                 return (f"coefficient {coefficient!r} is neither a number nor "
-                        f"a JSON matrix like [[3,-1],[-1,2]]")
+                        f"a JSON matrix like [[5,2],[2,4]]")
         try:
             box = [tuple(float(v) for v in pair)
                    for pair in _json.loads(domain)]
@@ -12479,7 +12479,7 @@ weaker, because an identity whose test function vanishes on the boundary cannot 
 wrong condition ON that boundary. A clean verdict is not a clean bill of
 health.
 
-THE DIRICHLET SIDE RETURNS A MEASURED FLUX, NEVER A PLACEHOLDER. Recover it from your OWN system, in this order: (1) the CONSISTENT residual recovery q = -(A u - b_vol)/w on the interface rows -- second order, valid on BOTH sides; (2) the code's native boundary-flux output ONLY on a side whose interface is Dirichlet (on a Neumann-loaded line it echoes the applied load); (3) one-sided quadratic extrapolation of -k*du/dn from three field points along the normal as a CROSS-CHECK, not the exported value on a high-diffusivity side (measured: routes 1 and 3 agree to 2.7% rel-RMS at h=1/8 on the low-k side; route 3 alone missed by 6.5% on the high-k side). A constant or invented exchanged quantity turns the partitioned update into a no-op (measured: a hard-coded 0.0 flux never approached tolerance in 50 iterations; the real recovered flux converged in 4). If the residual is not contracting, check FIRST that the data you SEND changes between iterations.
+THE DIRICHLET SIDE RETURNS A MEASURED FLUX, NEVER A PLACEHOLDER. Recover it from your OWN system, in this order: (1) the CONSISTENT residual recovery q = -(A u - b_vol)/w on the interface rows -- second order, valid on BOTH sides; (2) the code's native boundary-flux output ONLY on a side whose interface is Dirichlet (on a Neumann-loaded line it echoes the applied load); (3) one-sided quadratic extrapolation of -k*du/dn from three field points along the normal as a CROSS-CHECK, not the exported value on a high-diffusivity side (measured at a coarse mesh: routes 1 and 3 agree to a few percent on the low-k side, while route 3 alone missed by more than 5% on the high-k side of a high-contrast pair). A constant or invented exchanged quantity turns the partitioned update into a no-op (measured: a hard-coded 0.0 flux never approached tolerance in 50 iterations; the real recovered flux converged in 4). If the residual is not contracting, check FIRST that the data you SEND changes between iterations.
 
 THE RECOVERY, READY TO COPY (P1 triangles; split quads into two triangles first; works for any interface axis) -- verified by execution, 9.3e-4 max relative error against an analytic outward flux at h=1/16, second order under refinement. A first-order recovery here caps the whole coupled field at order ~1 however good the elements are. FOR ELASTICITY (vector interface) the same identity holds PER COMPONENT: t_c(x_i) = (K u - F_vol)_(i,c) / w_i with K the elastic stiffness assembled with NO boundary conditions, F_vol the volume load only, w_i the tributary interface length; export q = -t per the sign convention (measured on a manufactured plane-strain case: component orders 1.91-2.10 across the ladder):
 

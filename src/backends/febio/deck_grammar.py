@@ -10,7 +10,7 @@ MEASURED on the payload a single-code FEBio agent receives (21,787 characters
 for `heat`): no `<febio_spec`, no `<MeshDomains`, no `<Boundary`, no `<node id=`
 and no `fix=`. The corpus is rich on material models and pitfalls and silent on
 the document that carries them. The same shape of gap was measured for 4C, where
-it cost all three openPASO-arm runs of coupled cell C2 their whole attempt.
+it cost three coupled runs their whole attempt.
 
 WHAT IS SERVED IS THE GRAMMAR, NOT A SOLVE. Every number below is an arbitrary
 placeholder; the agent still chooses its own mesh, material parameters, boundary
