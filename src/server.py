@@ -66,6 +66,10 @@ mcp = FastMCP(
 from tools.consolidated import register_consolidated_tools
 register_consolidated_tools(mcp)
 
+# Material data handed over from another framework (src/scale_bridge)
+from tools.scale_bridge import register_scale_bridge_tools
+register_scale_bridge_tools(mcp)
+
 # Load all backends
 from core.registry import load_all_backends
 load_all_backends()

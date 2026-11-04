@@ -103,6 +103,8 @@ nav:
           - couple_precice: tools/couple_precice.md
           - transfer_field: tools/transfer_field.md
           - write_participant_contract: tools/write_participant_contract.md
+      - Data from other frameworks:
+          - material_handoff: tools/material_handoff.md
       - Set up and develop:
           - setup_backend: tools/setup_backend.md
           - rediscover_backends: tools/rediscover_backends.md
@@ -111,6 +113,7 @@ nav:
   - How it works:
       - Checking the answer: how-it-works/checking.md
       - Two solvers on one problem: how-it-works/coupling.md
+      - Data from another framework: how-it-works/scale-bridging.md
       - How it is built: how-it-works/architecture.md
   - Help:
       - Troubleshooting: troubleshooting.md
