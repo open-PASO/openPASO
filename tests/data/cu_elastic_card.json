@@ -1,0 +1,827 @@
+{
+ "material": "Cu",
+ "kind": "elastic.cubic",
+ "values": {
+  "C11": 177.25,
+  "C12": 123.417,
+  "C44": 79.167
+ },
+ "units": "GPa",
+ "producer": {
+  "name": "GENIUS",
+  "program": "Quantum ESPRESSO v.7.6",
+  "note": "PBE, PAW; fcc primitive cell; strained-cell stresses"
+ },
+ "evidence": [
+  {
+   "name": "d04_ref",
+   "role": "reference",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     27,
+     27,
+     27
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     0.005,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.0,
+     0.005,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.005
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "",
+   "variant": "",
+   "core_hours": null
+  },
+  {
+   "name": "d04_np006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     27,
+     27,
+     27
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.006,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     1.0310000000000001,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.706,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.706
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "",
+   "variant": "",
+   "core_hours": null
+  },
+  {
+   "name": "d04_nm006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     27,
+     27,
+     27
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     -0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -1.096,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.775,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.775
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "",
+   "variant": "",
+   "core_hours": null
+  },
+  {
+   "name": "d04_sp012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     27,
+     27,
+     27
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.006,
+     0.0
+    ],
+    [
+     0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.05,
+     0.95,
+     -0.0
+    ],
+    [
+     0.95,
+     -0.05,
+     -0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.01
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "",
+   "variant": "",
+   "core_hours": null
+  },
+  {
+   "name": "d04_sm012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     27,
+     27,
+     27
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     -0.006,
+     0.0
+    ],
+    [
+     -0.006,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.048,
+     -0.95,
+     -0.0
+    ],
+    [
+     -0.95,
+     -0.048,
+     -0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.008
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "",
+   "variant": "",
+   "core_hours": null
+  },
+  {
+   "name": "obl_cutoff_k_d04_nm006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 112.5,
+    "ecutrho_Ry": 900.0,
+    "kmesh": [
+     36,
+     36,
+     36
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     -0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -1.067,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.745,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.745
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_nm006",
+   "variant": "cutoff_k",
+   "core_hours": null
+  },
+  {
+   "name": "obl_smearing_d04_ref",
+   "role": "reference",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     41,
+     41,
+     41
+    ],
+    "smearing_width_Ry": 0.02,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.08,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -0.08,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.08
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_ref",
+   "variant": "smearing",
+   "core_hours": null
+  },
+  {
+   "name": "obl_smearing_d04_sm012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     41,
+     41,
+     41
+    ],
+    "smearing_width_Ry": 0.02,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     -0.006,
+     0.0
+    ],
+    [
+     -0.006,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.10700000000000001,
+     -0.952,
+     -0.0
+    ],
+    [
+     -0.952,
+     -0.10700000000000001,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.068
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_sm012",
+   "variant": "smearing",
+   "core_hours": null
+  },
+  {
+   "name": "obl_cutoff_k_d04_sm012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 112.5,
+    "ecutrho_Ry": 900.0,
+    "kmesh": [
+     36,
+     36,
+     36
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     -0.006,
+     0.0
+    ],
+    [
+     -0.006,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.022,
+     -0.95,
+     -0.0
+    ],
+    [
+     -0.95,
+     -0.022,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.018
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_sm012",
+   "variant": "cutoff_k",
+   "core_hours": null
+  },
+  {
+   "name": "obl_smearing_d04_sp012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     41,
+     41,
+     41
+    ],
+    "smearing_width_Ry": 0.02,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.006,
+     0.0
+    ],
+    [
+     0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.11299999999999999,
+     0.952,
+     0.0
+    ],
+    [
+     0.952,
+     -0.11299999999999999,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.074
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_sp012",
+   "variant": "smearing",
+   "core_hours": null
+  },
+  {
+   "name": "obl_smearing_d04_nm006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     41,
+     41,
+     41
+    ],
+    "smearing_width_Ry": 0.02,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     -0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -1.161,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.8390000000000001,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.8390000000000001
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_nm006",
+   "variant": "smearing",
+   "core_hours": null
+  },
+  {
+   "name": "obl_cutoff_k_d04_ref",
+   "role": "reference",
+   "settings": {
+    "ecutwfc_Ry": 112.5,
+    "ecutrho_Ry": 900.0,
+    "kmesh": [
+     36,
+     36,
+     36
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     0.031,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     0.031,
+     -0.0
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.031
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_ref",
+   "variant": "cutoff_k",
+   "core_hours": null
+  },
+  {
+   "name": "obl_cutoff_k_d04_sp012",
+   "role": "shear",
+   "settings": {
+    "ecutwfc_Ry": 112.5,
+    "ecutrho_Ry": 900.0,
+    "kmesh": [
+     36,
+     36,
+     36
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.0,
+     0.006,
+     0.0
+    ],
+    [
+     0.006,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     -0.024,
+     0.95,
+     0.0
+    ],
+    [
+     0.95,
+     -0.024,
+     -0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     0.016
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_sp012",
+   "variant": "cutoff_k",
+   "core_hours": null
+  },
+  {
+   "name": "obl_smearing_d04_np006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 90.0,
+    "ecutrho_Ry": 720.0,
+    "kmesh": [
+     41,
+     41,
+     41
+    ],
+    "smearing_width_Ry": 0.02,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.006,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     0.9710000000000001,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     0.646,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.646
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_np006",
+   "variant": "smearing",
+   "core_hours": null
+  },
+  {
+   "name": "obl_cutoff_k_d04_np006",
+   "role": "normal",
+   "settings": {
+    "ecutwfc_Ry": 112.5,
+    "ecutrho_Ry": 900.0,
+    "kmesh": [
+     36,
+     36,
+     36
+    ],
+    "smearing_width_Ry": 0.04,
+    "smearing": "mv",
+    "pseudopotential": "Cu.paw.z_11.ld1.psl.v1.0.0-low.upf"
+   },
+   "strain": [
+    [
+     0.006,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ]
+   ],
+   "stress_GPa": [
+    [
+     1.06,
+     0.0,
+     -0.0
+    ],
+    [
+     -0.0,
+     0.735,
+     0.0
+    ],
+    [
+     0.0,
+     -0.0,
+     0.735
+    ]
+   ],
+   "status": "complete",
+   "variant_of": "d04_np006",
+   "variant": "cutoff_k",
+   "core_hours": null
+  }
+ ]
+}

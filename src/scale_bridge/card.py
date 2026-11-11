@@ -95,6 +95,14 @@ class MaterialCard:
             if c.variant_of and c.variant_of not in names:
                 out.append(f"{c.name}: variant_of '{c.variant_of}' is not in the card")
             for label, m in (("strain", c.strain), ("stress_GPa", c.stress_GPa)):
-                if m is not None and (len(m) != 3 or any(len(row) != 3 for row in m)):
+                if m is None:
+                    continue
+                if not isinstance(m, list) or len(m) != 3 or any(not isinstance(r, list) or len(r) != 3 for r in m):
                     out.append(f"{c.name}: {label} is not 3x3")
+                elif not all(_finite(x) for r in m for x in r):
+                    out.append(f"{c.name}: {label} has entries that are not finite numbers")
         return out
+
+
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)

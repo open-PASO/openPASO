@@ -8,6 +8,7 @@ different settings does not count.
 """
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -145,6 +146,93 @@ def test_reported_values_must_follow_from_the_stresses():
     assert r["decision"] == "reject" and "reported:C44" in r["reason"]
 
 
+def _named(ev, name):
+    return next(c for c in ev if c["name"] == name)
+
+
+def test_a_non_finite_entry_the_rule_never_reads_still_rejects():
+    r = check(card(edit=lambda ev: _named(ev, "sp")["stress_GPa"][0].__setitem__(0, float("nan"))))
+    assert r["decision"] == "reject" and "not finite" in r["reason"]
+    assert r["derived_values"] == {}
+
+
+def test_a_mixed_or_asymmetric_strain_is_not_a_pure_strain():
+    def mixed(ev):
+        _named(ev, "np")["strain"][1][1] = 0.001
+    def asymmetric(ev):
+        _named(ev, "sp")["strain"][2][1] = 0.0
+    assert "normal strain pair" in check(card(edit=mixed))["reason"]
+    assert "shear strain pair" in check(card(edit=asymmetric))["reason"]
+
+
+def test_the_reference_must_be_unstrained():
+    def strained(ev):
+        _named(ev, "ref")["strain"] = _named(ev, "np")["strain"]
+    r = check(card(edit=strained))
+    assert r["decision"] == "reject" and "zero strain" in r["reason"]
+
+
+@pytest.mark.parametrize("settings, words", [
+    ({k: v for k, v in SMEARED.items() if k != "ecutwfc_Ry"}, "plane-wave cutoff"),
+    (dict(SMEARED, ecutrho_Ry=-1.0), "ecutrho_Ry"),
+    (dict(SMEARED, kmesh=[24, 24]), "kmesh")])
+def test_reference_settings_must_define_every_tightened_setting(settings, words):
+    r = check(card(settings=settings, variants=()))
+    assert r["decision"] == "reject" and words in r["reason"]
+
+
+def test_values_in_other_units_are_refused():
+    c = card()
+    c.units = "MPa"
+    r = check(c)
+    assert r["decision"] == "reject" and "MPa" in r["reason"]
+
+
+def test_a_smeared_repeat_does_not_stand_in_for_an_unsmeared_reference():
+    def smear(ev):
+        c = _named(ev, "ref_cutoff_k")
+        c["settings"] = dict(c["settings"], smearing_width_Ry=0.01)
+    def extra(ev):
+        c = _named(ev, "np_cutoff_k")
+        c["settings"] = dict(c["settings"], nspin=2)
+    r = check(card(settings=UNSMEARED, variants=("cutoff_k",), edit=smear))
+    assert r["decision"] == "incomplete" and [p["repeats"] for p in r["plan"]] == ["ref"]
+    r = check(card(settings=UNSMEARED, variants=("cutoff_k",), edit=extra))
+    assert r["decision"] == "incomplete" and [p["repeats"] for p in r["plan"]] == ["np"]
+
+
+def test_a_repeat_must_apply_the_strain_it_claims_to_repeat():
+    def double(ev):
+        c = _named(ev, "np_cutoff_k")
+        c["strain"] = (2 * np.asarray(c["strain"])).tolist()
+        c["stress_GPa"] = (2 * np.asarray(c["stress_GPa"])).tolist()
+    r = check(card(edit=double))
+    assert r["decision"] == "incomplete"
+    assert [p["repeats"] for p in r["plan"]] == ["np"] and "strain differs" in r["plan"][0]["reason"]
+
+
+def test_a_completed_retry_counts_over_a_stopped_attempt():
+    def retry(ev):
+        first = dict(_named(ev, "np_cutoff_k"), name="np_cutoff_k_try1", status="stopped", stress_GPa=None)
+        ev.insert(0, first)
+    assert check(card(edit=retry))["decision"] == "accept"
+
+
+def test_a_stopped_base_calculation_leaves_the_card_incomplete():
+    def stop(ev):
+        _named(ev, "sp").update(status="stopped", stress_GPa=None)
+    r = check(card(edit=stop))
+    assert r["decision"] == "incomplete", r["reason"]
+    assert {(p["comparison"], p["repeats"]) for p in r["plan"]} == {("reported", "sp")}
+
+
+def test_the_copper_card_built_from_genius_outputs_is_accepted():
+    """Real Quantum ESPRESSO outputs written by GENIUS, with every calculation the rule requires."""
+    r = check(MaterialCard.load(str(Path(__file__).parent / "data" / "cu_elastic_card.json")))
+    assert r["decision"] == "accept", r["reason"]
+    assert r["derived_values"]["C44"] == pytest.approx(79.17, abs=0.01)
+
+
 def test_plane_stress_of_an_isotropic_crystal_does_not_depend_on_the_angle():
     iso = cubic_voigt(200.0, 80.0, 60.0)
     q0, q30 = plane_stress(rotate_about_z(iso, 0.0)), plane_stress(rotate_about_z(iso, 30.0))
@@ -190,3 +278,13 @@ def test_tool_refuses_continuum_data_until_a_provider_completes_the_evidence(tmp
     assert completed["check"]["decision"] == "accept"
     data = json.loads(run("continuum", card=completed["card_path"], theta_deg=45.0))
     assert data["passed"] is True and len(data["plane_stress_xx_yy_xy"]) == 3
+
+
+@pytest.mark.parametrize("material", ["../escaped", "/abs/escaped", "C:\\escaped", "..", "a/../../b"])
+def test_a_provider_label_cannot_place_the_card_outside_its_folder(tmp_path, monkeypatch, material):
+    monkeypatch.setenv("OPENPASO_OUTPUT_DIR", str(tmp_path))
+    c = card()
+    c.material = material
+    saved = Path(tool._save(c)).resolve()
+    assert saved.parent == (tool.output_dir("simulation_outputs") / "material_cards").resolve()
+    assert ".." not in saved.name

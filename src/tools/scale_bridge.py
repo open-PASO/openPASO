@@ -8,6 +8,7 @@ stiffness a continuum model uses. Logic lives in src/scale_bridge; this module o
 from __future__ import annotations
 
 import json
+import re
 
 from core.output_paths import output_dir
 from scale_bridge import card as card_module
@@ -24,10 +25,15 @@ def _schema() -> str:
     return f"{card_module.__doc__}\nKnown kinds and their rules:\n{kinds}\n"
 
 
+def _label(text: str) -> str:
+    """A provider's label as one safe file-name part: no separators, no leading dots."""
+    return re.sub(r"[^A-Za-z0-9._-]+|\.{2,}", "_", str(text)).strip("._")[:40] or "card"
+
+
 def _save(card: MaterialCard) -> str:
     d = output_dir("simulation_outputs") / "material_cards"
     d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{card.material}_{card.kind}_{card.digest()[:10]}.json"
+    p = d / f"{_label(card.material)}_{_label(card.kind)}_{card.digest()[:10]}.json"
     p.write_text(json.dumps(card.to_dict(), indent=1), encoding="utf-8")
     return str(p)
 

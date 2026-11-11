@@ -11,8 +11,11 @@ Required comparisons, derived from the reference calculation's OWN settings (not
 A comparison passes when C' = (C11 - C12)/2 and C44 change by at most 2 % and the pressure by at most 0.1 GPa.
 'reported': the values on the card must equal those from the reference-setting stresses within 1 %.
 
-A repeated calculation counts only if its settings are at least as tight as required and every other setting is
-identical; one that ended without success makes its comparison impossible; a missing or stopped one leaves it open.
+A repeated calculation counts only if it applies the same strain as the calculation it repeats, its settings are at
+least as tight as required and every other setting is identical (an unsmeared reference is repeated without
+smearing); one that ended without success makes its comparison impossible; a missing or stopped one leaves it open.
+Values must be in GPa, the reference must be unstrained, and every strain must be a pure normal or a symmetric pure
+shear strain.
 """
 from __future__ import annotations
 
@@ -50,16 +53,41 @@ def variant_settings(base: dict, variant: str) -> dict:
 def satisfies(actual: dict, required: dict) -> bool:
     eps = 1e-9
     for key in ("ecutwfc_Ry", "ecutrho_Ry"):
-        if key in required and not actual.get(key, 0) >= required[key] * (1 - eps):
+        if key in required and not (_positive(actual.get(key)) and actual[key] >= required[key] * (1 - eps)):
             return False
-    if len(actual.get("kmesh", [])) != len(required["kmesh"]) or any(
-            a < r for a, r in zip(actual["kmesh"], required["kmesh"])):
+    k = actual.get("kmesh")
+    if not _kmesh_ok(k) or any(a < r for a, r in zip(k, required["kmesh"])):
         return False
+    w = actual.get("smearing_width_Ry") or 0
     if required.get("smearing_width_Ry"):
-        w = actual.get("smearing_width_Ry") or 0
-        if not 0 < w <= required["smearing_width_Ry"] * (1 + eps):
+        if not (_positive(w) and w <= required["smearing_width_Ry"] * (1 + eps)):
             return False
-    return all(actual.get(k) == v for k, v in required.items() if k not in TIGHTENED)
+    elif w:
+        return False                                      # an unsmeared reference is repeated without smearing
+    other = lambda d: {k: v for k, v in d.items() if k not in TIGHTENED}  # noqa: E731
+    return other(actual) == other(required)
+
+
+def _positive(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+
+
+def _kmesh_ok(k) -> bool:
+    return isinstance(k, list) and len(k) == 3 and all(isinstance(n, int) and not isinstance(n, bool) and n > 0
+                                                         for n in k)
+
+
+def _settings_problem(s: dict) -> str:
+    if not _positive(s.get("ecutwfc_Ry")):
+        return "the reference calculation states no positive plane-wave cutoff (ecutwfc_Ry)"
+    if "ecutrho_Ry" in s and not _positive(s["ecutrho_Ry"]):
+        return "the reference calculation's ecutrho_Ry is not a positive number"
+    if not _kmesh_ok(s.get("kmesh")):
+        return "the reference calculation's kmesh is not three positive integers"
+    w = s.get("smearing_width_Ry")
+    if w is not None and not (w == 0 or _positive(w)):
+        return "the reference calculation's smearing_width_Ry is not a non-negative number"
+    return ""
 
 
 def _component(c, role):
@@ -68,9 +96,14 @@ def _component(c, role):
     if c.strain is None:
         return None
     e = np.asarray(c.strain, dtype=float)
+    if e.shape != (3, 3) or not np.all(np.isfinite(e)) or not np.allclose(e, e.T, rtol=0, atol=1e-12):
+        return None
+    nonzero = {(i, j) for i in range(3) for j in range(3) if abs(e[i, j]) > 1e-12}
     slots = [(a, a) for a in range(3)] if role == "normal" else [(0, 1), (0, 2), (1, 2)]
-    nonzero = [ij for ij in slots if abs(e[ij]) > 1e-12]
-    return nonzero[0] if len(nonzero) == 1 else None
+    for i, j in slots:
+        if nonzero == {(i, j), (j, i)}:                    # nothing else strained: a pure normal or shear strain
+            return i, j
+    return None
 
 
 def _pair(calcs, role):
@@ -86,10 +119,17 @@ def _pair(calcs, role):
 
 def base_set(card: MaterialCard):
     """(reference, normal+, normal-, shear+, shear-) at the reference settings, or (None, reason)."""
+    if card.units != "GPa":
+        return None, f"the values are in '{card.units}'; this rule compares them with stresses in GPa"
     own = [c for c in card.evidence if not c.variant_of]
     refs = [c for c in own if c.role == "reference"]
     if len(refs) != 1:
         return None, f"{len(refs)} reference calculations (exactly one required)"
+    if not _unstrained(refs[0]):
+        return None, "the reference calculation does not state a zero strain"
+    problem = _settings_problem(refs[0].settings)
+    if problem:
+        return None, problem
     normal, shear = _pair(own, "normal"), _pair(own, "shear")
     if normal is None or shear is None:
         return None, "declared runs lack an opposite " + ("normal" if normal is None else "shear") + " strain pair"
@@ -97,6 +137,20 @@ def base_set(card: MaterialCard):
     if any(c.settings != refs[0].settings for c in chosen):
         return None, "the strained calculations do not use the reference calculation's settings"
     return chosen, ""
+
+
+def _unstrained(c) -> bool:
+    if c.strain is None:
+        return False
+    e = np.asarray(c.strain, dtype=float)
+    return e.shape == (3, 3) and bool(np.all(np.isfinite(e))) and bool(np.all(np.abs(e) <= 1e-12))
+
+
+def _same_strain(a, b) -> bool:
+    if a.strain is None or b.strain is None:
+        return False
+    ea, eb = np.asarray(a.strain, dtype=float), np.asarray(b.strain, dtype=float)
+    return ea.shape == eb.shape == (3, 3) and np.allclose(ea, eb, rtol=1e-9, atol=1e-12)
 
 
 def quantities(ref, np_, nm, sp, sm) -> dict:
@@ -115,6 +169,8 @@ def quantities(ref, np_, nm, sp, sm) -> dict:
 
 
 def derived_values(card: MaterialCard) -> dict:
+    if card.problems():
+        return {}
     chosen, _ = base_set(card)
     if chosen is None or any(c.stress_GPa is None for c in chosen):
         return {}
@@ -151,15 +207,21 @@ def ledger(card: MaterialCard) -> Ledger:
             need = variant_settings(base.settings, v)
             est = (base.core_hours or 0.0) * ESTIMATE_FACTOR[v]
             hits = [c for c in card.evidence if c.variant_of == base.name and c.variant == v]
-            fit = [c for c in hits if satisfies(c.settings, need)]
+            same = [c for c in hits if c.role == base.role and _same_strain(c, base)]
+            fit = [c for c in same if satisfies(c.settings, need)]
+            # a completed retry counts over an earlier stopped attempt; a failed one still rejects
+            fit.sort(key=lambda c: {"complete": 0, "failed": 1, "stopped": 2}[c.status])
             if fit:
                 st, reason = _status(fit[0])
                 cmp.obligations.append(Obligation(base.name, need, est, st, reason, fit[0].name))
                 repeats.append(fit[0])
             else:
-                reason = "missing" if not hits else "present, but its settings are looser than required"
+                reason = ("missing" if not hits else
+                          "present, but its role or strain differs from the calculation it repeats" if not same else
+                          "present, but its settings are looser than required")
                 cmp.obligations.append(Obligation(base.name, need, est, OPEN, reason))
-        if all(o.status == COMPLETE for o in cmp.obligations):
+        base_done = all(c.status == "complete" and c.stress_GPa is not None for c in chosen)
+        if base_done and all(o.status == COMPLETE for o in cmp.obligations):
             qb, qv = quantities(*chosen), quantities(*repeats)
             cmp.differences = {"Cp": abs(qv["Cp"] / qb["Cp"] - 1), "C44": abs(qv["C44"] / qb["C44"] - 1),
                                "P_GPa": abs(qv["P_GPa"] - qb["P_GPa"])}
