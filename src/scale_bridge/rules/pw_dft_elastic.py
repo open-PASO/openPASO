@@ -1,8 +1,9 @@
 """Cubic elastic constants from plane-wave DFT stress-strain calculations (e.g. Quantum ESPRESSO).
 
 Evidence the card must carry, at the settings of the reference calculation:
-- the unstrained reference cell, an opposite pair of normal strains (e_xx = +e, -e) and an opposite pair of shear
-  strains (e_yz = e_zy = +g/2, -g/2), all with identical settings.
+- the unstrained reference cell, an opposite pair of normal strains along one cube axis (e.g. e_xx = +e, -e) and an
+  opposite pair of shear strains in one off-diagonal component (e.g. e_yz = e_zy = +g/2, -g/2), all with identical
+  settings. Any axis and any shear plane will do: in a cubic crystal they are equivalent.
 
 Required comparisons, derived from the reference calculation's OWN settings (not from what the card offers):
 - 'cutoff_k': the five calculations repeated with the plane-wave cutoff x1.25 and the k-point mesh x1.3;
@@ -61,12 +62,25 @@ def satisfies(actual: dict, required: dict) -> bool:
     return all(actual.get(k) == v for k, v in required.items() if k not in TIGHTENED)
 
 
-def _pair(calcs, role, i, j):
-    """The opposite pair with the smallest strain amplitude in component (i, j); None if there is none."""
+def _component(c, role):
+    """The one strain component a calculation applies, (a, a) for a normal strain or (i, j) with i < j for a
+    shear; None if it applies none or several."""
+    if c.strain is None:
+        return None
+    e = np.asarray(c.strain, dtype=float)
+    slots = [(a, a) for a in range(3)] if role == "normal" else [(0, 1), (0, 2), (1, 2)]
+    nonzero = [ij for ij in slots if abs(e[ij]) > 1e-12]
+    return nonzero[0] if len(nonzero) == 1 else None
+
+
+def _pair(calcs, role):
+    """The opposite pair with the smallest strain amplitude in one component; None if there is none."""
     def comp(c):
-        return float(c.strain[i][j]) if c.strain is not None else 0.0
-    cand = [c for c in calcs if c.role == role and c.strain is not None]
-    pairs = [(p, m) for p in cand for m in cand if comp(p) > 0 and math.isclose(comp(p), -comp(m), rel_tol=1e-6)]
+        i, j = _component(c, role)
+        return float(c.strain[i][j])
+    cand = [c for c in calcs if c.role == role and _component(c, role) is not None]
+    pairs = [(p, m) for p in cand for m in cand if _component(p, role) == _component(m, role)
+             and comp(p) > 0 and math.isclose(comp(p), -comp(m), rel_tol=1e-6)]
     return min(pairs, key=lambda pm: comp(pm[0]), default=None)
 
 
@@ -76,7 +90,7 @@ def base_set(card: MaterialCard):
     refs = [c for c in own if c.role == "reference"]
     if len(refs) != 1:
         return None, f"{len(refs)} reference calculations (exactly one required)"
-    normal, shear = _pair(own, "normal", 0, 0), _pair(own, "shear", 1, 2)
+    normal, shear = _pair(own, "normal"), _pair(own, "shear")
     if normal is None or shear is None:
         return None, "declared runs lack an opposite " + ("normal" if normal is None else "shear") + " strain pair"
     chosen = (refs[0], *normal, *shear)
@@ -88,11 +102,14 @@ def base_set(card: MaterialCard):
 def quantities(ref, np_, nm, sp, sm) -> dict:
     s = {c.name: np.asarray(c.stress_GPa, dtype=float) if c.stress_GPa is not None else np.full((3, 3), np.nan)
          for c in (ref, np_, nm, sp, sm)}
-    de = float(np_.strain[0][0]) - float(nm.strain[0][0])
-    dg = 2 * (float(sp.strain[1][2]) - float(sm.strain[1][2]))
-    c11 = (s[np_.name][0, 0] - s[nm.name][0, 0]) / de
-    c12 = 0.5 * ((s[np_.name][1, 1] - s[nm.name][1, 1]) + (s[np_.name][2, 2] - s[nm.name][2, 2])) / de
-    c44 = (s[sp.name][1, 2] - s[sm.name][1, 2]) / dg
+    a = _component(np_, "normal")[0]
+    b, c = (k for k in range(3) if k != a)
+    i, j = _component(sp, "shear")
+    de = float(np_.strain[a][a]) - float(nm.strain[a][a])
+    dg = 2 * (float(sp.strain[i][j]) - float(sm.strain[i][j]))
+    c11 = (s[np_.name][a, a] - s[nm.name][a, a]) / de
+    c12 = 0.5 * ((s[np_.name][b, b] - s[nm.name][b, b]) + (s[np_.name][c, c] - s[nm.name][c, c])) / de
+    c44 = (s[sp.name][i, j] - s[sm.name][i, j]) / dg
     return {"C11": c11, "C12": c12, "C44": c44, "B": (c11 + 2 * c12) / 3, "Cp": (c11 - c12) / 2,
             "P_GPa": -float(np.trace(s[ref.name])) / 3}
 

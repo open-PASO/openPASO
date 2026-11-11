@@ -79,6 +79,23 @@ def test_without_smearing_only_the_cutoff_comparison_is_required():
     assert "smearing" not in r["comparisons"]
 
 
+def _permute(ev, perm):
+    """The same calculations described in relabelled cube axes: cubic symmetry makes them equivalent."""
+    P = np.eye(3)[list(perm)]
+    for c in ev:
+        for key in ("strain", "stress_GPa"):
+            c[key] = (P @ np.asarray(c[key]) @ P.T).tolist()
+
+
+@pytest.mark.parametrize("perm", [(1, 2, 0), (2, 0, 1)])
+def test_normal_axis_and_shear_plane_may_be_any(perm):
+    r = check(card(edit=lambda ev: _permute(ev, perm)))
+    assert r["decision"] == "accept", r["reason"]
+    assert math.isclose(r["derived_values"]["C11"], C["C11"], rel_tol=1e-9)
+    assert math.isclose(r["derived_values"]["C12"], C["C12"], rel_tol=1e-9)
+    assert math.isclose(r["derived_values"]["C44"], C["C44"], rel_tol=1e-9)
+
+
 def test_change_beyond_a_limit_rejects():
     r = check(card(scale={"cutoff_k": (1.0, 1.03)}))
     assert r["decision"] == "reject" and "cutoff_k:C44" in r["reason"]
