@@ -215,6 +215,14 @@ def test_a_path_in_a_key_is_scrubbed_like_one_in_a_value():
     assert str(Path.home()) not in text and "~/private/run.json" in text
 
 
+@pytest.mark.parametrize("path", [r"C:\Users\someone\run\a.py", "C:/Users/someone/run/a.py",
+                                  "/c/Users/someone/run/a.py"])
+def test_a_windows_home_is_scrubbed_in_every_form_a_run_prints_it(path):
+    from webui.privacy import scrub_text
+    out = scrub_text(f"cd {path} && python a.py")
+    assert "someone" not in out and out.startswith("cd ~")
+
+
 def test_a_run_cannot_be_started_on_a_model_that_cannot_run(client, monkeypatch):
     async def nothing_available():
         return {"groups": [{"kind": "openrouter", "title": "t", "note": "", "models": [

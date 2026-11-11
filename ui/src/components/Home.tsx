@@ -10,6 +10,8 @@ import { runsChanged } from './Shell'
 
 const EXAMPLES: [string, string][] = [
   ['Cylinder wake at Re 100', 'Flow past a cylinder at Reynolds 100 in a 2.2 x 0.41 channel. Show me the wake and report drag, lift and Strouhal number.'],
+  ['Flap in a flow, two codes', 'A rubber flap (0.1 m wide, 0.5 m tall, E = 3.5 MPa, Poisson ratio 0.4) stands upright in a 3 m long, 1 m high water channel, clamped to the floor 1 m from the inlet. A viscous liquid (density 1000 kg/m³, viscosity 50 Pa·s) enters at a mean speed of 1 m/s. How far does the flap tip bend? Compute the flow and the flap with two different solvers, coupled by openPASO.'],
+  ['Copper sheet from DFT', 'How stiff is a copper sheet with a square pattern of round holes (10 % porosity) under uniaxial tension? Take the elastic constants from the quantum-mechanical calculations in the attached hand-off card, but only if the calculations behind them are complete.'],
   ['Heat through a steel stud', 'Steady heat conduction through a timber wall with a steel stud. Show the temperature field and give the U-value.'],
   ['Cantilever under load', 'A steel cantilever beam, 1 m long, 50 x 50 mm, with 1 kN at the tip. Compare the tip deflection with beam theory.'],
 ]

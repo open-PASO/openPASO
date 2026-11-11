@@ -51,7 +51,12 @@ export function fileUrl(rel: string): string {
 }
 
 export function tidy(s: string): string {
-  return s.replace(/\/(?:home|Users)\/[^/\s:'"]+/g, '~')
+  return s
+    // a path inside the run's own folder is shown from that folder: the absolute prefix says
+    // nothing a reader needs and names the machine's layout
+    .replace(/(?:[A-Za-z]:)?[^\s'"`=(]*?eval_interactive[\\/]+webui_[0-9a-f]{6,}(?:[\\/]+|(?=[\s'"`),:]|$))/g, '')
+    .replace(/(?:\b[A-Za-z]:|\/[a-z](?=\/))[\\/]+Users[\\/]+[^\\/\s:'"]+/gi, '~')
+    .replace(/\/(?:home|Users)\/[^/\s:'"]+/g, '~')
 }
 
 export function ago(ts: number): string {

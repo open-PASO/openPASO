@@ -32,6 +32,8 @@ _BOUNDARY = r"(?<![A-Za-z0-9+/])"   # "=" stays a boundary: --prefix=/home/... i
 _HOMELY = len(_HOME) >= 5
 _HOME_RE = re.compile(("" if _HOMELY else _BOUNDARY) + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
 _ANY_HOME_RE = re.compile(_BOUNDARY + r"/(?:home|Users|media)/[A-Za-z0-9._-]+")
+# a Windows home in any of the forms a run prints it: C:\Users\name, C:/Users/name, /c/Users/name (Git Bash)
+_WIN_HOME_RE = re.compile(_BOUNDARY + r"(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users[\\/]+[A-Za-z0-9._-]+")
 _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-9_-])") if len(_USER) >= 3 else None
 
 
@@ -79,6 +81,7 @@ def is_encoded(value: str) -> bool:
 def _scrub_prose(t: str) -> str:
     """Every substitution, on a span that is not encoded data."""
     t = _HOME_RE.sub("~", t)
+    t = _WIN_HOME_RE.sub("~", t)
     t = _ANY_HOME_RE.sub(lambda m: "~" if m.group(0).startswith(("/home/", "/Users/")) else "/media/…", t)
     if _USER_RE is not None:
         t = _USER_RE.sub("user", t)

@@ -6,6 +6,7 @@ import { useRun } from '../useRun'
 import Composer, { ModePicker, findModel } from './Composer'
 import FilesDrawer from './FilesDrawer'
 import Glyph, { STATE } from './Glyph'
+import Progress from './Progress'
 import { runsChanged } from './Shell'
 import Stage from './Stage'
 import { stepFolder } from './StepOutputs'
@@ -229,6 +230,8 @@ export default function RunView({ id, config, groups }: {
               )
             )}
           </div>
+
+          <Progress events={events} running={running} />
 
           {confirmDelete && !running && (
             <div className="mt-3 flex items-center gap-2 flex-wrap" role="alertdialog" aria-label="Delete this run">
