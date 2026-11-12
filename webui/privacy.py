@@ -32,8 +32,12 @@ _BOUNDARY = r"(?<![A-Za-z0-9+/])"   # "=" stays a boundary: --prefix=/home/... i
 _HOMELY = len(_HOME) >= 5
 _HOME_RE = re.compile(("" if _HOMELY else _BOUNDARY) + re.escape(_HOME) + r"(?=[/\s'\"\\:,)\]}]|$)")
 _ANY_HOME_RE = re.compile(_BOUNDARY + r"/(?:home|Users|media)/[A-Za-z0-9._-]+")
-# a Windows home in any of the forms a run prints it: C:\Users\name, C:/Users/name, /c/Users/name (Git Bash)
-_WIN_HOME_RE = re.compile(_BOUNDARY + r"(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users[\\/]+[A-Za-z0-9._-]+")
+# a Windows home in any of the forms a run prints it: C:\Users\name, C:/Users/name, /c/Users/name (Git Bash).
+# A profile name may hold spaces and any letters ("Alice Smith", "Jürgen"); it is taken whole where a path
+# goes on after it, and up to the first space where nothing follows, so the prose after it stays.
+_WIN_NAME = r"[^\s\\/:*?\"<>|'`]+"
+_WIN_HOME_RE = re.compile(_BOUNDARY + r"(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users[\\/]+"
+                          + rf"(?:{_WIN_NAME}(?: {_WIN_NAME})*(?=[\\/])|{_WIN_NAME})")
 _USER_RE = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(_USER) + r"(?![A-Za-z0-9_-])") if len(_USER) >= 3 else None
 
 
@@ -74,7 +78,7 @@ def _is_base64(value: str) -> bool:
 
 def is_encoded(value: str) -> bool:
     """Whether `value`, met under one of the encoded keys, is encoded data to pass on untouched."""
-    return (_is_base64(value) and _ANY_HOME_RE.match(value) is None
+    return (_is_base64(value) and _ANY_HOME_RE.match(value) is None and _WIN_HOME_RE.match(value) is None
             and (_HOME_RE.search(value) if _HOMELY else _HOME_RE.match(value)) is None)
 
 

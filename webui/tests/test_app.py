@@ -216,11 +216,25 @@ def test_a_path_in_a_key_is_scrubbed_like_one_in_a_value():
 
 
 @pytest.mark.parametrize("path", [r"C:\Users\someone\run\a.py", "C:/Users/someone/run/a.py",
-                                  "/c/Users/someone/run/a.py"])
+                                  "/c/Users/someone/run/a.py", "C:/Users/someone Smith/run/a.py",
+                                  r"C:\Users\Jürgen someone\run\a.py", "/c/Users/someone.o-x/run/a.py"])
 def test_a_windows_home_is_scrubbed_in_every_form_a_run_prints_it(path):
     from webui.privacy import scrub_text
     out = scrub_text(f"cd {path} && python a.py")
-    assert "someone" not in out and out.startswith("cd ~")
+    rest = path[path.index("run") - 1:]                 # the separator and what follows the profile name
+    assert out == f"cd ~{rest} && python a.py", out
+
+
+def test_a_windows_home_without_a_path_after_it_keeps_the_prose():
+    from webui.privacy import scrub_text
+    assert scrub_text(r"home is C:\Users\someone and that is all") == "home is ~ and that is all"
+
+
+def test_a_windows_home_under_an_encoded_key_is_not_taken_for_data():
+    from webui.privacy import is_encoded, scrub
+    value = "/c/Users/someone/" + "A" * 43
+    assert not is_encoded(value)
+    assert "someone" not in scrub({"data": value})["data"]
 
 
 def test_a_run_cannot_be_started_on_a_model_that_cannot_run(client, monkeypatch):
