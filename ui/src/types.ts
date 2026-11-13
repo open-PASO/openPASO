@@ -1,3 +1,12 @@
+/** One coupling's residuals as the driver wrote them: [iteration, residual or null, unix seconds]. */
+export type CouplingRun = {
+  run: string
+  folder: string
+  tol: number | null
+  participants: string[]
+  points: [number, number | null, number][]
+}
+
 export type Ev = {
   type: string
   cost_usd_total?: number

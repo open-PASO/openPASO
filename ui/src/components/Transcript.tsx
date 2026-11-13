@@ -3,6 +3,7 @@ import { clock, tidy } from '../api'
 import type { Ev } from '../types'
 import Markdown from './Markdown'
 import StepOutputs, { stepFolder } from './StepOutputs'
+import CouplingPlot from './CouplingPlot'
 
 /* The run, in the order it happened.
 
@@ -628,6 +629,9 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now, runId }: {
           {readable(c.result)}
         </pre>
       )}
+      {runId && (c.tool === 'couple' || c.tool === 'couple_levels') && c.state !== 'waiting' && c.state !== 'skipped' && (
+        <CouplingPlot runId={runId} t0={c.t0} t1={c.t1} live={c.state === 'running'} />
+      )}
       {runId && c.result && SOLVER_TOOLS.has(c.tool) && (c.state === 'done' || c.state === 'unverified' || c.state === 'failed') && (() => {
         const folder = stepFolder(unwrap(c.result), runId)
         return folder ? <StepOutputs runId={runId} sub={folder}
@@ -637,14 +641,14 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now, runId }: {
   )
 }
 
-function Fold({ text, lines, className }: { text: string; lines: number; className?: string }) {
+function Fold({ text, lines, className, runId }: { text: string; lines: number; className?: string; runId?: string }) {
   const [open, setOpen] = useState(false)
   const long = text.split('\n').length > lines + 1 || text.length > lines * 120
   return (
     <div className={className}>
       <div style={open || !long ? undefined
                   : { display: '-webkit-box', WebkitLineClamp: lines, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-        <Markdown text={text} />
+        <Markdown text={text} runId={runId} />
       </div>
       {long && (
         <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
@@ -770,7 +774,7 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
                     )}
                   </div>
                 )}
-                <Fold text={e.text} lines={e.final ? 40 : 4}
+                <Fold text={e.text} lines={e.final ? 40 : 4} runId={runId}
                       className={e.final ? 'text-[16px] leading-[1.65] text-ink2' : 'text-[15px] leading-[1.6] text-body'} />
               </li>
             )

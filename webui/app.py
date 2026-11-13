@@ -25,6 +25,7 @@ import contextlib
 import json
 import re
 import logging
+import os
 import time
 import traceback
 from pathlib import Path
@@ -659,6 +660,43 @@ async def run_files(sid: str, sub: str = ""):
     listing.pop("path", None)
     listing["sub"] = sub
     return listing
+
+
+@app.get("/api/sessions/{sid}/coupling")
+async def run_coupling_progress(sid: str):
+    """Residual per iteration of every coupling this run started, read from the progress
+    files the coupling driver appends to while it iterates; polled while a coupling runs."""
+    try:
+        run = runs.get(sid)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "no such run")
+    PROGRESS_FILE = "openpaso_coupling_progress.jsonl"     # core.coupling_driver.PROGRESS_FILE
+    work = Path(run.workdir).resolve()
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(work):
+        depth = len(Path(dirpath).relative_to(work).parts)
+        if depth >= 3:
+            dirnames[:] = []
+        if PROGRESS_FILE in filenames:
+            found.append(Path(dirpath) / PROGRESS_FILE)
+    series: dict[str, dict] = {}
+    for f in found:
+        if not f.resolve().is_relative_to(work):
+            continue
+        folder = f.parent.relative_to(work).as_posix()
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines()[-20000:]:
+            try:
+                r = json.loads(line)
+                key, it, t = str(r["run"]), int(r["iteration"]), float(r["t"])
+                res = None if r.get("residual") is None else float(r["residual"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            s = series.setdefault(key, {"run": key, "folder": "" if folder == "." else folder,
+                                        "tol": r.get("tol"), "participants": r.get("participants") or [],
+                                        "points": []})
+            s["points"].append([it, res, t])
+    out = sorted(series.values(), key=lambda s: s["points"][0][2])[-50:]
+    return {"runs": out}
 
 
 @app.post("/api/sessions/{sid}/upload")

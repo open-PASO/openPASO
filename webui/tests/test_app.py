@@ -411,6 +411,29 @@ def test_a_link_out_of_a_run_does_not_open_another_run(client):
         (b / "secret.txt").unlink(missing_ok=True)
 
 
+def test_coupling_progress_is_read_from_the_runs_own_folder(client):
+    """The convergence plot reads the driver's per-iteration lines, grouped per coupling run."""
+    sid = client.post("/api/sessions", json={"model": "mock", "test": True}).json()["id"]
+    try:
+        run = runs.get(sid)
+        lines = [{"run": "a", "t": 1.0, "iteration": 1, "residual": None, "tol": 1e-6, "participants": ["F", "S"]},
+                 {"run": "a", "t": 2.0, "iteration": 2, "residual": 0.1, "tol": 1e-6, "participants": ["F", "S"]},
+                 {"run": "b", "t": 3.0, "iteration": 2, "residual": 0.01, "tol": 1e-6, "participants": ["F", "S"]}]
+        (run.workdir / "lvl").mkdir(parents=True, exist_ok=True)
+        (run.workdir / "lvl" / "openpaso_coupling_progress.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+        (run.workdir.parent / "work2").mkdir(parents=True, exist_ok=True)
+        (run.workdir.parent / "work2" / "openpaso_coupling_progress.jsonl").write_text(
+            json.dumps({"run": "z", "t": 0, "iteration": 2, "residual": 5}) + "\n")
+        got = client.get(f"/api/sessions/{sid}/coupling").json()["runs"]
+        assert [s["run"] for s in got] == ["a", "b"]
+        assert got[0]["folder"] == "lvl" and got[0]["points"] == [[1, None, 1.0], [2, 0.1, 2.0]]
+        assert client.get("/api/sessions/nosuchrun/coupling").status_code == 404
+    finally:
+        runs.RUNS.pop(sid, None)
+        client.delete(f"/api/sessions/{sid}")
+
+
 def test_a_listing_cannot_step_into_a_sibling_folder(client):
     """"webui_x/work2" starts with "webui_x/work": a prefix is not a boundary."""
     sid = client.post("/api/sessions", json={"model": "mock", "test": True}).json()["id"]
