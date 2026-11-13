@@ -24,6 +24,26 @@ class InterfaceData:
     values: np.ndarray        # (N,) or (N, n_comp) — field values
     field_name: str
     normal_fluxes: Optional[np.ndarray] = None  # (N,) or (N, n_comp) — outward flux/traction per point; both shapes round-trip (measured)
+    # Optional column names, one per column of `values` / `normal_fluxes`. They decide which
+    # columns form one physical field for the convergence test (see coupling_driver.field_arrays).
+    components: Optional[list] = None
+    flux_components: Optional[list] = None
+
+    def __post_init__(self):
+        for label, names, arr in (("components", self.components, self.values),
+                                  ("flux_components", self.flux_components, self.normal_fluxes)):
+            if names is None:
+                continue
+            if arr is None:
+                raise ValueError(f"'{label}' is given but its array is missing")
+            if not isinstance(names, (list, tuple)) or not all(isinstance(s, str) and s for s in names):
+                raise ValueError(f"'{label}' must be a list of non-empty column names")
+            a = np.asarray(arr)
+            ncol = a.shape[-1] if a.ndim >= 2 else 1
+            if len(names) != ncol:
+                raise ValueError(f"'{label}' names {len(names)} columns, but the array has {ncol}")
+            if len(set(names)) != len(names):
+                raise ValueError(f"'{label}' repeats a column name")
 
     def to_dict(self) -> dict:
         d = {
@@ -34,6 +54,10 @@ class InterfaceData:
         }
         if self.normal_fluxes is not None:
             d["normal_fluxes"] = self.normal_fluxes.tolist()
+        if self.components is not None:
+            d["components"] = list(self.components)
+        if self.flux_components is not None:
+            d["flux_components"] = list(self.flux_components)
         return d
 
     def to_json(self, path: Path):
@@ -50,6 +74,8 @@ class InterfaceData:
             values=values,
             field_name=d["field_name"],
             normal_fluxes=fluxes,
+            components=d.get("components"),
+            flux_components=d.get("flux_components"),
         )
 
 

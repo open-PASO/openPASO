@@ -2425,73 +2425,35 @@ def check_interface_meshes(export_a, export_b, label_a="A", label_b="B",
     return findings, [note]
 
 
-def check_residual_blocks(block_residuals: dict, tol: float,
-                          slack: float = 10.0,
-                          fixed_point: dict | None = None,
-                          distance: dict | None = None,
-                          scale_change: dict | None = None,
-                          tiny_change: dict | None = None) -> tuple[list[str], list[str]]:
-    """Is the reported global residual actually representative?
+def check_residual_blocks(block_residuals: dict, tol: float) -> tuple[list[str], list[str]]:
+    """Did every exchanged field settle, by the stop test's own measure?
 
-    The driver converges on ONE relative norm over every participant's stacked
-    export vector. When the exchanged quantities live on different scales — the
-    standard case in FSI (forces ~1e3, displacements ~1e-5) and TSI (temperature
-    ~1e3, displacement ~1e-5) — the large block sets the denominator and the small
-    block can still be moving by a large fraction of itself while the global
-    number sits below tolerance. That is a converged-looking, wrong answer with no
-    other symptom.
+    `block_residuals` holds each field's last relative change ||new - previous|| / ||new||
+    (coupling_driver.field_change): the definition the stop test and the noise floor use, so
+    this check and the iteration cannot disagree about what "settled" means. A field whose
+    change is undefined (its new value is exactly zero) or non-finite does not pass.
     """
     findings: list[str] = []
-    not_checked: list[str] = []
     if not block_residuals:
-        return findings, ["per-block convergence: the driver recorded no "
-                          "per-block residuals, so scale masking in the global "
-                          "residual could not be ruled out"]
-    finite = {k: v for k, v in block_residuals.items() if v == v and abs(v) != float("inf")}
-    if not finite:
-        return findings, ["per-block convergence: every per-block residual was "
-                          "non-finite or unavailable"]
-    limit = tol * slack
-    bad = {k: v for k, v in finite.items() if v > limit}
-    # A LAST STEP IS NOT A DISTANCE. Under an accelerator a block can move a lot on its
-    # last step and land on the fixed point; where the driver measured the block's own
-    # fixed-point residual (raw output against the relaxed input), or estimated the
-    # distance left from how fast its last two steps shrank, and either is inside the
-    # limit, the block has converged whatever its last step was. With no relaxation the
-    # fixed-point residual IS the last step, and only the distance can clear it.
-    for est in (fixed_point, distance):
-        if est:
-            bad = {k: v for k, v in bad.items()
-                   if not (isinstance(est.get(k), float) and est[k] == est[k] and est[k] <= limit)}
-    # A BLOCK THAT MOVED WITHIN THE LIMIT ON ITS OWN SCALE HAS SETTLED. The entry-by-entry measure
-    # reads an entry against its own value, so an entry of one field that holds a small share of
-    # its block reads large for an absolute change at the iteration's tolerance (measured: 1.74e-4
-    # at an entry holding 0.9 % of its block's largest value, on a right ladder's finest level). A
-    # block is cleared when its last change against its largest value is within the limit and so
-    # is that of each entry more than six orders below that value against itself (another quantity
-    # sharing the array: the masking this check exists for; see coupling_driver._scaled_change).
-    if scale_change and tiny_change:
-        def _within(est, k):
-            v = est.get(k)
-            return isinstance(v, float) and v == v and v <= limit
-        bad = {k: v for k, v in bad.items() if not (_within(scale_change, k) and _within(tiny_change, k))}
-    if bad:
-        worst = max(bad.items(), key=lambda kv: kv[1])
-        # WHAT WAS MEASURED, SAID: the largest change of one entry of the block at the
-        # LAST iteration, relative to that entry's own value -- the iteration's precision
-        # at this level. Measured on a steady ladder: 1.74e-4 at an interface-end entry
-        # holding 0.9 % of its block's largest value, whose block as a whole moved 8.7e-7.
+        return findings, ["per-field convergence: the driver recorded no per-field "
+                          "changes, so no field was judged"]
+    undefined = sorted(k for k, v in block_residuals.items() if v != v)
+    nonfinite = sorted(k for k, v in block_residuals.items() if v == float("inf"))
+    moving = {k: v for k, v in block_residuals.items() if v == v and v != float("inf") and v >= tol}
+    if undefined:
         findings.append(
-            "Global residual is NOT representative: block(s) "
-            + ", ".join(f"{k}={v:.2e}" for k, v in sorted(bad.items()))
-            + f" are still changing by more than {limit:.1e} relative (the entry that "
-            "moved most at the last iteration, relative to its own value), while the "
-            "global norm — which is dominated by the largest-magnitude block — "
-            f"reports convergence. {worst[0]} is the one to look at. This measures the "
-            "iteration at its last step, not a discretisation trend. Converge each "
-            "exchanged quantity in its own units, or scale the blocks before taking "
-            "the norm.")
-    return findings, not_checked
+            "Field(s) " + ", ".join(undefined) + " could not be judged: the new value is exactly "
+            "zero, so a relative change is undefined. Export a field that carries the coupled "
+            "quantity, or leave out a column that is zero by construction.")
+    if nonfinite:
+        findings.append("Field(s) " + ", ".join(nonfinite) + " hold a non-finite number.")
+    if moving:
+        worst = max(moving.items(), key=lambda kv: kv[1])
+        findings.append(
+            "Field(s) " + ", ".join(f"{k}={v:.2e}" for k, v in sorted(moving.items()))
+            + f" still changed by at least {tol:.1e} of themselves (||new - previous|| / ||new||) "
+            f"at the last iteration. {worst[0]} is the one to look at.")
+    return findings, []
 
 
 def check_returncodes(returncodes: dict) -> tuple[list[str], list[str]]:
