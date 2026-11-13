@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fileUrl } from '../api'
+import { open3d } from '../open3d'
 
 /* Whatever the run wrote, readable.
 
@@ -204,8 +205,10 @@ export default function FileView({ rel, onClose }: { rel: string; onClose: () =>
 
           {viz?.kind === 'vtk' && (
             <div className="text-[15px] leading-[1.55] text-body">
-              <p>A mesh or result file in {String(viz.format || 'VTK').toUpperCase()} format. openPASO does not draw it here.</p>
-              <p className="mt-2 text-muted">Download it and open it in ParaView, VisIt or PyVista. A run can also write a picture of a field, which is shown on the run page.</p>
+              <p>A result file in {String(viz.format || 'VTK').toUpperCase()} format: a mesh and the values the solver stored on it.</p>
+              <button onClick={() => { open3d(rel); onClose() }}
+                      className="mt-3 h-9 px-4 rounded-[8px] bg-coral text-on-coral text-[14px] font-semibold hover:bg-coral-h">Open 3D view</button>
+              <p className="mt-3 text-muted">The 3D view draws the outer surface in your browser. For cuts through the inside, download it and open it in ParaView, VisIt or PyVista.</p>
             </div>
           )}
 

@@ -90,12 +90,11 @@ export function progress(events: Ev[], running: boolean) {
       current = answered ? 'report' : null
     }
   }
-  return { count, current: running ? current : null, verdict }
+  return { count, current: running ? current ?? 'understand' : null, verdict }
 }
 
 export default function Progress({ events, running }: { events: Ev[]; running: boolean }) {
   const { count, current, verdict } = progress(events, running)
-  if (!Object.values(count).some(Boolean)) return null
   return (
     <ol className="mt-4 grid grid-cols-6 gap-1.5" aria-label="Where the run is">
       {ORDER.map(([key, word, means]) => {
