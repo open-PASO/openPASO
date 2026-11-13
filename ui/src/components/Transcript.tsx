@@ -3,6 +3,7 @@ import { clock, tidy } from '../api'
 import type { Ev } from '../types'
 import Markdown from './Markdown'
 import StepOutputs, { stepFolder } from './StepOutputs'
+import CouplingPlot from './CouplingPlot'
 
 /* The run, in the order it happened.
 
@@ -12,19 +13,24 @@ import StepOutputs, { stepFolder } from './StepOutputs'
    it reports as completed and trustworthy is a finished result. */
 
 // the same list the server uses; a shell command that exits zero is not a solver
-const SOLVER_TOOLS = new Set(['run_simulation', 'run_with_generator', 'coupled_solve', 'couple',
-                              'couple_levels', 'couple_precice', 'verify_mesh_independence'])
+export const SOLVER_TOOLS = new Set(['run_simulation', 'run_with_generator', 'coupled_solve', 'couple',
+                                     'couple_levels', 'couple_precice', 'verify_mesh_independence'])
 const SHELL_TOOLS = new Set(['run_bash', 'Bash'])
 
 /** The text inside MCP's content blocks, escapes turned back into characters. */
 function readable(raw: string): string {
+  return tidy(unwrap(raw))
+}
+
+/** readable() without shortening paths: a step's folder is found by the run folder it names. */
+function unwrap(raw: string): string {
   // Claude Code hands an MCP tool's reply back as {"result": "<the reply>"}: read the
   // reply, not the wrapper (read as it was, a finished run's verdict came out "failed")
   const trimmed = raw.trim()
   if (trimmed.startsWith('{"result"')) {
     try {
       const w = JSON.parse(trimmed) as Record<string, unknown>
-      if (typeof w.result === 'string' && Object.keys(w).length === 1) return readable(w.result)
+      if (typeof w.result === 'string' && Object.keys(w).length === 1) return unwrap(w.result)
     } catch { /* a shortened copy is not whole JSON: its escapes are read below */ }
   }
   // MCP hands a result over as a Python repr of text blocks, whose escapes are
@@ -32,12 +38,11 @@ function readable(raw: string): string {
   // is plain text keeps its backslashes, so a command or a formula containing
   // \nabla is not turned into a line break and lost.
   const blocks = [...raw.matchAll(/'text':\s*(['"])([\s\S]*?)\1\s*(?:,\s*'|})/g)].map((m) => m[2])
-  if (!blocks.length) return tidy(raw)
-  const t = blocks.join('\n')
+  if (!blocks.length) return raw
+  return blocks.join('\n')
     .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
     .replace(/\\n/g, '\n').replace(/\\t/g, '  ').replace(/\\'/g, "'").replace(/\\"/g, '"')
     .replace(/\\\\/g, '\\')
-  return tidy(t)
 }
 
 /** 'verified', 'unverified' or 'failed' for one solver tool result, with the
@@ -119,6 +124,12 @@ function solverVerdict(raw: string): { verdict: 'verified' | 'unverified' | 'fai
   // was being reported as "Traceback (most recent call last):"
   const line = troubleOf(t) || (t.split('\n').map((l) => l.trim()).find(Boolean) || 'no result')
   return { verdict: 'failed', reason: cut(line, 160) }
+}
+
+/** A solver step's verdict as the transcript gives it: the server's stamp, or for a record
+    written before stamps the transcript's own reading. */
+export function stepVerdict(e: Ev): 'verified' | 'unverified' | 'failed' {
+  return (e.verdict as 'verified' | 'unverified' | 'failed' | undefined) ?? solverVerdict(e.result || '').verdict
 }
 
 /** A line shortened for the one-line summary says it was shortened: a cut with
@@ -618,8 +629,11 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now, runId }: {
           {readable(c.result)}
         </pre>
       )}
+      {runId && (c.tool === 'couple' || c.tool === 'couple_levels') && c.state !== 'waiting' && c.state !== 'skipped' && (
+        <CouplingPlot runId={runId} t0={c.t0} t1={c.t1} live={c.state === 'running'} />
+      )}
       {runId && c.result && SOLVER_TOOLS.has(c.tool) && (c.state === 'done' || c.state === 'unverified' || c.state === 'failed') && (() => {
-        const folder = stepFolder(readable(c.result), runId)
+        const folder = stepFolder(unwrap(c.result), runId)
         return folder ? <StepOutputs runId={runId} sub={folder}
                                      verdict={c.state === 'done' ? 'verified' : c.state} /> : null
       })()}
@@ -627,14 +641,14 @@ function CallRow({ c, onDecide, onEndStep, othersRunning, now, runId }: {
   )
 }
 
-function Fold({ text, lines, className }: { text: string; lines: number; className?: string }) {
+function Fold({ text, lines, className, runId }: { text: string; lines: number; className?: string; runId?: string }) {
   const [open, setOpen] = useState(false)
   const long = text.split('\n').length > lines + 1 || text.length > lines * 120
   return (
     <div className={className}>
       <div style={open || !long ? undefined
                   : { display: '-webkit-box', WebkitLineClamp: lines, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-        <Markdown text={text} />
+        <Markdown text={text} runId={runId} />
       </div>
       {long && (
         <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
@@ -760,7 +774,7 @@ export default function Transcript({ events, live, showReasoning, onDecide, onEn
                     )}
                   </div>
                 )}
-                <Fold text={e.text} lines={e.final ? 40 : 4}
+                <Fold text={e.text} lines={e.final ? 40 : 4} runId={runId}
                       className={e.final ? 'text-[16px] leading-[1.65] text-ink2' : 'text-[15px] leading-[1.6] text-body'} />
               </li>
             )

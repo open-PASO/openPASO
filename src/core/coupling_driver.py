@@ -162,6 +162,31 @@ _MAX_NONFINITE_WARNINGS = 4
 # later in "did not converge ... last residual nan").
 _NONFINITE_STOP = 1
 _MAX_PARTICIPANT_STREAM_BYTES = 3_500_000
+# One line per iteration, beside the participants' folders, for anyone watching the run.
+PROGRESS_FILE = "openpaso_coupling_progress.jsonl"
+
+
+def _progress_writer(participants: list, tol: float):
+    """A callable that appends (iteration, residual) to the progress file; it never raises."""
+    import time
+    try:
+        root = Path(os.path.commonpath([str(Path(p.work_dir).resolve()) for p in participants]))
+    except (ValueError, OSError):
+        return lambda it, res: None
+    if root.parent == root:            # participants share nothing but the drive: no common folder to write into
+        return lambda it, res: None
+    key = f"{time.time():.3f}-{os.getpid()}"
+    names = [p.name for p in participants]
+
+    def write(it: int, res: float) -> None:
+        rec = {"run": key, "t": round(time.time(), 3), "iteration": it,
+               "residual": res if np.isfinite(res) else None, "tol": tol, "participants": names}
+        try:
+            with open(root / PROGRESS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError:
+            pass
+    return write
 
 
 @dataclass
@@ -761,6 +786,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     # thermo-elastic pair: 25 iterations against Aitken's 55). Resolved from the first exports.
     accelerator_requested = accelerator
     history: list[float] = []
+    progress = _progress_writer(participants, tol)
     warnings: list[str] = []
     returncodes: dict[str, int] = {}
     block_residuals: dict[str, float] = {}
@@ -1035,6 +1061,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 relaxed_prev[n] = _stack(ifd)
                 prev_blocks[n] = _blocks(ifd)
             history.append(float("nan"))
+            progress(it, float("nan"))
             continue
 
         # A participant that changes its export LENGTH between iterations used
@@ -1162,6 +1189,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
 
         res = float(np.sqrt(total_res / total_ref))
         history.append(res)
+        progress(it, res)
         # `_stat`/`tol_eff` are the plain last-residual-against-tol test unless a
         # noise floor is in play: with floor=None, block is 1 and tol_eff is tol,
         # so this is `res < tol` exactly.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { api, clock, fileUrl, money } from '../api'
 import { navigate } from '../route'
 import type { AppConfig, FieldSeries, ModelGroup } from '../types'
@@ -6,10 +6,14 @@ import { useRun } from '../useRun'
 import Composer, { ModePicker, findModel } from './Composer'
 import FilesDrawer from './FilesDrawer'
 import Glyph, { STATE } from './Glyph'
+import Progress, { progress } from './Progress'
 import { runsChanged } from './Shell'
 import Stage from './Stage'
 import { stepFolder } from './StepOutputs'
 import Transcript from './Transcript'
+
+// three.js is only fetched when a 3D view is opened
+const ResultViewer = lazy(() => import('./ResultViewer'))
 
 // the tools whose reply can be a solver result (webui/outcome.py SOLVER_TOOLS)
 const SOLVER_TOOLS = new Set(['run_simulation', 'run_with_generator', 'coupled_solve', 'couple',
@@ -78,6 +82,13 @@ export default function RunView({ id, config, groups }: {
 }) {
   const { session, events, link, notice, setNotice, send } = useRun(id)
   const [files, setFiles] = useState(false)
+  const [view3d, setView3d] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  useEffect(() => {
+    const on = (e: Event) => { const rel = (e as CustomEvent<{ rel: string }>).detail?.rel; if (rel) setView3d(rel) }
+    window.addEventListener('openpaso:view3d', on)
+    return () => window.removeEventListener('openpaso:view3d', on)
+  }, [])
   const [reasoning, setReasoning] = useState(pref('openpaso.reasoning', 'shown') === 'shown')
   const [confirmStop, setConfirmStop] = useState(false)
   const [now, setNow] = useState(Date.now())
@@ -230,6 +241,8 @@ export default function RunView({ id, config, groups }: {
             )}
           </div>
 
+          <Progress events={events} running={running} />
+
           {confirmDelete && !running && (
             <div className="mt-3 flex items-center gap-2 flex-wrap" role="alertdialog" aria-label="Delete this run">
               <span className="text-[14px] text-ink2">Delete this run from this machine? Its record and every file in its folder are removed. This cannot be undone.</span>
@@ -317,7 +330,7 @@ export default function RunView({ id, config, groups }: {
                 ? 'Send a correction. Claude Code cannot be interrupted, so it is sent the moment this turn ends.'
                 : 'Send a correction. openPASO reads it as soon as the current step finishes.'}
             submitLabel={running ? 'Send correction' : 'Send'}
-            onSubmit={followUp} busy={busy} draftKey={`run.${id}`}
+            onSubmit={followUp} busy={busy} draftKey={`run.${id}`} initial={draft}
             left={session && (
               <ModePicker modes={config?.modes} value={session.mode} planAllowed={session.model !== 'claude-code'}
                           onChange={(m) => send({ type: 'set_mode', mode: m })} />
@@ -326,6 +339,13 @@ export default function RunView({ id, config, groups }: {
       </div>
 
       <FilesDrawer runId={id} open={files} onClose={() => setFiles(false)} refreshKey={settle} />
+      {view3d && (
+        <Suspense fallback={null}>
+          <ResultViewer rel={view3d} runId={id} onClose={() => setView3d(null)}
+                        checkStatus={(() => { const v = progress(events, running).verdict; return v === 'verified' ? 'verified' : v === 'failed' ? 'failed' : v ? 'NOT verified' : 'no solver result yet' })()}
+                        onAskAgent={(t) => { setDraft(t); setView3d(null) }} />
+        </Suspense>
+      )}
     </div>
   )
 }

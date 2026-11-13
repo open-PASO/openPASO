@@ -25,6 +25,7 @@ import contextlib
 import json
 import re
 import logging
+import os
 import time
 import traceback
 from pathlib import Path
@@ -296,6 +297,52 @@ async def api_viz(rel: str):
         return scrub(viz.visualize(_run_path(rel)))
     except PermissionError:
         raise HTTPException(403, "That path is outside the run folders.")
+
+
+@app.get("/api/mesh3d")
+async def api_mesh3d(rel: str):
+    """A mesh or result file's outer surface and point values, for the in-browser 3D view,
+    with the other files of its series (same name but for a number, or a .pvd collection)."""
+    from . import mesh3d
+    rel = _run_path(rel)
+    try:
+        p = files._safe(rel)
+    except PermissionError:
+        raise HTTPException(403, "That path is outside the run folders.")
+    if not p.is_file() or files.classify(p) != "vtk":
+        raise HTTPException(404, "not a mesh or result file")
+    run_root = (config.SANDBOX_ROOT / rel.split("/", 1)[0]).resolve()
+    members = [q for q in mesh3d.series(p) if q.resolve().is_relative_to(run_root)]
+    first = members[0] if p.suffix.lower() == ".pvd" and members else p
+    try:
+        out = await asyncio.to_thread(mesh3d.surface, first)
+    except mesh3d.TooLarge as e:
+        raise HTTPException(413, str(e))
+    except Exception as e:   # noqa: BLE001 - a file meshio cannot read is reported, not raised
+        raise HTTPException(422, f"could not read {p.name}: {type(e).__name__}: {e}")
+    root = config.SANDBOX_ROOT.resolve()
+    ranges = None
+    if 1 < len(members) <= 12:
+        # one colour range for the whole series by default: a range per step hides real change
+        def _series_ranges() -> dict:
+            got: dict[str, dict] = {}
+            for q in members:
+                try:
+                    fs = mesh3d.surface(q)["fields"]
+                except Exception:   # noqa: BLE001 - a member that cannot be read leaves the range to the rest
+                    continue
+                for f in fs:
+                    r = got.setdefault(f["name"], {"min": f["body_min"], "max": f["body_max"],
+                                                   "min_c": list(f["body_min_c"]), "max_c": list(f["body_max_c"])})
+                    r["min"], r["max"] = min(r["min"], f["body_min"]), max(r["max"], f["body_max"])
+                    if len(r["min_c"]) == len(f["body_min_c"]):
+                        r["min_c"] = [min(a, b) for a, b in zip(r["min_c"], f["body_min_c"])]
+                        r["max_c"] = [max(a, b) for a, b in zip(r["max_c"], f["body_max_c"])]
+            return got
+        ranges = await asyncio.to_thread(_series_ranges)
+    return {**out, "rel": first.resolve().relative_to(root).as_posix(),
+            "series": [q.resolve().relative_to(root).as_posix() for q in members],
+            "series_ranges": ranges}
 
 
 # Text a run wrote can hold the home directory it worked in, and this is the
@@ -659,6 +706,86 @@ async def run_files(sid: str, sub: str = ""):
     listing.pop("path", None)
     listing["sub"] = sub
     return listing
+
+
+@app.get("/api/mesh3d/cut")
+async def api_mesh3d_cut(rel: str, axis: int, at: float):
+    """A plane through the inside of a result file (x, y or z = at), with its values."""
+    from . import mesh3d
+    rel = _run_path(rel)
+    try:
+        p = files._safe(rel)
+    except PermissionError:
+        raise HTTPException(403, "That path is outside the run folders.")
+    if not p.is_file() or files.classify(p) != "vtk" or p.suffix.lower() == ".pvd" or axis not in (0, 1, 2):
+        raise HTTPException(404, "not a result file that can be cut")
+    try:
+        return await asyncio.to_thread(mesh3d.cross_section, p, axis, float(at))
+    except mesh3d.TooLarge as e:
+        raise HTTPException(413, str(e))
+    except Exception as e:   # noqa: BLE001
+        raise HTTPException(422, f"could not cut {p.name}: {type(e).__name__}: {e}")
+
+
+@app.post("/api/sessions/{sid}/view-assist")
+async def view_assist(sid: str, body: dict):
+    """Plain words about a result picture -> view settings (see webui/view_assist.py). Writes nothing
+    into the run's work folder or its record; requests are logged beside them."""
+    from . import view_assist as va
+    try:
+        run = runs.get(sid)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "no such run")
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Say how the picture should look.")
+    fields = [f for f in (body.get("fields") or []) if isinstance(f, dict)][:60]
+    steps = int(body.get("steps") or 1)
+    try:
+        return await va.assist(str(run.state.get("model") or ""), text, fields,
+                               body.get("current") if isinstance(body.get("current"), dict) else {},
+                               steps, str(body.get("step_kind") or ""), Path(run.workdir).parent)
+    except LookupError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:   # noqa: BLE001 - the model or the network failed; say so
+        raise HTTPException(502, f"The picture assistant did not answer: {type(e).__name__}")
+
+
+@app.get("/api/sessions/{sid}/coupling")
+async def run_coupling_progress(sid: str):
+    """Residual per iteration of every coupling this run started, read from the progress
+    files the coupling driver appends to while it iterates; polled while a coupling runs."""
+    try:
+        run = runs.get(sid)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "no such run")
+    PROGRESS_FILE = "openpaso_coupling_progress.jsonl"     # core.coupling_driver.PROGRESS_FILE
+    work = Path(run.workdir).resolve()
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(work):
+        depth = len(Path(dirpath).relative_to(work).parts)
+        if depth >= 3:
+            dirnames[:] = []
+        if PROGRESS_FILE in filenames:
+            found.append(Path(dirpath) / PROGRESS_FILE)
+    series: dict[str, dict] = {}
+    for f in found:
+        if not f.resolve().is_relative_to(work):
+            continue
+        folder = f.parent.relative_to(work).as_posix()
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines()[-20000:]:
+            try:
+                r = json.loads(line)
+                key, it, t = str(r["run"]), int(r["iteration"]), float(r["t"])
+                res = None if r.get("residual") is None else float(r["residual"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            s = series.setdefault(key, {"run": key, "folder": "" if folder == "." else folder,
+                                        "tol": r.get("tol"), "participants": r.get("participants") or [],
+                                        "points": []})
+            s["points"].append([it, res, t])
+    out = sorted(series.values(), key=lambda s: s["points"][0][2])[-50:]
+    return {"runs": out}
 
 
 @app.post("/api/sessions/{sid}/upload")

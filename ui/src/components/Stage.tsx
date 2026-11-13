@@ -58,6 +58,20 @@ export default function Stage({ series }: { series: FieldSeries }) {
   const signed = (series.vmin ?? 0) < 0 && (series.vmax ?? 0) > 0
   const lut = useRef(ramp(signed))
   useEffect(() => { lut.current = ramp(signed) }, [signed])
+  // the colour range the viewer chose; the frames stay as stored, only the colour lookup changes
+  const [range, setRange] = useState<[number, number]>([series.vmin, series.vmax])
+  const shown = useRef(lut.current)
+  useEffect(() => {
+    const [lo, hi] = range
+    const out = new Uint8Array(256 * 3)
+    for (let q = 0; q < 256; q++) {
+      const v = series.vmin + (q / 255) * (series.vmax - series.vmin)
+      const k = hi > lo ? Math.min(255, Math.max(0, Math.round(((v - lo) / (hi - lo)) * 255))) : q
+      out.set(lut.current.subarray(k * 3, k * 3 + 3), q * 3)
+    }
+    shown.current = out
+    draw(at.current)
+  }, [range, signed, series.vmin, series.vmax])
   const raf = useRef(0)
   const [playing, setPlaying] = useState(true)
   const [n, setN] = useState(0)
@@ -88,9 +102,9 @@ export default function Stage({ series }: { series: FieldSeries }) {
           continue
         }
         const v = d.frames[base + s] * 3
-        img.data[o] = lut.current[v]
-        img.data[o + 1] = lut.current[v + 1]
-        img.data[o + 2] = lut.current[v + 2]
+        img.data[o] = shown.current[v]
+        img.data[o + 1] = shown.current[v + 1]
+        img.data[o + 2] = shown.current[v + 2]
         img.data[o + 3] = 255
       }
     }
@@ -175,13 +189,21 @@ export default function Stage({ series }: { series: FieldSeries }) {
           className="w-64 accent-coral"
         />
         <span className="ml-auto flex items-center gap-2.5 font-mono text-[13px] text-muted">
-          <span>{series.vmin}</span>
+          <input type="number" step="any" value={range[0]} aria-label="Lowest value on the colour bar"
+                 onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setRange([v, range[1]]) }}
+                 className="w-20 h-7 px-1.5 rounded-[6px] border line bg-transparent text-right" />
           <span className="w-[132px] h-1.5 rounded-sm"
                 style={{ background: signed
                   ? 'linear-gradient(90deg,#AFBCCB,#64748B,#080B11,#C94A30,#FF9D82)'
                   : 'linear-gradient(90deg,#101620,#6B4A44,#C94A30,#FF9D82)' }} />
-          <span>+{series.vmax}</span>
+          <input type="number" step="any" value={range[1]} aria-label="Highest value on the colour bar"
+                 onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setRange([range[0], v]) }}
+                 className="w-20 h-7 px-1.5 rounded-[6px] border line bg-transparent" />
           <span>{series.unit}</span>
+          {(range[0] !== series.vmin || range[1] !== series.vmax) && (
+            <button onClick={() => setRange([series.vmin, series.vmax])}
+                    className="h-7 px-2 rounded-[6px] border line text-xs hover:text-ink2">Reset</button>
+          )}
         </span>
       </div>
 

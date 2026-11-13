@@ -215,6 +215,28 @@ def test_a_path_in_a_key_is_scrubbed_like_one_in_a_value():
     assert str(Path.home()) not in text and "~/private/run.json" in text
 
 
+@pytest.mark.parametrize("path", [r"C:\Users\someone\run\a.py", "C:/Users/someone/run/a.py",
+                                  "/c/Users/someone/run/a.py", "C:/Users/someone Smith/run/a.py",
+                                  r"C:\Users\Jürgen someone\run\a.py", "/c/Users/someone.o-x/run/a.py"])
+def test_a_windows_home_is_scrubbed_in_every_form_a_run_prints_it(path):
+    from webui.privacy import scrub_text
+    out = scrub_text(f"cd {path} && python a.py")
+    rest = path[path.index("run") - 1:]                 # the separator and what follows the profile name
+    assert out == f"cd ~{rest} && python a.py", out
+
+
+def test_a_windows_home_without_a_path_after_it_keeps_the_prose():
+    from webui.privacy import scrub_text
+    assert scrub_text(r"home is C:\Users\someone and that is all") == "home is ~ and that is all"
+
+
+def test_a_windows_home_under_an_encoded_key_is_not_taken_for_data():
+    from webui.privacy import is_encoded, scrub
+    value = "/c/Users/someone/" + "A" * 43
+    assert not is_encoded(value)
+    assert "someone" not in scrub({"data": value})["data"]
+
+
 def test_a_run_cannot_be_started_on_a_model_that_cannot_run(client, monkeypatch):
     async def nothing_available():
         return {"groups": [{"kind": "openrouter", "title": "t", "note": "", "models": [
@@ -387,6 +409,29 @@ def test_a_link_out_of_a_run_does_not_open_another_run(client):
     finally:
         link.unlink(missing_ok=True)
         (b / "secret.txt").unlink(missing_ok=True)
+
+
+def test_coupling_progress_is_read_from_the_runs_own_folder(client):
+    """The convergence plot reads the driver's per-iteration lines, grouped per coupling run."""
+    sid = client.post("/api/sessions", json={"model": "mock", "test": True}).json()["id"]
+    try:
+        run = runs.get(sid)
+        lines = [{"run": "a", "t": 1.0, "iteration": 1, "residual": None, "tol": 1e-6, "participants": ["F", "S"]},
+                 {"run": "a", "t": 2.0, "iteration": 2, "residual": 0.1, "tol": 1e-6, "participants": ["F", "S"]},
+                 {"run": "b", "t": 3.0, "iteration": 2, "residual": 0.01, "tol": 1e-6, "participants": ["F", "S"]}]
+        (run.workdir / "lvl").mkdir(parents=True, exist_ok=True)
+        (run.workdir / "lvl" / "openpaso_coupling_progress.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+        (run.workdir.parent / "work2").mkdir(parents=True, exist_ok=True)
+        (run.workdir.parent / "work2" / "openpaso_coupling_progress.jsonl").write_text(
+            json.dumps({"run": "z", "t": 0, "iteration": 2, "residual": 5}) + "\n")
+        got = client.get(f"/api/sessions/{sid}/coupling").json()["runs"]
+        assert [s["run"] for s in got] == ["a", "b"]
+        assert got[0]["folder"] == "lvl" and got[0]["points"] == [[1, None, 1.0], [2, 0.1, 2.0]]
+        assert client.get("/api/sessions/nosuchrun/coupling").status_code == 404
+    finally:
+        runs.RUNS.pop(sid, None)
+        client.delete(f"/api/sessions/{sid}")
 
 
 def test_a_listing_cannot_step_into_a_sibling_folder(client):

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, fileUrl } from '../api'
+import { open3d, RESULT_3D } from '../open3d'
 import type { FieldSeries } from '../types'
 import Stage from './Stage'
 
@@ -13,6 +14,7 @@ import Stage from './Stage'
    page came from a run whose drag was 53,288 at every step, with nothing to say so. */
 
 export const PICTURE = /\.(png|jpe?g|svg|gif|webp)$/i
+export const MOVIE = /\.(mp4|webm)$/i
 
 /** The step's folder inside this run's work folder, or null when it lies elsewhere:
     only this run's own folder is ever read. */
@@ -34,11 +36,13 @@ const SAID: Record<Verdict, string> = {
 
 export default function StepOutputs({ runId, sub, verdict }: { runId: string; sub: string; verdict: Verdict }) {
   const [pics, setPics] = useState<{ rel: string; name: string }[]>([])
+  const [results, setResults] = useState<{ rel: string; name: string }[]>([])
   const [field, setField] = useState<FieldSeries | null>(null)
   useEffect(() => {
     let dead = false
     ;(async () => {
       const found: { rel: string; name: string }[] = []
+      const res3d: { rel: string; name: string }[] = []
       let series: FieldSeries | null = null
       // the step's folder and the folders below it, two levels down: a solver such as 4C
       // writes its results into output-files/ inside the step's folder (Copilot, 2026-10-01)
@@ -46,7 +50,8 @@ export default function StepOutputs({ runId, sub, verdict }: { runId: string; su
         const d = await api.files(runId, dir)
         for (const f of d.entries) {
           if (f.is_dir) { if (depth < 2) await walk(`${dir}/${f.name}`, depth + 1); continue }
-          if (PICTURE.test(f.name)) found.push({ rel: f.rel_path, name: `${dir.slice(sub.length + 1)}${dir === sub ? '' : '/'}${f.name}` })
+          if (PICTURE.test(f.name) || MOVIE.test(f.name)) found.push({ rel: f.rel_path, name: `${dir.slice(sub.length + 1)}${dir === sub ? '' : '/'}${f.name}` })
+          else if (RESULT_3D.test(f.name)) res3d.push({ rel: f.rel_path, name: `${dir.slice(sub.length + 1)}${dir === sub ? '' : '/'}${f.name}` })
           else if (!series && f.name.endsWith('.json') && (f.size ?? 0) >= 200) {
             const v = await api.viz(f.rel_path).catch(() => null)
             if (v?.kind === 'field_series') series = v as unknown as FieldSeries
@@ -54,22 +59,40 @@ export default function StepOutputs({ runId, sub, verdict }: { runId: string; su
         }
       }
       await walk(sub, 0)
-      if (!dead) { setPics(found); setField(series) }
+      if (!dead) {
+        setPics(found); setField(series)
+        // one button per series: files that differ only by a number open together
+        const seen = new Set<string>()
+        setResults(res3d.filter((r) => { const k = r.name.replace(/\d+(?=\.[^.]+$)/, '#'); if (seen.has(k)) return false; seen.add(k); return true }))
+      }
     })().catch(() => { /* a folder that is gone shows nothing */ })
     return () => { dead = true }
   }, [runId, sub])
-  if (!pics.length && !field) return null
+  if (!pics.length && !field && !results.length) return null
   return (
     <section className="pl-7 mt-3" aria-label="What this run wrote">
       <div className={`text-[13px] font-medium mb-2 ${verdict === 'verified' ? 'text-muted' : 'text-coral'}`}>
         What this run wrote · {SAID[verdict]}
       </div>
       {field && <div className="mb-3"><Stage series={field} /></div>}
+      {results.length > 0 && (
+        <div className="mb-3 flex flex-wrap gap-2">
+          {results.slice(0, 8).map((r) => (
+            <button key={r.rel} onClick={() => open3d(r.rel)}
+                    className="h-8 px-3 rounded-[6px] border line text-[13px] text-ink2 hover:border-strong">
+              Open 3D view <span className="num text-muted">{r.name.replace(/\d+(?=\.[^.]+$)/, '…')}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {pics.length > 0 && (
         <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
           {pics.map((p) => (
             <figure key={p.rel} className="bg-soft border line rounded-[8px] p-3">
-              <img src={fileUrl(p.rel)} alt={`${p.name}, written by this run`} loading="lazy" className="w-full rounded-[6px] bg-white" />
+              {MOVIE.test(p.name)
+                ? <video src={fileUrl(p.rel)} controls loop muted playsInline preload="metadata"
+                         aria-label={`${p.name}, written by this run`} className="w-full rounded-[6px] bg-black" />
+                : <img src={fileUrl(p.rel)} alt={`${p.name}, written by this run`} loading="lazy" className="w-full rounded-[6px] bg-white" />}
               <figcaption className="num mt-2 text-[13px] text-muted break-all">{sub}/{p.name}</figcaption>
             </figure>
           ))}

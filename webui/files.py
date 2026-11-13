@@ -48,7 +48,7 @@ def list_dir(rel: str = "") -> dict:
         entries.append({
             "name": child.name,
             "abs_path": str(child),
-            "rel_path": str(child.relative_to(config.SANDBOX_ROOT)),
+            "rel_path": child.relative_to(config.SANDBOX_ROOT).as_posix(),
             "is_dir": child.is_dir(),
             "size": stat.st_size if child.is_file() else None,
             "mtime": stat.st_mtime,
@@ -56,7 +56,7 @@ def list_dir(rel: str = "") -> dict:
         })
         if len(entries) >= MAX_LIST:
             break
-    return {"path": str(p), "rel": str(p.relative_to(config.SANDBOX_ROOT))
+    return {"path": str(p), "rel": p.relative_to(config.SANDBOX_ROOT).as_posix()
             if p != config.SANDBOX_ROOT.resolve() else "",
             "entries": entries, "exists": True}
 
