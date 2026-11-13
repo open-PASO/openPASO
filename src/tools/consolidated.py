@@ -1586,9 +1586,7 @@ def _ratio_misfit_trend(per_side: list, shrink: float = 0.6) -> list:
     return notes
 
 
-_BLOCK_CAVEAT = "Global residual is NOT representative"
 _CLEAN_HEAD = "this level's iteration CONVERGED and your files are self-consistent. "
-_BLOCK_NAMED = re.compile(r"([A-Za-z0-9_.\-]+?\.(?:values|normal_fluxes)(?:\[\d+\])?)=([0-9.eE+\-]+)")
 
 
 def _straight_interface_ends(dirs, coords, level, since):
@@ -1631,57 +1629,6 @@ def _straight_interface_ends(dirs, coords, level, since):
     ends[0][ax] = ends[1][ax] = c
     ends[0][al], ends[1][al] = lo, hi
     return ends
-
-
-def _block_caveat_trend(out_levels: list, blocks_by_level: dict):
-    """(faults, notes, excused_levels) from the per-block iteration caveat.
-
-    The caveat measures how far one block's worst entry still moved, relative to its own
-    value, at a level's LAST iteration: the iteration's precision at that level. Its own
-    per-level trend -- the same block's last-step change at every level, from each level's
-    block residuals -- decides: shrinking level by level, it is not a ladder fault and the
-    note states the trend; otherwise the fault states the trend and the level to couple
-    again with a smaller tol. Measured on the ladders of a steady problem: the caveat fired at the finest
-    level only (1.74e-4 against a 1e-5 limit; the same block moved 1.4e-6 and 3.8e-6 at the
-    two coarser levels, and the entry held 0.9 % of its block's largest value), and every
-    correct ladder read NOT VERIFIED under a text that framed it as discretisation."""
-    order = [int(x["level"]) for x in out_levels if isinstance(x, dict) and "level" in x]
-    faults, notes, excused = [], [], set()
-    for x in out_levels:
-        k = x.get("level") if isinstance(x, dict) else None
-        cav = [str(v) for v in (x.get("validation") or []) if _BLOCK_CAVEAT in str(v)] if k else []
-        if not cav:
-            continue
-        lim = re.search(r"more than ([0-9.eE+\-]+) relative", cav[0])
-        named = sorted({b for v in cav for b, _ in _BLOCK_NAMED.findall(v)})
-        if not named:
-            continue
-        rows, all_shrink = [], True
-        for b in named:
-            seq = []
-            for j in order:
-                try:
-                    v = float((blocks_by_level.get(j) or {}).get(b))
-                except (TypeError, ValueError):
-                    continue
-                if v == v:
-                    seq.append((j, v))
-            shrinks = len(seq) >= 2 and all(b2 < a2 for (_, a2), (_, b2) in zip(seq, seq[1:]))
-            all_shrink = all_shrink and shrinks
-            rows.append(f"{b} {', '.join(f'{v:.1e}' for _, v in seq)} at levels "
-                        f"{', '.join(str(j) for j, _ in seq)}")
-        where = "; ".join(rows) + (f" (limit {lim.group(1)})" if lim else "")
-        if all_shrink:
-            excused.add(int(k))
-            notes.append(f"The per-block iteration caveat at level {k} shrinks level by level: {where}. "
-                         f"It is the iteration's precision at each level, not a ladder fault.")
-        else:
-            faults.append(f"level {k}: the per-block iteration caveat does not shrink across the ladder "
-                          f"(the last-step change of its worst entry, relative to that entry's own value: "
-                          f"{where}): the iteration at level {k} stopped before that block settled. That "
-                          f"is the iteration's precision at that level, not a discretisation trend; couple "
-                          f"level {k} again with a smaller tol.")
-    return faults, notes, excused
 
 
 def _interface_balance_trend(out_levels: list, shrink: float = 0.6):
@@ -1800,8 +1747,7 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                         setup_text: str | None = None,
                         critic_token: str = "",
                         job_id: str = "",
-                        field_defect: bool = False,
-                        iteration_caveat: bool = False) -> dict:
+                        field_defect: bool = False) -> dict:
     """Attach openPASO's verification-gate verdict to a run/coupling result in place.
 
     A result is trustworthy ONLY when it (1) passes the numerical checks — the
@@ -1899,18 +1845,6 @@ def _stamp_verification(result: dict, *, evidence_ok: bool, reason: str = "",
                 + ". This is a defect of what this level produced, not a "
                 "caveat that refinement settles: do not save this level as a "
                 "result. Fix the side named here, then couple this level again.")
-        elif iteration_caveat and _converged:
-            # AN ITERATION CAVEAT IS NOT A DISCRETISATION QUESTION. Measured: a per-block
-            # caveat at a ladder's finest level was framed as "discretisation error or a wrong
-            # transmission condition ... decided by the next level" on every correct ladder
-            # of a steady round; it measures how far the iteration had settled.
-            result["verification"] = (
-                "CONVERGED WITH AN ITERATION CAVEAT (" + (reason or "a per-block caveat") + "). "
-                "It measures how far one exchanged block had settled at the last iteration, "
-                "not a discretisation trend. Coupling this level again with a smaller tol "
-                "shows whether that block settles. "
-                + ("The ladder verdict states that block's per-level trend." if _IN_LADDER.get() else
-                   "Report it beside this level's numbers."))
         elif (_conserv or _says_converged) and _converged and _IN_LADDER.get():
             # INSIDE A LADDER THE NEXT LEVEL RUNS BY ITSELF, and the ladder's verdict
             # judges the caveat's trend. Measured: ladder replies read "THIS LADDER IS
@@ -4002,23 +3936,6 @@ def _heal_missing_interface_dump(specs: list, k: int) -> dict:
             pass
         healed[name] = target.name
     return healed
-
-
-def _unread_blocks(sides: list) -> set:
-    """The exported blocks no side of a stated Dirichlet-Neumann pair reads: the
-    Dirichlet side reads its partner's `values`, the Neumann side its partner's
-    `normal_fluxes`. Empty unless exactly two sides both state their role."""
-    out: set = set()
-    try:
-        from . import result_audit as _ra_role
-        roles = {name: _ra_role._stated_role(Path(str(wd))) for name, wd in sides}
-        if len(sides) == 2 and all(roles.values()):
-            (a, _), (b, _) = sides
-            for me, other in ((a, b), (b, a)):
-                out.add(f"{other}.{'normal_fluxes' if roles[me] == 'dirichlet' else 'values'}")
-    except Exception:                                    # noqa: BLE001
-        return set()
-    return out
 
 
 _NOT_OUTPUT = ("exports.json", "imports.json", "config.json")
@@ -7408,7 +7325,7 @@ def register_consolidated_tools(mcp: FastMCP):
         return (out + note) if isinstance(out, str) else out
 
     @mcp.tool()
-    async def couple(participants: str | list, max_iter: int = 50, tol: float = 1e-6,
+    async def couple(participants: str | list, max_iter: int = 50, tol: float | None = None,
                      accelerator: str = "auto", theta: float = 0.5,
                      monolithic: str = "", probe: bool = True,
                      critic_approved: bool = False, noise_replicates: int = 0,
@@ -7428,8 +7345,11 @@ def register_consolidated_tools(mcp: FastMCP):
         silent-wrong validation a partitioned coupling needs, because a partitioned
         coupling's characteristic failure is not a crash — it is a clean, converged,
         confidently wrong number. openPASO checks, and reports in the verdict:
-          * convergence, and per-block convergence (a large settled block, e.g. force,
-            cannot hide a small moving one, e.g. displacement, inside one global norm);
+          * convergence, judged per physical field: the coupling stops when the
+            largest field's relative change ||new - previous|| / ||new|| (an l2
+            norm over the interface points; provisional, it depends on uneven
+            point spacing) is strictly below `tol`, so a large settled field, e.g.
+            force, cannot hide a small moving one, e.g. displacement;
           * finiteness of every exchanged array, including coordinates and fluxes;
           * interface flux balance, naming SIGN-CONVENTION and UNIT-MISMATCH signatures;
           * that every participant exited 0 — a diverged solver often writes its last
@@ -7456,7 +7376,12 @@ def register_consolidated_tools(mcp: FastMCP):
 
         InterfaceData JSON shape (read imports, write exports):
           {"field_name": str, "n_points": N, "coordinates": [[x,y(,z)],...],
-           "values": [...], "normal_fluxes": [...]  # optional, for conservation check}
+           "values": [...], "normal_fluxes": [...]  # optional, for conservation check
+           "components": ["ux", "uy", "T"], "flux_components": [...]}  # optional
+        `components` names each column of `values` (and `flux_components` each of
+        `normal_fluxes`): names sharing a base and ending in x/y/z (ux, uy, uz) form
+        one vector field, any other name is its own field, and each field must settle
+        on its own. Without names, all columns of an array are ONE field.
 
         THE DRIVER IS JACOBI, NOT GAUSS-SEIDEL: within one iteration every
         participant reads the PREVIOUS iteration's exports, and the driver relaxes
@@ -7475,7 +7400,9 @@ def register_consolidated_tools(mcp: FastMCP):
             participants: JSON list of {"name", "command":[argv...], "work_dir",
               "imports_from":[partner names], "timeout": seconds}. Every name in
               `imports_from` must be another participant's name.
-            max_iter, tol: iteration controls.
+            max_iter: iteration control.
+            tol: REQUIRED, no default: the largest per-field relative change at
+              which the coupling counts as settled.
             accelerator: "auto" (default: Aitken for a single-field exchange, Anderson for a
                 multi-field one -- resolved from the first exports and reported in `theta.mode`),
                 "aitken" (theta recomputed each iteration from the residual
@@ -7546,6 +7473,11 @@ def register_consolidated_tools(mcp: FastMCP):
             check_interface_sensitivity,
         )
         _get_journal().record("tool_call", "couple", solver="general", physics="coupling")
+        if tol is None:
+            return json.dumps({"converged": False, "trustworthy_result": False,
+                               "error": ("couple needs `tol`: the largest per-field relative change at which "
+                                         "the coupling counts as settled. There is no default, because the "
+                                         "right value depends on the accuracy your result needs.")}, indent=2)
         # AT FUNCTION SCOPE, NOT INSIDE THE CONVERGED BRANCH. These are read
         # where the reply is assembled, which every path reaches, while only a
         # converged run fills them. Defining them in the branch raised
@@ -8022,73 +7954,13 @@ def register_consolidated_tools(mcp: FastMCP):
                 "that would have established whether each participant's answer "
                 "depends on its imports was skipped, so a solver that ignores "
                 "imports.json is indistinguishable here from one that reads it.")
-        # Only interesting when the GLOBAL norm claims convergence: that is the
-        # case where a still-moving small block is invisible. When the global
-        # residual already says NOT CONVERGED it says everything, and repeating
-        # it per block just buries the findings that are specific.
-        #
-        # A MEASURED FLOOR DOES NOT TRANSFER TO THIS STATISTIC, so under one
-        # this check reports coverage rather than a verdict. Two goes were
-        # needed to get that right and the wrong one is worth recording. It
-        # first compared the blocks against the requested `tol`, which faulted a
-        # run held to 8.3e-03 for blocks moving by more than 1.0e-08. Feeding it
-        # `tol_effective` instead looked like the fix and is not: the driver
-        # measures the floor of ONE statistic, the global L2 residual over the
-        # stacked export vector, while a block residual is the WORST ENTRY-WISE
-        # relative change of one block. Those have different noise floors and
-        # the second is far larger — a DSMC surface flux has entries near zero
-        # whose relative change between samples is order 1, measured at
-        # gas.normal_fluxes = 1.00e+00 against an effective limit of 6.9e-01 on
-        # a coupling that is right.
-        #
-        # So there is no threshold here that means anything, and inventing one
-        # would be the softening this whole branch refuses. Say what is missing
-        # instead: scale masking was not ruled out, and it would take a per-block
-        # floor that nothing measures.
-        if r.converged and r.noise_floor:
-            not_run.append(
-                "per-block convergence: NOT CHECKED on a run judged at a "
-                f"measured noise floor ({r.noise_floor:.2e}). That floor is for "
-                "the GLOBAL residual — one L2 norm over the stacked export "
-                "vector — while this check compares the worst ENTRY-WISE "
-                "relative change of each block, a statistic with its own, much "
-                "larger floor that nothing here measures. Comparing the two "
-                "faults correct stochastic couplings, and picking a threshold "
-                "would be guessing. Consequence: scale masking in the global "
-                "residual has NOT been ruled out for this run — the per-block "
-                "residuals are returned in `block_residuals`, and the decisive "
-                "check remains an independent reference (`monolithic`)."
-                + " Blocks: "
-                + ", ".join(f"{k}={v:.2e}" for k, v in
-                            sorted(r.block_residuals.items()) if v == v))
-        elif r.converged:
-            # A BLOCK NO SIDE READS DOES NOT DECIDE THE FIXED POINT. On a Dirichlet-
-            # Neumann pair the Dirichlet side reads its partner's trace and the Neumann
-            # side its partner's flux; the Dirichlet side's own exported trace is read by
-            # no one and lags the iteration by one step. Measured: a right ladder was
-            # denied by a caveat on exactly that block. Judged only where both sides
-            # state their roles.
-            _unread = _unread_blocks([(p.name, p.work_dir) for p in parts])
-            # (a block of one column per point is named "<side>.<array>[<column>]": the column
-            # belongs to its array -- measured, "B.normal_fluxes[k]" never matched and was judged)
-            _unread_key = lambda _k: re.sub(r"\[\d+\]$", "", _k) in _unread      # noqa: E731
-            _blocks = {k: v for k, v in (r.block_residuals or {}).items() if not _unread_key(k)}
-            f, n = check_residual_blocks(_blocks or r.block_residuals, tol,
-                                         fixed_point=getattr(r, "block_fixed_point", None),
-                                         distance=getattr(r, "block_distance", None),
-                                         scale_change=getattr(r, "block_scale_change", None),
-                                         tiny_change=getattr(r, "block_tiny_change", None))
+        # ONE DEFINITION. The stop test's own per-field measure, against the limit the stop test
+        # used (tol, or the measured noise floor when one is in play), on EVERY exported field --
+        # also one no partner may read, since the export format cannot say which arrays a partner
+        # receives (stricter, and said in `fields_judged`).
+        if r.converged:
+            f, n = check_residual_blocks(r.block_residuals, r.tol_effective or tol)
             val += f; not_run += n
-            _skipped = {}
-            for _k in (r.block_residuals or {}):
-                if _unread_key(_k):
-                    _a = re.sub(r"\[\d+\]$", "", _k)
-                    _skipped[_a] = _skipped.get(_a, 0) + 1
-            _skipped = [a + (f" ({n} columns)" if n > 1 else "") for a, n in sorted(_skipped.items())]
-            if _skipped and _blocks:
-                not_run.append("per-block convergence: " + ", ".join(_skipped) + " not judged -- read by no "
-                               "side (a Dirichlet side reads its partner's trace, a Neumann side its partner's "
-                               "flux), so their last step does not decide the fixed point")
         names = list(r.exports)
         _bal_numbers: dict = {}
         _prof_numbers: dict = {}
@@ -8238,6 +8110,11 @@ def register_consolidated_tools(mcp: FastMCP):
                   "converged": r.converged, "iterations": r.iterations,
                   "residual": r.residual, "history": r.history,
                   "block_residuals": r.block_residuals,
+                  "fields_judged": {"by_participant": getattr(r, "field_declarations", {}) or {},
+                                    "note": ("each field's relative change ||new - previous|| / ||new|| "
+                                             "(l2 over the interface points, provisional) must be below "
+                                             "tol; every exported field is judged, also one no partner "
+                                             "may read")},
                   "returncodes": r.returncodes,
                   "responsiveness": r.responsiveness,
                   **({"responsiveness_detail": r.responsiveness_detail}
@@ -8403,17 +8280,9 @@ def register_consolidated_tools(mcp: FastMCP):
             reason = reason if (_nf or _us) else _at_sentence(str(_bf[0].get("finding", "")), 400)
             val = list(val) + [str(f.get("finding", "")) for f in _bf]
             result["validation"] = val
-        # A LEVEL WHOSE ONLY FINDINGS ARE PER-BLOCK CAVEATS carries an iteration caveat, named
-        # by the caveat itself (the generic converged-with-a-caveat reason frames it as
-        # discretisation).
-        _iter_caveat = (bool(r.converged) and bool(val) and not (_nf or _us or _bf)
-                        and all(_BLOCK_CAVEAT in str(v) for v in val))
-        if _iter_caveat:
-            reason = _at_sentence(str(val[0]), 400)
         _stamp_verification(result, evidence_ok=checks_ok, reason=reason,
                             critic_approved=critic_approved,
                             field_defect=bool(_nf or _us or _bf),
-                            iteration_caveat=_iter_caveat,
                             solver="couple",
                             setup_text=_coupling_setup_text(
                                 participants=participants, max_iter=max_iter,
@@ -9122,7 +8991,7 @@ def register_consolidated_tools(mcp: FastMCP):
 
     @mcp.tool()
     async def couple_levels(participants: str | list, levels: str | list, critic_approved: bool = False,
-                            max_iter: int = 150, tol: float = 1e-6, accelerator: str = "auto",
+                            max_iter: int = 150, tol: float | None = None, accelerator: str = "auto",
                             theta: float = 0.5, probe: bool = True, history_dir: str = "",
                             history_pattern: str = "coupling_history_level{k}.csv") -> str:
         """EVERY PRESCRIBED MESH LEVEL IN ONE CALL -- the same partitioned coupling as
@@ -9173,7 +9042,15 @@ def register_consolidated_tools(mcp: FastMCP):
         coupling_args=<{"participants": ..., "max_iter": ..., "tol": ...,
         "accelerator": ..., "theta": ..., "probe": ...} exactly as passed here>),
         then critic_approved=True; openPASO looks that review up for every level.
+        `tol` is REQUIRED (no default): the largest per-field relative change at which
+        each level's coupling counts as settled.
         """
+        if tol is None:
+            return json.dumps({"all_levels_converged": False, "trustworthy_result": False,
+                               "error": ("couple_levels needs `tol`: the largest per-field relative change at "
+                                         "which each level's coupling counts as settled. There is no default, "
+                                         "because the right value depends on the accuracy your result needs.")},
+                              indent=2)
         import time as _t_ladder
         _ladder_t0 = _t_ladder.time()   # the deliverables judged below must be newer than this
         # A LIST IS TAKEN AS IT IS, not refused. Measured: one run sent `levels` as a list 16
@@ -9289,7 +9166,6 @@ def register_consolidated_tools(mcp: FastMCP):
                 "gives that dict), and use the merged values for the mesh; or run one couple() call per level and "
                 "edit that side's ./config.json between the calls.")})
         out_levels = []
-        _blocks_by_level: dict = {}          # each level's per-block residuals, for the caveat's trend
         for entry in lv:
             try:
                 k = int(entry.get("level", len(out_levels) + 1))
@@ -9336,7 +9212,6 @@ def register_consolidated_tools(mcp: FastMCP):
                         "responsiveness", "interface_balance", "interface_profile"):
                 if key in rep and rep[key] is not None:
                     compact[key] = rep[key]
-            _blocks_by_level[k] = dict(rep.get("block_residuals") or {})
             # A LEVEL THAT STARTED COLD BECAUSE THE LAST LEVEL'S EXPORT DID NOT FIT IT, in one line.
             _cold = [str(_n) for _n in (rep.get("noise_notes") or [])
                      if "does not fit this level's window" in str(_n)]
@@ -9607,33 +9482,22 @@ def register_consolidated_tools(mcp: FastMCP):
         _ladder_faults.extend(_bal_faults)
         _prof_faults, _prof_notes, _prof_excused = _interface_profile_trend(out_levels)
         _ladder_faults.extend(_prof_faults)
-        # THE PER-BLOCK ITERATION CAVEAT BY ITS OWN PER-LEVEL TREND, stated with its numbers;
-        # a level whose only findings are such caveats answers through it, not through its
-        # level text (which carried the caveat's generic reason).
-        _blk_faults, _blk_notes, _blk_excused = _block_caveat_trend(out_levels, _blocks_by_level)
-        _ladder_faults.extend(_blk_faults)
-        _blk_stated = {x["level"] for x in out_levels
-                       if (x.get("validation") or []) and x.get("converged") and not x.get("coupled_evidence")
-                       and all(_BLOCK_CAVEAT in str(v) for v in x["validation"])}
-        _bal_notes = _bal_notes + _prof_notes + _blk_notes
+        _bal_notes = _bal_notes + _prof_notes
 
         def _excused_finding(level: int, v) -> bool:
             v = str(v)
             return ((v.startswith("Interface flux NOT balanced") and level in _bal_excused)
-                    or ("does NOT match POINT BY POINT" in v and level in _prof_excused)
-                    or (_BLOCK_CAVEAT in v and level in _blk_excused))
+                    or ("does NOT match POINT BY POINT" in v and level in _prof_excused))
         _tautology = any(isinstance(x.get("interface_balance"), dict)
                          and x["interface_balance"].get("tautology")
                          for x in out_levels)
         _unverified = [x["level"] for x in out_levels
                        if not x.get("trustworthy_result")
-                       and not ((x["level"] in _bal_excused or x["level"] in _prof_excused
-                                 or x["level"] in _blk_excused)
+                       and not ((x["level"] in _bal_excused or x["level"] in _prof_excused)
                                 and all(_excused_finding(x["level"], v)
                                         for v in (x.get("validation") or []))
                                 and x.get("converged") and not x.get("coupled_evidence")
-                                and _reviewed)
-                       and not (x["level"] in _blk_stated and _reviewed)]
+                                and _reviewed)]
         if _unverified:
             # A DEFECTIVE FIELD AND A CAVEAT OR REVIEW GAP ARE TWO FAULTS, named apart:
             # the first reason of several levels used to speak for all of them.

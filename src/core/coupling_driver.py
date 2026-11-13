@@ -78,6 +78,7 @@ bit-identical, the floor is 0, and `max(tol, 0) == tol`.
 from __future__ import annotations
 import hashlib
 import json
+import math
 import re
 import os
 import tempfile
@@ -196,18 +197,11 @@ class CouplingResult:
     # ── evidence the validators consume (never interpreted here) ──────────
     # participant name -> exit code of its LAST run
     returncodes: dict[str, int] = field(default_factory=dict)
-    # "<participant>.values" / "<participant>.normal_fluxes" -> relative change
-    # of that block alone on the final iteration. A global norm hides a small
-    # block behind a large one; these do not.
+    # "<participant>.<field>" -> the stop test's per-field change on the final
+    # iteration (see field_change). The stop statistic is their maximum.
     block_residuals: dict[str, float] = field(default_factory=dict)
-    # the same blocks' fixed-point residuals: raw output against the relaxed input
-    block_fixed_point: dict[str, float] = field(default_factory=dict)
-    # and each block's estimated distance to its fixed point, from its last two steps
-    block_distance: dict[str, float] = field(default_factory=dict)
-    # each block's last change against its own largest value, and its tiny entries' against
-    # theirs (see _scaled_change)
-    block_scale_change: dict[str, float] = field(default_factory=dict)
-    block_tiny_change: dict[str, float] = field(default_factory=dict)
+    # "<participant>" -> which columns were taken as which field, in words
+    field_declarations: dict[str, str] = field(default_factory=dict)
     # participant -> "responsive" | "unresponsive" | "imports never changed"
     #              | "no imports declared"
     responsiveness: dict[str, str] = field(default_factory=dict)
@@ -370,20 +364,9 @@ def _persist_participant_output(p: Participant, result, iteration: int) -> None:
 
 
 def _rel_change(new: np.ndarray, prev: np.ndarray) -> float:
-    """Relative change of one block, taken ENTRY BY ENTRY.
-
-    A block norm is itself a scale-masking device: an interface vector that
-    happens to hold a huge entry and a small one in the same flat array (mixed
-    quantities in one `values` list — very common) has its norm set entirely by
-    the huge entry, so the small entry can oscillate by 100% of itself with the
-    block residual reading 1e-12. Demonstrated: a two-entry export whose second
-    component's true fixed point was 100 converged at iteration 2 reporting 1.5,
-    with every check silent.
-
-    So: the reported number is the WORST entry-wise relative change, not the
-    norm ratio. Entries that are zero to within the block's own dynamic range
-    (below 1e-13 of the largest entry) are skipped — their relative change is
-    numerical noise, not information. Returns NaN if it cannot be formed.
+    """Relative change of one block, taken ENTRY BY ENTRY: the interface-sensitivity probe's measure
+    (probe_interface_sensitivity). The convergence test does not use it; see field_change.
+    Entries below 1e-13 of the block's largest are skipped. Returns NaN if it cannot be formed.
     """
     if new.shape != prev.shape or new.size == 0:
         return float("nan")
@@ -398,42 +381,8 @@ def _rel_change(new: np.ndarray, prev: np.ndarray) -> float:
     return float(np.max(np.abs(new[live] - prev[live]) / mag[live]))
 
 
-def _scaled_change(new: np.ndarray, prev: np.ndarray, own_below: float = 1e-6) -> tuple:
-    """(the largest change of a block's entries against the block's largest value, the largest
-    change of its TINY entries against their own values); NaN where it cannot be formed.
-
-    THE WORST ENTRY AGAINST ITSELF IS NOT THE BLOCK'S PRECISION. An entry of one field that
-    holds a small share of its block's largest value -- an interface end, a flux passing through
-    zero -- reads a large relative change for an absolute one at the iteration's tolerance, and a
-    finer mesh puts an entry nearer zero. Measured on a right steady ladder: 1.1e-6, 3.7e-6 and
-    1.74e-4 at levels 1-3 from an entry holding 0.9 % of its block's largest value, and the ladder
-    read NOT VERIFIED three rounds running. So each entry is measured against the block's largest
-    value -- except an entry more than six orders below it, which is taken as another quantity in
-    the same array (a flat list of mixed quantities, the case _rel_change's entry-by-entry measure
-    exists for) and measured against itself. Entries zero to within the block's own range (below
-    1e-13 of the largest) are skipped, as there."""
-    if new.shape != prev.shape or new.size == 0:
-        return float("nan"), float("nan")
-    scale = max(float(np.max(np.abs(new))), float(np.max(np.abs(prev))))
-    if scale <= 0:
-        return 0.0, 0.0
-    mag = np.maximum(np.abs(new), np.abs(prev))
-    d = np.abs(new - prev)
-    tiny = (mag < own_below * scale) & (mag > 1e-13 * scale)
-    on_scale = float(np.max(d[~tiny])) / scale if np.any(~tiny) else 0.0
-    own = float(np.max(d[tiny] / mag[tiny])) if np.any(tiny) else 0.0
-    return on_scale, own
-
-
 def _blocks(ifd: InterfaceData) -> dict[str, np.ndarray]:
-    """Split an export into the pieces that must each converge on their own.
-
-    Components matter, not just arrays: a TSI or FSI interface carries
-    temperature and displacement (or force and displacement) inside ONE `values`
-    array of shape (N, n_comp), on scales that differ by many orders of
-    magnitude. Lumping them into a single norm is exactly how the small one stops
-    being visible.
-    """
+    """An export split per array and column, for the interface-sensitivity probe."""
     b: dict[str, np.ndarray] = {}
     for label, arr in (("values", ifd.values),
                        ("normal_fluxes", ifd.normal_fluxes)):
@@ -446,6 +395,125 @@ def _blocks(ifd: InterfaceData) -> dict[str, np.ndarray]:
         else:
             b[label] = a.ravel()
     return b
+
+
+# ── THE CONVERGENCE MEASURE: one definition for the stop test, the noise floor and the coupling check ──
+# For each physical field f: change = ||g_new,f - g_prev,f||_2 / ||g_new,f||_2, a discrete l2 over the
+# interface points with equal weights (the per-field relative measure preCICE uses; Degroote et al.
+# 2009). PROVISIONAL: on an interface with uneven point spacing it depends on that spacing; a norm
+# weighted by the interface cells would not. The statistic is the maximum over fields; the coupling
+# stops when it is strictly below tol.
+REL_FLOOR = 1e-14          # a change at most this fraction of the field counts as zero
+
+
+def _field_columns(names: list, label: str) -> dict[str, list[int]]:
+    """Declared column names -> fields: ux, uy[, uz] (two or more sharing a base) form the vector field
+    u; any other name is a field of its own; the coordinate names x, y, z are not fields."""
+    names = [str(n) for n in names]
+    vec: dict[str, list[int]] = {}
+    for i, n in enumerate(names):
+        if n not in ("x", "y", "z") and len(n) > 1 and n[-1] in "xyz":
+            vec.setdefault(n[:-1], []).append(i)
+    out: dict[str, list[int]] = {}
+    for i, n in enumerate(names):
+        if n in ("x", "y", "z"):
+            continue
+        if len(n) > 1 and n[-1] in "xyz" and len(vec.get(n[:-1], [])) >= 2:
+            out.setdefault(f"{label}:{n[:-1]}", []).append(i)
+        else:
+            out[f"{label}:{n}"] = [i]
+    return out
+
+
+def field_arrays(ifd: InterfaceData) -> dict[str, np.ndarray]:
+    """The physical fields of one export, as (points, components) arrays.
+
+    The export's `components` / `flux_components` declare them (see _field_columns). Without
+    names, all columns of `values` are one field, and all columns of `normal_fluxes` another:
+    a declaration the result states, never a guess from the column count."""
+    out: dict[str, np.ndarray] = {}
+    for label, arr, names in (("values", ifd.values, getattr(ifd, "components", None)),
+                              ("normal_fluxes", ifd.normal_fluxes, getattr(ifd, "flux_components", None))):
+        if arr is None:
+            continue
+        a = np.asarray(arr, float)
+        a = a.reshape(a.shape[0], -1) if a.ndim >= 1 and a.size else a.reshape(-1, 1)
+        if names:
+            for key, cols in _field_columns(list(names), label).items():
+                out[key] = a[:, cols]
+        else:
+            out[label] = a
+    return out
+
+
+def field_declaration(ifd: InterfaceData) -> str:
+    """What field_arrays took as fields, in words, for the result."""
+    parts = []
+    for label, arr, names in (("values", ifd.values, getattr(ifd, "components", None)),
+                              ("normal_fluxes", ifd.normal_fluxes, getattr(ifd, "flux_components", None))):
+        if arr is None:
+            continue
+        if names:
+            groups = _field_columns(list(names), label)
+            parts.append(f"{label}: " + ", ".join(
+                f"{k.split(':', 1)[1]} ({', '.join(str(names[i]) for i in cols)})" for k, cols in groups.items()))
+        else:
+            parts.append(f"{label}: no column names declared, so all its columns are one field "
+                         f"('{ifd.field_name}')")
+    return "; ".join(parts)
+
+
+def _l2(a: np.ndarray) -> float:
+    return math.sqrt(float(np.dot(a, a)))
+
+
+def field_change(new, prev) -> float:
+    """||new - prev|| / ||new|| for one field: 0.0 at or below REL_FLOOR, NaN when undefined (a new
+    value that is exactly zero, or shapes that differ), inf when either holds a non-finite number."""
+    a = np.asarray(new, float).ravel()
+    b = np.asarray(prev, float).ravel()
+    if a.shape != b.shape or a.size == 0:
+        return float("nan")
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return float("inf")
+    m = max(float(np.max(np.abs(a))), float(np.max(np.abs(b))))
+    if m == 0.0:
+        return float("nan")
+    s = 2.0 ** math.floor(math.log2(m))          # both iterates on one power-of-two scale: no overflow
+    a, b = a / s, b / s
+    n = _l2(a)
+    if n == 0.0:
+        return float("nan")
+    d = _l2(a - b)
+    return 0.0 if d <= REL_FLOOR * n else d / n
+
+
+def field_changes(new: InterfaceData, prev: InterfaceData) -> dict[str, float]:
+    """field_change for every field of one export against the same participant's previous one."""
+    pf = field_arrays(prev)
+    return {k: (field_change(v, pf[k]) if k in pf else float("nan")) for k, v in field_arrays(new).items()}
+
+
+def statistic(changes: dict) -> float:
+    """The largest per-field change; NaN when any field is undefined (it cannot pass), inf when any
+    is non-finite."""
+    vals = [float(v) for v in changes.values()]
+    if not vals or any(v != v for v in vals):
+        return float("nan")
+    return max(vals)
+
+
+def _carrier(template: InterfaceData, vec: np.ndarray) -> InterfaceData:
+    """`vec` (a stacked export vector) laid out like `template`: same arrays, shapes and names."""
+    vshape = np.asarray(template.values).shape
+    nv = int(np.prod(vshape)) if vshape else 1
+    fl = template.normal_fluxes
+    return InterfaceData(coordinates=template.coordinates, field_name=template.field_name,
+                         values=np.asarray(vec[:nv], float).reshape(vshape),
+                         normal_fluxes=(np.asarray(vec[nv:], float).reshape(np.asarray(fl).shape)
+                                        if fl is not None else None),
+                         components=getattr(template, "components", None),
+                         flux_components=getattr(template, "flux_components", None))
 
 
 def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optional[str]]:
@@ -490,19 +558,14 @@ def _invoke(p: Participant, imp: dict) -> tuple[Optional[InterfaceData], Optiona
         return None, f"participant {p.name} bad exports.json: {e}"
 
 
-def _residual_of(new: dict[str, np.ndarray],
-                 prev: dict[str, np.ndarray]) -> float:
-    """The driver's own residual expression, on two sets of export vectors.
-
-    Kept as one function so the convergence test and the noise-floor
-    measurement cannot drift apart.
-    """
-    num = 0.0
-    ref = 0.0
-    for n, v in new.items():
-        num += float(np.sum((v - prev[n]) ** 2))
-        ref += float(np.sum(v ** 2)) + 1e-30
-    return float(np.sqrt(num / ref))
+def _residual_of(new: dict[str, InterfaceData], prev: dict[str, InterfaceData]) -> float:
+    """The stop test's statistic between two sets of exports, so the convergence test and the
+    noise-floor measurement cannot drift apart."""
+    changes: dict[str, float] = {}
+    for n, ifd in new.items():
+        for k, v in field_changes(ifd, prev[n]).items():
+            changes[f"{n}.{k}"] = v
+    return statistic(changes)
 
 
 def _repeat_probe(participants: list[Participant], last_imports: dict[str, str],
@@ -554,8 +617,8 @@ def _measure_noise_floor(participants: list[Participant], replicates: int,
     """Run every participant `replicates` times on the SAME imports and report
     the residual the driver would still see between independent answers.
 
-    Returns (floor, error, notes). `floor` is None only when the measurement
-    could not be made at all.
+    Returns (floor, error, notes). `floor` is None when the measurement could not
+    be made, or when no replicate comparison was defined (then there is no floor).
 
     WHY REPLICATES AND NOT A STANDARD DEVIATION. The quantity that has to be
     beaten is the residual, and the residual is a normalised difference of two
@@ -580,15 +643,15 @@ def _measure_noise_floor(participants: list[Participant], replicates: int,
         final word.
     """
     notes: list[str] = []
-    draws: list[dict[str, np.ndarray]] = []
+    draws: list[dict[str, InterfaceData]] = []
     for k in range(replicates):
-        one: dict[str, np.ndarray] = {}
+        one: dict[str, InterfaceData] = {}
         for p in participants:
             ifd, err = _invoke(p, imports_for.get(p.name, {}))
             if err:
                 return None, f"noise-floor measurement ({where}): {err}", notes
-            one[p.name] = _stack(ifd)
-        if draws and any(one[n].size != draws[0][n].size for n in one):
+            one[p.name] = ifd
+        if draws and any(_stack(one[n]).size != _stack(draws[0][n]).size for n in one):
             return None, (f"noise-floor measurement ({where}): a participant "
                           f"changed its export size between replicate runs, so "
                           f"no floor can be defined for it"), notes
@@ -596,27 +659,31 @@ def _measure_noise_floor(participants: list[Participant], replicates: int,
     if against is not None:
         # THE FAITHFUL MEASUREMENT, available only once the loop has a previous
         # relaxed vector to compare against: repeat the iteration N times from
-        # the same state and take the residual it ACTUALLY REPORTS each time.
-        # Nothing is modelled — this is the same expression on the same two
-        # operands the loop uses.
-        vals = [_residual_of(d, against) for d in draws]
+        # the same state and take the statistic it ACTUALLY REPORTS each time.
+        vals = [_residual_of(d, {n: _carrier(d[n], against[n]) for n in d}) for d in draws]
         n_ind = len(vals)
     else:
         # PRE-LOOP there is no previous relaxed vector, so the only thing
-        # available is the scatter BETWEEN independent answers. That is a LOWER
-        # BOUND on the loop's floor and not the same number: in the loop the
-        # comparison is against a lagged relaxed average which carries its own
-        # accumulated noise, and noise that has propagated through a partner
-        # over earlier iterations is not in this at all. It is used to avoid a
-        # pointless long run; the verdict is re-judged against the faithful
-        # measurement if the loop ends un-converged.
+        # available is the scatter BETWEEN independent answers: a LOWER BOUND on
+        # the loop's floor, used to avoid a pointless long run; the verdict is
+        # re-judged against the faithful measurement if the loop ends un-converged.
         pairs = [(i, j) for i in range(replicates)
                  for j in range(i + 1, replicates)]
         vals = [_residual_of(draws[i], draws[j]) for i, j in pairs]
         n_ind = len(pairs)
-    floor = float(sum(vals) / len(vals))
-    notes.append(f"noise floor {floor:.3e} from {replicates} replicate runs "
-                 f"per participant ({n_ind} samples, {where})")
+    if any(v == float("inf") for v in vals):
+        return None, (f"noise-floor measurement ({where}): a replicate run exported a non-finite "
+                      f"number, so no floor can be defined"), notes
+    defined = [v for v in vals if v == v]
+    if not defined:
+        notes.append(f"no noise floor from {replicates} replicate runs ({where}): every comparison "
+                     f"was undefined (a field whose new value is exactly zero), so the loop is "
+                     f"judged against tol alone")
+        return None, None, notes
+    floor = float(max(defined))
+    notes.append(f"noise floor {floor:.3e}: the largest of {len(defined)} defined replicate "
+                 f"comparisons ({n_ind} in all) from {replicates} replicate runs per participant "
+                 f"({where})")
     # THE FLOOR IS ITSELF AN ESTIMATE, and at three replicates it is a bad one.
     # Measured here: the same coupling gave 1.2e-03 from three replicates and
     # 9.6e-03 from five — a factor of eight, from estimator scatter alone, on a
@@ -669,7 +736,7 @@ class _Anderson:
 
 
 def run_coupling(participants: list[Participant], max_iter: int = 50,
-                 tol: float = 1e-6, accelerator: str = "auto",
+                 tol: Optional[float] = None, accelerator: str = "auto",
                  theta0: float = 0.5, probe: bool = True,
                  noise_floor: Optional[float] = None,
                  noise_replicates: int = 0,
@@ -677,8 +744,9 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     """Run a general fixed-point partitioned coupling. Physics-agnostic.
 
     Each iteration: every participant consumes its partners' latest exports (relaxed),
-    runs, and produces new exports. Converges when the relaxed export-vector stops
-    changing. Returns success=False if not converged within max_iter.
+    runs, and produces new exports. Converges when the largest per-field relative
+    change (see field_change) is strictly below `tol`, which has no default.
+    Returns success=False if not converged within max_iter.
 
     probe: after the iteration settles, spend ONE extra solve per participant
         measuring whether its answer actually depends on its imports (see
@@ -710,6 +778,12 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
         That second measurement is paid only on failure.
     """
     names = [p.name for p in participants]
+    if tol is None or not (isinstance(tol, (int, float)) and math.isfinite(tol) and tol > 0):
+        return CouplingResult(
+            False, 0, float("nan"), {}, [],
+            error=(f"tol is required: the largest per-field relative change at which the coupling "
+                   f"counts as settled, a positive number (got {tol!r}). There is no default, "
+                   f"because the right value depends on the accuracy the result needs."))
     # ── coupling graph: an unknown partner name is a SETUP error, not a no-op ──
     # `imports_from` used to be filtered with `if src in exports`, so a typo
     # ("Bee" for "B") silently deleted that edge and the run became a one-way
@@ -753,7 +827,6 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     exports: dict[str, InterfaceData] = {}      # latest relaxed exports per participant
     res_prev: dict[str, np.ndarray] = {}        # previous Aitken residual r_{k-1}
     relaxed_prev: dict[str, np.ndarray] = {}
-    prev_blocks: dict[str, dict[str, np.ndarray]] = {}
     theta_global: float = theta0
     anderson = _Anderson(m=5, beta=theta0)
     # "auto": Aitken for a single-field exchange (measured on every scalar heat coupling that
@@ -764,11 +837,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
     warnings: list[str] = []
     returncodes: dict[str, int] = {}
     block_residuals: dict[str, float] = {}
-    block_fixed_point: dict[str, float] = {}
-    block_distance: dict[str, float] = {}          # estimated distance to the fixed point
-    block_scale_change: dict[str, float] = {}      # the last change on the block's own scale
-    block_tiny_change: dict[str, float] = {}       # ... and of its tiny entries on their own
-    step_hist: dict[str, list] = {}               # each block's last four steps
+    field_decl: dict[str, str] = {}
     # participant -> list of (imports digest, exports digest) per iteration
     trace: dict[str, list[tuple[str, str]]] = {p.name: [] for p in participants}
     last_imports: dict[str, str] = {}
@@ -801,10 +870,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
         kw.setdefault("warnings", warnings)
         kw.setdefault("returncodes", returncodes)
         kw.setdefault("block_residuals", block_residuals)
-        kw.setdefault("block_fixed_point", block_fixed_point)
-        kw.setdefault("block_distance", block_distance)
-        kw.setdefault("block_scale_change", block_scale_change)
-        kw.setdefault("block_tiny_change", block_tiny_change)
+        kw.setdefault("field_declarations", field_decl)
         kw.setdefault("responsiveness", _responsiveness(trace, participants))
         kw.setdefault("responsiveness_detail", _responsiveness_detail(trace, participants))
         kw.setdefault("graph", graph)
@@ -839,7 +905,8 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
             return _finish(converged=False, iterations=0, residual=float("nan"),
                            exports={}, history=history, error=err)
         notes.extend(got)
-        floor = measured if floor is None else max(floor, measured)
+        if measured is not None:
+            floor = measured if floor is None else max(floor, measured)
         if measured == 0.0:
             notes.append(
                 f"noise floor measured as EXACTLY 0 from {noise_replicates} "
@@ -1033,7 +1100,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
             for n, ifd in new_exports.items():
                 exports[n] = ifd
                 relaxed_prev[n] = _stack(ifd)
-                prev_blocks[n] = _blocks(ifd)
+                field_decl[n] = field_declaration(ifd)
             history.append(float("nan"))
             continue
 
@@ -1057,8 +1124,7 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                     criterion_notes=criterion_notes)
 
         raw_last = {n: _stack(e).copy() for n, e in new_exports.items()}   # before relaxation
-        total_res = 0.0
-        total_ref = 0.0
+        block_residuals.clear()
         # ONE theta for the whole interface state (see _aitken): Aitken is applied
         # to the composite fixed-point map, not to each participant separately.
         if accelerator == "auto":
@@ -1091,66 +1157,10 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
                 offset += raw_new.size
             else:
                 relaxed = _relax(prev, raw_new, th)
-            total_res += float(np.sum((raw_new - prev) ** 2))
-            total_ref += float(np.sum(raw_new ** 2)) + 1e-30
-            # per-block relative change, so a large settled block cannot mask a
-            # small moving one in the single global norm below; and beside it the
-            # block's OWN FIXED-POINT RESIDUAL (its raw output against the relaxed input
-            # that produced it). The change alone is, under an accelerator, the size of
-            # the last step, not the distance left: measured, a block that moved 5.0e-4
-            # of itself on its last Aitken step had landed within 4.8e-7 of an
-            # independently converged run, and a right ladder read NOT VERIFIED on it.
-            nb = _blocks(new_exports[n])
-            prelax = None
-            if prev is not None and np.asarray(prev).size == raw_new.size:
-                _vshape = np.asarray(new_exports[n].values).shape
-                _nv = int(np.prod(_vshape)) if _vshape else 1
-                _fl = new_exports[n].normal_fluxes
-                _carrier = InterfaceData(
-                    coordinates=new_exports[n].coordinates,
-                    field_name=new_exports[n].field_name,
-                    values=np.asarray(prev[:_nv], float).reshape(_vshape),
-                    normal_fluxes=(np.asarray(prev[_nv:], float).reshape(np.asarray(_fl).shape)
-                                   if _fl is not None else None))
-                prelax = _blocks(_carrier)
-            for bname, arr in nb.items():
-                pb = prev_blocks.get(n, {}).get(bname)
-                block_residuals[f"{n}.{bname}"] = (
-                    _rel_change(arr, pb) if pb is not None else float("nan"))
-                (block_scale_change[f"{n}.{bname}"],
-                 block_tiny_change[f"{n}.{bname}"]) = (
-                    _scaled_change(arr, pb) if pb is not None else (float("nan"), float("nan")))
-                fp = (prelax or {}).get(bname)
-                block_fixed_point[f"{n}.{bname}"] = (
-                    _rel_change(arr, fp) if fp is not None else float("nan"))
-                # THE DISTANCE LEFT, FROM HOW FAST THE STEPS SHRINK. Without relaxation
-                # the fixed-point residual IS the last step, so it could not clear a
-                # block that had landed (measured: named 6e-8 .. 1.4e-7 from its own
-                # fixed point, a 1e-5 limit, seven false caveats and a right ladder
-                # denied). The ratio is taken over TWO steps, because every side reads
-                # the partner's previous output: a two-sided exchange alternates, and
-                # the step can hold still for one iteration and fall 4x on the next
-                # (measured on a linear pair: one-step ratios 1, 0.25, 1, 0.25, ...,
-                # where the last-step estimate is 5x short). With steps s1..s4 and
-                # q = s4/s2 < 1, the fixed point lies within q (s3 + s4) / (1 - q) --
-                # exact for a steady two-step contraction, and s4 r / (1 - r) again
-                # when every step shrinks by the same r.
-                _key = f"{n}.{bname}"
-                _hs = step_hist.setdefault(_key, [])
-                if block_residuals[_key] == block_residuals[_key]:
-                    _hs.append(block_residuals[_key])
-                    del _hs[:-4]
-                else:
-                    _hs.clear()
-                # THE LATEST TWO-STEP RATIO ALONE: max(s4/s2, s3/s1) let an earlier slow
-                # pair override the final accelerated jump and named a block 5.4e-7 from its
-                # fixed point (measured). s4/s2 alone is still exact for a steady two-step
-                # contraction, in both phases of it.
-                if len(_hs) == 4 and _hs[1] > 0:
-                    _q = _hs[3] / _hs[1]
-                    block_distance[_key] = (_q * (_hs[2] + _hs[3]) / (1.0 - _q)
-                                            if _q < 0.95 else float("inf"))
-            prev_blocks[n] = nb
+            # each field's change: this iteration's raw output against the relaxed input that
+            # produced it (the fixed-point residual), one field at a time
+            for k, v in field_changes(new_exports[n], _carrier(new_exports[n], prev)).items():
+                block_residuals[f"{n}.{k}"] = v
             # write relaxed values back into the InterfaceData carrier
             ifd = new_exports[n]
             ncomp = ifd.values.size
@@ -1160,11 +1170,11 @@ def run_coupling(participants: list[Participant], max_iter: int = 50,
             exports[n] = ifd
             relaxed_prev[n] = relaxed
 
-        res = float(np.sqrt(total_res / total_ref))
+        res = statistic(block_residuals)
         history.append(res)
-        # `_stat`/`tol_eff` are the plain last-residual-against-tol test unless a
+        # `_stat`/`tol_eff` are the plain statistic-against-tol test unless a
         # noise floor is in play: with floor=None, block is 1 and tol_eff is tol,
-        # so this is `res < tol` exactly.
+        # so this is `res < tol` exactly (an undefined field, NaN, never passes).
         if _stat(history, block) < tol_eff:
             at_floor = bool(floor and tol_eff > tol)
             if nonfinite_hits > _MAX_NONFINITE_WARNINGS:
