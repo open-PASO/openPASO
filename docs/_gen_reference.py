@@ -53,6 +53,9 @@ TOOL_GROUPS = {
         "transfer_field": "Moves a result from one solver's output into another solver's input.",
         "write_participant_contract": "Writes the fill-in participant script for one solver of a coupled problem into your folder: everything around the solve, which you then write yourself.",
     },
+    "Data from other frameworks": {
+        "material_handoff": "Checks material data from another framework, such as elastic constants from quantum-mechanical calculations, and passes it to the continuum model only when every calculation it rests on is complete.",
+    },
     "Set up and develop": {
         "setup_backend": "Explains how to install a missing solver, with the route that works on this system.",
         "rediscover_backends": "Looks for solvers again, for example after you installed one.",
