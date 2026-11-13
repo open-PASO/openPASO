@@ -168,6 +168,13 @@ def test_a_field_exported_as_exactly_zero_never_counts_as_settled(tmp_path):
     assert not r.converged and math.isnan(r.block_residuals["A.values:q"])
 
 
+def test_a_mesh_that_did_not_get_finer_is_still_named(tmp_path):
+    from tools.result_audit import ndof_ladder_findings
+    for k in (1, 2, 3):
+        (tmp_path / f"run_level{k}.log").write_text("NDOF = 4624\n")
+    assert ndof_ladder_findings(tmp_path)
+
+
 def test_tol_has_no_default(tmp_path):
     a = _side(tmp_path, "A", "export([[1.0]] * 2)", [])
     r = run_coupling([a], max_iter=5)

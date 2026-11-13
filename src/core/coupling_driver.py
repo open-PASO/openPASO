@@ -400,9 +400,9 @@ def _blocks(ifd: InterfaceData) -> dict[str, np.ndarray]:
 # ── THE CONVERGENCE MEASURE: one definition for the stop test, the noise floor and the coupling check ──
 # For each physical field f: change = ||g_new,f - g_prev,f||_2 / ||g_new,f||_2, a discrete l2 over the
 # interface points with equal weights (the per-field relative measure preCICE uses; Degroote et al.
-# 2009). PROVISIONAL: on an interface with uneven point spacing it depends on that spacing; a norm
-# weighted by the interface cells would not. The statistic is the maximum over fields; the coupling
-# stops when it is strictly below tol.
+# 2009). PROVISIONAL: on an interface with uneven point spacing it depends on that spacing; a later
+# release replaces it with the exact L2 norm over the declared interface cells. The statistic is the
+# maximum over fields; the coupling stops when it is strictly below tol.
 REL_FLOOR = 1e-14          # a change at most this fraction of the field counts as zero
 
 
